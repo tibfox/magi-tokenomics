@@ -47,6 +47,7 @@ GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 75 reporter tests, no 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
 
 ```bash
+# from a go-vsc-node checkout, after copying in testdata/devnet/*.go
 go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + reporter, ~23 min
 ```
 
@@ -208,9 +209,10 @@ rationale and what must be built first.
 
 ## Devnet tests
 
-The docker multi-node tests live in the go-vsc-node clone at
-`magi-tokenomics-spec/reference/vsc-eco/go-vsc-node/tests/devnet/` (they import the
-devnet harness, so they cannot live here):
+The docker multi-node tests are in [`testdata/devnet/`](testdata/devnet/) — see that
+directory's README for how to run them. They are `package devnet` (they use
+go-vsc-node's devnet harness internals), so they must be copied into a go-vsc-node
+checkout to run; `testdata/` keeps them versioned here without breaking the build.
 
 | test | covers |
 |---|---|
@@ -219,9 +221,10 @@ devnet harness, so they cannot live here):
 | `magi_reporter_devnet_test.go` | the real reporter binary driving C3 |
 | `magi_full_devnet_test.go` | **all 7 contracts + reporter in one run** |
 
-They need `reporter/bin/reporter` built first. Each run builds a ~766MB docker image
-that is **not** cleaned up automatically — remove `devnet-test-*` images between runs
-or the disk fills.
+They need `reporter/bin/reporter` built first, and take `MAGI_FRAMEWORK_DIR` /
+`MAGI_TOKEN_WASM` to locate the artifacts. Each run builds a ~766MB docker image that
+is **not** cleaned up automatically — remove `devnet-test-*` images between runs or
+the disk fills.
 
 ## Status
 
