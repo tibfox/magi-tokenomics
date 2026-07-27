@@ -1,0 +1,8 @@
+# build output of the reporter CLI (11MB, rebuild with `go build ./reporter/cmd/reporter`)
+reporter/bin/
+
+# badger state written by the in-process contract tests
+itest/data/
+
+# scratch
+*.log

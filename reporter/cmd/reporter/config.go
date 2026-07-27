@@ -1,0 +1,260 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"magi_token/reporter/hivesrc"
+	"magi_token/reporter/sharecore"
+)
+
+// Config is the reporter's whole configuration.
+//
+// Deliberately absent: any private key. The active WIF is read from the env var
+// named by Submit.WifEnv, so a config file can be committed, backed up and shared
+// between the machines of an Attest quorum without leaking signing authority.
+type Config struct {
+	Hive struct {
+		// API endpoints. The first is used for reads; all are given to the
+		// broadcaster so a single node being down does not stall an epoch.
+		API []string `json:"api"`
+	} `json:"hive"`
+
+	VSC struct {
+		API   string `json:"api"`    // node GraphQL endpoint, for contract state reads
+		NetID string `json:"net_id"` // "vsc-mainnet" / "vsc-testnet" — must match the chain
+	} `json:"vsc"`
+
+	Contracts struct {
+		Distributor string `json:"distributor"` // C3 (content) or C5 (LP)
+		Funder      string `json:"funder"`      // C2; empty = a separate keeper pokes it
+		Stake       string `json:"stake"`       // C1; required only for token_stake weighting
+	} `json:"contracts"`
+
+	Epoch struct {
+		// Genesis and Len MUST equal the distributor's cfg_genesis / cfg_epochLen.
+		// `reporter epoch` verifies this against on-chain state before anything is
+		// submitted, because a mismatch would report on the wrong block range and
+		// then finalize it — unrecoverable.
+		Genesis uint64 `json:"genesis"`
+		Len     uint64 `json:"len"`
+	} `json:"epoch"`
+
+	Source struct {
+		Tag   string `json:"tag"`
+		Limit int    `json:"limit"`
+		// Attribution: "cashout" (default) scores a post in the epoch its Hive
+		// payout falls in, so every vote is counted exactly once; "created" scores
+		// it in the epoch it was posted in, which is prompter but loses every vote
+		// cast after the snapshot. See hivesrc.Attribution.
+		Attribution string   `json:"attribution"`
+		Weight      string   `json:"weight"` // hive_rshares | token_stake
+		Exclude     []string `json:"exclude"`
+	} `json:"source"`
+
+	Shares struct {
+		AuthorRewardBps int      `json:"author_reward_bps"`
+		AuthorCurve     string   `json:"author_curve"`   // "num/den", e.g. "1/1"
+		CurationCurve   string   `json:"curation_curve"` // "1/2" = sqrt = early voters win
+		Muted           []string `json:"muted"`
+	} `json:"shares"`
+
+	Page struct {
+		MaxEntries int `json:"max_entries"`
+		MaxBytes   int `json:"max_bytes"`
+	} `json:"page"`
+
+	Submit struct {
+		Account      string `json:"account"` // reporter Hive account (with or without hive:)
+		WifEnv       string `json:"wif_env"`
+		RcLimit      int    `json:"rc_limit"`
+		ProgressFile string `json:"progress_file"`
+		Keeper       bool   `json:"keeper"`       // also poke C2.distributeEpoch
+		PullFunding  bool   `json:"pull_funding"` // also call C3.pullFunding
+		Finalize     bool   `json:"finalize"`     // also call C3.finalizeEpoch
+	} `json:"submit"`
+}
+
+func LoadConfig(path string) (*Config, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var c Config
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields() // a typo'd key must not silently take a default
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	c.applyDefaults()
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &c, nil
+}
+
+func (c *Config) applyDefaults() {
+	if len(c.Hive.API) == 0 {
+		c.Hive.API = []string{"https://api.hive.blog"}
+	}
+	if c.Source.Weight == "" {
+		c.Source.Weight = string(hivesrc.WeightHiveRshares)
+	}
+	if c.Source.Attribution == "" {
+		c.Source.Attribution = string(hivesrc.AttributeCashout)
+	}
+	if c.Source.Limit == 0 {
+		c.Source.Limit = 1000
+	}
+	if c.Shares.AuthorCurve == "" {
+		c.Shares.AuthorCurve = "1/1"
+	}
+	if c.Shares.CurationCurve == "" {
+		c.Shares.CurationCurve = "1/1"
+	}
+	// Page limits default to what the contract and RC budget actually allow:
+	// submitShares payloads are capped at 4096 bytes by the auth module and each
+	// entry costs roughly 685 RC to apply.
+	if c.Page.MaxBytes == 0 {
+		c.Page.MaxBytes = 3800
+	}
+	if c.Page.MaxEntries == 0 {
+		c.Page.MaxEntries = 60
+	}
+	if c.Submit.RcLimit == 0 {
+		c.Submit.RcLimit = 60000
+	}
+	if c.Submit.WifEnv == "" {
+		c.Submit.WifEnv = "REPORTER_ACTIVE_WIF"
+	}
+	if c.Submit.ProgressFile == "" {
+		c.Submit.ProgressFile = "reporter-progress.json"
+	}
+}
+
+func (c *Config) Validate() error {
+	if c.VSC.API == "" {
+		return fmt.Errorf("vsc.api is required")
+	}
+	if c.VSC.NetID == "" {
+		return fmt.Errorf("vsc.net_id is required (vsc-mainnet or vsc-testnet)")
+	}
+	if c.Contracts.Distributor == "" {
+		return fmt.Errorf("contracts.distributor is required")
+	}
+	if c.Epoch.Len == 0 {
+		return fmt.Errorf("epoch.len is required and must be > 0")
+	}
+	if c.Source.Tag == "" {
+		return fmt.Errorf("source.tag is required")
+	}
+	switch hivesrc.WeightMode(c.Source.Weight) {
+	case hivesrc.WeightHiveRshares:
+	case hivesrc.WeightTokenStake:
+		if c.Contracts.Stake == "" {
+			return fmt.Errorf("source.weight=token_stake requires contracts.stake (the C1 contract id)")
+		}
+	default:
+		return fmt.Errorf("source.weight must be %q or %q, got %q",
+			hivesrc.WeightHiveRshares, hivesrc.WeightTokenStake, c.Source.Weight)
+	}
+	switch hivesrc.Attribution(c.Source.Attribution) {
+	case hivesrc.AttributeCashout, hivesrc.AttributeCreated:
+	default:
+		return fmt.Errorf("source.attribution must be %q or %q, got %q",
+			hivesrc.AttributeCashout, hivesrc.AttributeCreated, c.Source.Attribution)
+	}
+	if c.Shares.AuthorRewardBps < 0 || c.Shares.AuthorRewardBps > 10000 {
+		return fmt.Errorf("shares.author_reward_bps must be 0..10000, got %d", c.Shares.AuthorRewardBps)
+	}
+	if _, _, err := parseCurve(c.Shares.AuthorCurve); err != nil {
+		return fmt.Errorf("shares.author_curve: %w", err)
+	}
+	if _, _, err := parseCurve(c.Shares.CurationCurve); err != nil {
+		return fmt.Errorf("shares.curation_curve: %w", err)
+	}
+	if c.Page.MaxBytes > 4096 {
+		return fmt.Errorf("page.max_bytes must be <= 4096 (the auth module's payload cap), got %d", c.Page.MaxBytes)
+	}
+	if c.Submit.RcLimit <= 0 {
+		return fmt.Errorf("submit.rc_limit must be > 0")
+	}
+	if c.Submit.Keeper && c.Contracts.Funder == "" {
+		return fmt.Errorf("submit.keeper requires contracts.funder (the C2 contract id)")
+	}
+	return nil
+}
+
+// parseCurve reads a "num/den" rational exponent. A bare "2" means "2/1".
+func parseCurve(s string) (int, int, error) {
+	s = strings.TrimSpace(s)
+	num, den := s, "1"
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		num, den = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bad numerator in %q", s)
+	}
+	d, err := strconv.Atoi(den)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bad denominator in %q", s)
+	}
+	if n <= 0 || d <= 0 {
+		return 0, 0, fmt.Errorf("curve %q: numerator and denominator must both be > 0", s)
+	}
+	return n, d, nil
+}
+
+// ShareConfig converts the file's curve strings into sharecore's integer form.
+func (c *Config) ShareConfig() sharecore.Config {
+	an, ad, _ := parseCurve(c.Shares.AuthorCurve)
+	cn, cd, _ := parseCurve(c.Shares.CurationCurve)
+	return sharecore.Config{
+		AuthorRewardBps:  c.Shares.AuthorRewardBps,
+		AuthorCurveNum:   an,
+		AuthorCurveDen:   ad,
+		CurationCurveNum: cn,
+		CurationCurveDen: cd,
+		Muted:            c.Shares.Muted,
+	}
+}
+
+// ExampleConfig is what `reporter init-config` writes.
+const ExampleConfig = `{
+  "hive":      { "api": ["https://api.hive.blog"] },
+  "vsc":       { "api": "https://api.vsc.eco/api/v1/graphql", "net_id": "vsc-mainnet" },
+  "contracts": {
+    "distributor": "vsc1...C3",
+    "funder":      "vsc1...C2",
+    "stake":       ""
+  },
+  "epoch":  { "genesis": 0, "len": 28800 },
+  "source": {
+    "tag":         "yourtribe",
+    "limit":       1000,
+    "attribution": "cashout",
+    "weight":      "hive_rshares",
+    "exclude":     []
+  },
+  "shares": {
+    "author_reward_bps": 5000,
+    "author_curve":      "1/1",
+    "curation_curve":    "1/2",
+    "muted":             []
+  },
+  "page":   { "max_entries": 60, "max_bytes": 3800 },
+  "submit": {
+    "account":       "hive:yourreporter",
+    "wif_env":       "REPORTER_ACTIVE_WIF",
+    "rc_limit":      60000,
+    "progress_file": "reporter-progress.json",
+    "keeper":        true,
+    "pull_funding":  true,
+    "finalize":      true
+  }
+}
+`

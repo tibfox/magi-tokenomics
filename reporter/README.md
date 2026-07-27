@@ -1,0 +1,240 @@
+# reporter — off-chain share reporter
+
+The contracts in this repo cannot read Hive. `C3` (content rewards) and `C5` (LP
+rewards) only know how to accept a list of `account:shares` pairs and pay claims
+against it. This service is the piece that watches Hive, computes those shares, and
+pushes them on chain.
+
+There is no oracle: the reporter is a plain service that a tenant runs, holding an
+account that the distributor's `init` named as its reporter authority.
+
+```
+reporter epoch    # where are we? verifies config against on-chain state
+reporter compute  # what would be reported? prints the canonical shares
+reporter plan     # what would be sent? prints the exact custom_json bodies
+reporter run      # send it (DRY-RUN unless -broadcast)
+```
+
+## Quick start
+
+```sh
+go build -o reporter ./reporter/cmd/reporter
+./reporter init-config > reporter.json     # then edit contract ids, tag, curves
+./reporter epoch   -config reporter.json   # sanity: config vs chain
+./reporter compute -config reporter.json   # see the shares
+./reporter run     -config reporter.json   # dry run, nothing signed
+export REPORTER_ACTIVE_WIF=5J...           # the reporter account's ACTIVE key
+./reporter run     -config reporter.json -broadcast
+```
+
+## Packages
+
+| package     | what it does                                                        |
+|-------------|---------------------------------------------------------------------|
+| `sharecore` | deterministic share math. Integer-only, no I/O. The important part.  |
+| `hivesrc`   | reads Hive: epoch windows, posts, votes → `sharecore` input          |
+| `vscapi`    | reads VSC contract state (incl. historical C1 stake)                 |
+| `submit`    | builds the ordered call plan + durable progress                      |
+| `broadcast` | renders and signs `vsc.call` custom_json                             |
+
+## Why the math is integer-only
+
+`sharecore` uses `math/big` throughout and never `float64`. Two reasons:
+
+1. **The challenge window.** `C3.finalizeEpoch` opens a window in which a guardian
+   can cancel a bad report. That is only meaningful if a third party can recompute
+   the same numbers from the same input.
+2. **Attest mode.** The `auth` module's Attest mode requires N reporter accounts to
+   push **byte-identical** payloads before a page applies. float64 rounding varies
+   with expression order, so a single float would break the quorum.
+
+Curve exponents are therefore rationals evaluated with an integer nth-root
+(`PowRational` → `IntNthRoot`), not `math.Pow`.
+
+### Curation curve direction
+
+`curation_curve` is `"num/den"` and the direction is a deliberate policy choice
+with inverted incentives:
+
+| setting  | shape   | effect                                                 |
+|----------|---------|--------------------------------------------------------|
+| `"1/2"`  | concave | **early** voters earn more (classic Steem/Hive curation) |
+| `"1/1"`  | linear  | order-neutral                                          |
+| `"2/1"`  | convex  | **late** voters earn more (pile-on)                    |
+
+## The four on-chain steps
+
+An epoch pays out only if all four happen, in this order:
+
+1. `C2.distributeEpoch` — keeper poke; mints the epoch's emission and records
+   bucket `owed`. Permissionless and idempotent. Set `submit.keeper` to have the
+   reporter do it, or leave it to a separate keeper.
+2. `C3.pullFunding` — moves this epoch's slice from C2 into C3, recording
+   `funded[epoch]`.
+3. `C3.submitShares` × N pages — the report.
+4. `C3.finalizeEpoch` — freezes the epoch and opens the challenge window.
+
+The order is enforced by the contracts, not just convention: `finalizeEpoch`
+aborts unless `funded > 0` **and** `totalShares > 0`, and `submitShares` aborts
+once the epoch is finalized. So funding must precede shares and finalize must be
+last.
+
+## Idempotency and resume
+
+`run` decides what still needs doing from **chain state**, not from its progress
+file:
+
+| step            | on-chain marker         |
+|-----------------|-------------------------|
+| pullFunding     | `funded\|<ep>`          |
+| submitShares P  | `ssdone\|<ep>\|<P>`     |
+| finalizeEpoch   | `status\|<ep>`          |
+
+The progress file is an audit trail and is reported when it disagrees with the
+chain. This is deliberate: a `pullFunding` that was broadcast but claimed 0 (because
+the C2 poke had not landed yet) would otherwise be recorded as done and never
+retried, leaving the epoch permanently unfundable. Every step is safe to repeat.
+
+`run` stops at the first failure rather than continuing, because the calls are
+ordered — pressing on would finalize an epoch that is missing pages.
+
+## Epoch selection
+
+The default target is the **oldest closed-but-unfinalized** epoch within a
+20-epoch lookback, not the newest. That is what makes Attest mode work: N machines
+running minutes apart across an epoch boundary would otherwise target different
+epochs and never reach quorum. It also means downtime is caught up in order rather
+than skipped.
+
+Override with `-epoch N`. An epoch that has not closed yet is refused.
+
+## When a post is scored (attribution)
+
+`source.attribution` decides which epoch a post's rewards land in. This is the
+most consequential setting in the file.
+
+**`"cashout"` (default).** A post is scored in the epoch its Hive **payout** falls
+in — 7 days after posting, when voting has closed. Every vote is counted exactly
+once. Rewards lag one payout period behind posting, exactly as they do natively on
+Hive and in SCOT.
+
+**`"created"`.** A post is scored in the epoch it was posted in, using whatever
+votes exist at the epoch boundary. Rewards are immediate, but the trade is real and
+worth stating plainly: voting stays open for 7 days, so a post made in the last
+minute of an epoch is scored with almost none of its votes while one made at the
+start gets a full epoch's worth, and every vote cast after the boundary is counted
+by nobody, ever. Offered for tenants who want promptness; it is not the default.
+
+### The vote cutoff
+
+Under either mode the vote set is frozen at a cutoff — the post's `payout_at` under
+`cashout`, the epoch end under `created` — and votes after it are dropped.
+
+This is not a detail. Hive keeps recording votes after a post pays out: a real post
+that paid out on 2023-03-16 still took a vote on 2023-03-20. Without the cutoff,
+recomputing an epoch later would see a larger vote set and produce different
+numbers, which would **void the challenge window** (no verifier could reproduce the
+report) and **break Attest quorum** (two machines running days apart would never
+agree). The cutoff is what makes a report reproducible forever.
+
+## Operational constraints
+
+These are properties of Hive and the VSC node, all verified against live
+infrastructure — not assumptions.
+
+- **There is NO reporting deadline.** Vote detail is kept indefinitely: a post
+  created 2023-03-09 and paid out 2023-03-16 still returns all 287 votes with
+  `time`/`percent`/`rshares` 1234 days later. (An earlier version of this package
+  claimed a 7-day pruning window and refused to score paid-out posts. That was
+  wrong — the "Post ... does not exist" error came from querying with a permlink
+  that had been truncated in a debug print.)
+- **`bridge.get_ranked_posts` caps `limit` at 20.** Asking for more is a hard
+  `Assert Exception: limit = N outside valid range [1:20]`, not a silent clamp, so
+  every epoch is paged.
+- **The community feed is not newest-first.** Pinned posts are hoisted to the top
+  of page 1 regardless of age — a real community had four 2024/2025 posts above its
+  newest one. Pinned posts are excluded from the "have we walked past the window"
+  decision (they are still scored if they fall inside it).
+- **Vote weights need `get_active_votes`.** The `active_votes` embedded in
+  `get_ranked_posts` carry `rshares` but no `time` and no `percent`, so they cannot
+  drive the curation curve (needs vote order), the vote cutoff (needs time), or
+  `token_stake` weighting (needs percent). The extra per-post round trip is not
+  removable.
+- **`rshares` must not go through float64.** Values reach ~1e15 and float64 loses
+  integer precision above 2^53 (~9e15). The transport decodes with `UseNumber`.
+- **`getStateByKeys` is exact-key only, latest state only** (1..100 keys, no prefix
+  scan, no historical view). Historical C1 stake is therefore read by walking C1's
+  append-only checkpoint history with the same binary search the contract uses —
+  `vscapi.StakeSource` is a deliberate bug-for-bug copy of C1's `searchVal`, and
+  `stake_test.go` proves the two agree by differential test.
+- **Page sizing.** `submitShares` payloads are capped at 4096 bytes by the `auth`
+  module and each entry costs roughly 685 RC to apply. Defaults are 60 entries /
+  3800 bytes; `page.max_bytes` above 4096 is rejected at config load.
+
+## Vote weight modes
+
+- `hive_rshares` (default) — use Hive's own `rshares`, which already has the voter's
+  stake and vote-mana applied. Voting power reflects **HIVE** stake.
+- `token_stake` — a vote's weight is the voter's **C1-staked balance** at the epoch's
+  end block, scaled by the vote percent. Voting power reflects the **tribe's own
+  token**. Requires `contracts.stake`.
+
+## Keys
+
+There is no key in the config file. The active WIF is read from the environment
+variable named by `submit.wif_env` (default `REPORTER_ACTIVE_WIF`), so a config can
+be committed and shared across an Attest quorum without leaking signing authority.
+
+Signing is always with **active** authority and `required_posting_auths` is always
+empty. The framework's `auth.RequireActive` rejects a caller present only in the
+posting auths, because the VSC runtime derives `msg.caller` from
+`RequiredPostingAuths[0]` when no active auth is present — accepting posting keys
+would let a posting key satisfy the reporter role.
+
+## Attest (multi-machine) mode
+
+When the distributor's reporter authority is configured in Attest mode, run this
+service on N machines with the **same config** but each machine's own account and
+key. Determinism guarantees the pages are byte-identical, so the contract's
+threshold is reached without the machines coordinating. Nothing else changes.
+
+## End-to-end verification
+
+Two tests connect the reporter to the contracts, because until they existed each
+half was only checked in isolation — contract tests hand-wrote their shares string
+and reporter tests stopped at producing a page:
+
+- **`itest/seam_test.go`** (in-process, seconds). Realistic Hive data goes in,
+  the real pipeline runs, and `plan.Calls[i].Payload` is handed to the real wasm
+  engine verbatim — no payload is written by hand. Asserts the contract's
+  `totalShares` equals the reporter's, and that every claim pays exactly
+  `funded*share/totalShares`.
+- **`tests/devnet/magi_reporter_devnet_test.go`** (docker multi-node, ~30 min).
+  Runs the actual `reporter` binary against a local Hive JSON-RPC server serving
+  injected post/vote data, then broadcasts its planned payloads to a live chain and
+  claims against them.
+
+The seam test immediately paid for itself: `applyEntries` used the permissive
+`validateAddr`, so an entry with no ledger domain (`alice:100`) was **counted into
+totalShares and then unclaimable forever** — measured at 50% of an epoch's funding
+silently stranded, with the remaining claimant diluted. C3/C5 now skip
+domain-less share recipients, and C6 does the same for airdrop recipients.
+
+## Tests
+
+```sh
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1
+```
+
+74 offline tests, no network and no keys required — the Hive and VSC layers are
+behind `Transport` / `StateReader` interfaces.
+
+A live smoke test against real nodes is skipped by default:
+
+```sh
+REPORTER_LIVE=1 GOTOOLCHAIN=go1.25.3 go test ./reporter/hivesrc/ -run Live -v
+```
+
+It is worth running after any change to `hivesrc`: several of the constraints
+listed above were found *only* by running it, and each is now pinned by an offline
+regression test in `hivesrc/regression_test.go`.

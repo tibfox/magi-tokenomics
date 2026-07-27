@@ -1,0 +1,67 @@
+// Package sharecore is the DETERMINISTIC core of the reporter service: it turns
+// observed Hive activity for one epoch into per-account share weights that C3/C5
+// consume via submitShares.
+//
+// Determinism is the whole point. The C3/C5 challenge window and the auth
+// package's Attest mode (N machines must push BYTE-IDENTICAL pages) are only
+// meaningful if any operator, on any machine, reproduces exactly the same output
+// from the same input. Therefore this package:
+//
+//   - uses INTEGER math only (math/big) — never float64, whose rounding varies
+//     with expression order and platform;
+//   - sorts every map iteration before emitting;
+//   - emits one canonical serialization.
+//
+// It performs NO I/O: no network, no clock, no randomness. Feed it a snapshot.
+package sharecore
+
+import "math/big"
+
+// Vote is a single vote on a post, already resolved to an integer weight.
+//
+// Weight is the voter's effective stake-weight for this vote (rshares), computed
+// upstream: stake × vote% × remaining vote-mana. Keeping it integer here means
+// the mana/curve policy can evolve without endangering determinism.
+type Vote struct {
+	Voter  string   // "hive:alice"
+	Weight *big.Int // rshares contributed (>=0)
+	Order  int      // position in the post's vote sequence (0-based, ascending time)
+}
+
+// Post is one rewardable item (post or comment) inside the epoch.
+type Post struct {
+	Author   string // "hive:bob"
+	Permlink string // stable id, used for deterministic tie-breaking
+	Votes    []Vote
+}
+
+// Config mirrors the SCOT reward knobs the framework cares about. All values are
+// integers so the computation stays reproducible.
+type Config struct {
+	// AuthorRewardBps is the author's cut of a post's weight, in basis points.
+	// SCOT's author_reward_percentage. e.g. 5000 = 50% author / 50% curators.
+	AuthorRewardBps int
+
+	// AuthorCurveNum/Den express the author reward curve exponent as a rational,
+	// e.g. 1/1 = linear, 2/1 = quadratic, 3/2 = r^1.5. SCOT's author_curve_exponent.
+	AuthorCurveNum, AuthorCurveDen int
+
+	// CurationCurveNum/Den likewise for the curation curve. The DIRECTION is a
+	// policy choice with inverted incentives, so choose deliberately:
+	//   CONCAVE (num<den, e.g. 1/2 = sqrt) → EARLY voters earn more (the classic
+	//     Steem/Hive curation incentive — reward discovering good content first).
+	//   LINEAR  (1/1)                      → order-neutral.
+	//   CONVEX  (num>den, e.g. 2/1)        → LATE voters earn more (pile-on).
+	CurationCurveNum, CurationCurveDen int
+
+	// Muted accounts earn nothing (SCOT account muting). Sorted or not; matched exactly.
+	Muted []string
+}
+
+// Result is the deterministic output for one epoch.
+type Result struct {
+	// Shares maps account -> integer share weight. Never contains zero entries.
+	Shares map[string]*big.Int
+	// Total is the sum of all shares (informational; the CONTRACT recomputes it).
+	Total *big.Int
+}
