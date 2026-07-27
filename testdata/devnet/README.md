@@ -40,12 +40,19 @@ to your own paths.
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
 | `magi_c5c6c7_devnet_test.go` | C1 + C2 + C5 + C6 + C7, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then a 34-attack adversarial sweep** | 27 min |
+| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks** | 30 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
-with exact end-to-end balance conservation — and then attacks every privileged action
-on all seven contracts from an outsider account.
+with exact end-to-end balance conservation — and then attacks it from two directions.
+
+**Two attacker profiles, because they probe different depths.** A pure outsider (no
+stake, no share, no tokens) is the easy case: most calls die on the first authority
+check. A *staked holder* is the realistic insider — real stake in C1, real shares in
+C3/C5, claims already collected — so their attacks (double-claim, epoch aliasing,
+early withdrawal, sweeping) reach far deeper into the logic before anything refuses.
+Both phases refuse to run if their attacker lacks the standing that makes the phase
+meaningful.
 
 **The attacker account must be funded.** RC is `ledger HBD + 10,000 free`, which is
 about seven transactions; past that, attacks fail with *insufficient RC* instead of

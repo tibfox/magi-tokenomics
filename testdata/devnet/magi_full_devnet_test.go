@@ -29,7 +29,9 @@ import (
 //	PHASE 4  C2 splits 50/30/20 into content/LP/yield
 //	PHASE 5  one keeper poke funds all three buckets from a single emission
 //	PHASE 6  content via the REAL reporter binary; LP direct; yield trustless
-//	PHASE 7  claims + conservation invariants + outsider rejection
+//	PHASE 7  claims + conservation invariants
+//	PHASE 7b a malicious STAKED HOLDER (real stake, real share, already claimed)
+//	PHASE 8  a pure outsider sweeps every privileged action on all 7 contracts
 //
 // Run: go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 func TestDevnetMagiFull(t *testing.T) {
@@ -428,6 +430,67 @@ func TestDevnetMagiFull(t *testing.T) {
 	if o := stateOf(tokenID, "owner"); o != "contract:"+c2ID {
 		t.Fatalf("token owner drifted to %q, want contract:%s", o, c2ID)
 	}
+
+	// ---------------- PHASE 7b: a malicious STAKED HOLDER ----------------
+	//
+	// The sweep below is a pure outsider: no stake, no share, no standing. That is
+	// the easy case — most of those calls die on the first authority check. The more
+	// realistic insider is a holder who is legitimately IN the system: real stake in
+	// C1, a real share in C3/C5, and a claim they have already collected. Their
+	// attacks reach much deeper into the logic before anything says no.
+	//
+	// holderB has exactly that position at this point: 400 staked, shares in C3 and
+	// C5, and all three claims already taken.
+	holderBefore := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderB)
+	holderStake := stateOf(c1ID, "stake|hive:"+holderB)
+	if holderBefore.Sign() == 0 || holderStake == "" || holderStake == "0" {
+		t.Fatalf("holder-attacker has no standing (balance %s, stake %q) — this phase would prove nothing",
+			holderBefore, holderStake)
+	}
+	t.Logf("holder-attacker hive:%s holds %s tokens and %s stake", holderB, holderBefore, holderStake)
+
+	holderAttacks := []struct{ id, action, payload, what string }{
+		// they DID have a valid share and already claimed it — the second must fail
+		{c3ID, "claim", `{"epoch":"0"}`, "double-claim content (has a real share)"},
+		{c5ID, "claim", `{"epoch":"0"}`, "double-claim LP (has a real share)"},
+		{c7ID, "claim", `{"epoch":"0"}`, "double-claim yield (is really staked)"},
+		// canonicalisation: "00" must not alias epoch 0 into a second payout
+		{c3ID, "claim", `{"epoch":"00"}`, "re-claim content via a non-canonical epoch alias"},
+		{c7ID, "claim", `{"epoch":"00"}`, "re-claim yield via a non-canonical epoch alias"},
+		// an epoch they have no share in
+		{c3ID, "claim", `{"epoch":"1"}`, "claim an epoch with no share"},
+		// funding is write-once, and a future epoch owes nothing
+		{c3ID, "pullFunding", `{"epoch":"0"}`, "pull epoch-0 funding a second time"},
+		{c7ID, "pullFunding", `{"epoch":"5"}`, "pull funding for a future/unfunded epoch"},
+		// staking: they have stake, so these get past the "no position" checks
+		{c1ID, "unstake", `{"amount":"999999"}`, "unstake far more than they staked"},
+		{c1ID, "claimUnstaked", `{}`, "withdraw an unstake before cooldown"},
+		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, holderB), "stakeFor while not allowlisted"},
+		// roles they do not hold
+		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "finalize as a mere shareholder"},
+		{c3ID, "sweepUnallocated", `{"epoch":"0","amount":"5000"}`, "sweep the content pot"},
+		{c7ID, "sweepResidual", `{"epoch":"0","amount":"800"}`, "sweep the yield residual"},
+	}
+	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
+	hsent := 0
+	for _, a := range holderAttacks {
+		if _, err := d.CallContract(ctx, 2, a.id, a.action, a.payload); err != nil {
+			t.Logf("  rejected at broadcast: %s (%v)", a.what, err)
+			continue
+		}
+		hsent++
+		time.Sleep(7 * time.Second)
+	}
+	t.Logf("  %d/%d holder attacks reached the chain; all must have aborted", hsent, len(holderAttacks))
+	time.Sleep(30 * time.Second)
+
+	if got := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderB); got.Cmp(holderBefore) != 0 {
+		t.Fatalf("HOLDER GAINED TOKENS: %s -> %s", holderBefore, got)
+	}
+	if got := stateOf(c1ID, "stake|hive:"+holderB); got != holderStake {
+		t.Fatalf("HOLDER CHANGED THEIR STAKE: %q -> %q", holderStake, got)
+	}
+	t.Logf("holder sweep clean: balance and stake both unmoved")
 
 	// ---------------- PHASE 8: adversarial sweep ----------------
 	//
