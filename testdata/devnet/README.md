@@ -40,11 +40,22 @@ to your own paths.
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
 | `magi_c5c6c7_devnet_test.go` | C1 + C2 + C5 + C6 + C7, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + the reporter in one run** | 23 min |
+| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then a 34-attack adversarial sweep** | 27 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
-with exact end-to-end balance conservation.
+with exact end-to-end balance conservation — and then attacks every privileged action
+on all seven contracts from an outsider account.
+
+**The attacker account must be funded.** RC is `ledger HBD + 10,000 free`, which is
+about seven transactions; past that, attacks fail with *insufficient RC* instead of
+*not authorised*. That is a false pass — the sweep looks green while proving nothing.
+The test deposits for node 3 for exactly this reason, and logs `N/N attacks reached
+the chain` so a regression is visible.
+
+Equally, the pre-attack snapshot is checked for emptiness before the sweep runs: a
+baseline of empty strings compares equal to anything, so a mistyped state key would
+turn every "nothing moved" assertion into a no-op.
 
 The reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server, so
 they need no Hive access — but they do talk to the devnet's real GraphQL endpoint and

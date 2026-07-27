@@ -112,7 +112,11 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	// Deposit AFTER deploying — depositing first drains the L1 balance the deploy
 	// fee comes out of. This run makes ~30 contract calls, so fund generously.
-	for _, node := range []int{1, 2} {
+	// Node 3 is the ATTACKER and must be funded as well: RC = ledger HBD + a 10_000
+	// free allowance, which is ~7 transactions. An attack that dies of RC exhaustion
+	// proves nothing about authorisation, so the adversarial phase would silently
+	// become a false pass once it grew past a handful of calls.
+	for _, node := range []int{1, 2, 3} {
 		for _, amt := range []string{"200.000", "100.000", "50.000", "30.000"} {
 			if _, ferr := d.Deposit(ctx, node, amt, "hbd"); ferr == nil {
 				t.Logf("node %d deposited %s HBD for RC", node, amt)
@@ -425,49 +429,168 @@ func TestDevnetMagiFull(t *testing.T) {
 		t.Fatalf("token owner drifted to %q, want contract:%s", o, c2ID)
 	}
 
-	// ---------------- outsider must be rejected everywhere ----------------
+	// ---------------- PHASE 8: adversarial sweep ----------------
+	//
+	// Every privileged action on EVERY contract, attempted by an outsider who owns
+	// nothing and holds no role. The threat model is deliberate: the deployer is
+	// trusted (they funded the token), so what must hold is that an outsider — or a
+	// token holder who is not the owner — cannot move anything.
+	//
+	// Node 3 is funded (see PHASE 1) precisely so each of these reaches the contract
+	// and is rejected on AUTHORISATION rather than dying of RC exhaustion.
 	before := map[string]string{
-		"c3total": stateOf(c3ID, "totalShares|0"),
-		"c5total": stateOf(c5ID, "totalShares|0"),
-		"owner":   stateOf(tokenID, "owner"),
-		"c1total": stateOf(c1ID, "total_staked"),
+		"token.owner":     stateOf(tokenID, "owner"),
+		"token.supply":    stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "supply").String(),
+		"c1.total_staked": stateOf(c1ID, "total_staked"),
+		"c2.lastEpoch":    stateOf(c2ID, "cfg_lastEpoch_v"),
+		"c3.totalShares":  stateOf(c3ID, "totalShares|0"),
+		"c3.funded":       stateOf(c3ID, "funded|0"),
+		"c3.status":       stateOf(c3ID, "status|0"),
+		"c5.totalShares":  stateOf(c5ID, "totalShares|0"),
+		"c5.funded":       stateOf(c5ID, "funded|0"),
+		"c7.funded":       stateOf(c7ID, "funded|0"),
+		"c6.airdropTotal": stateOf(c6ID, "airdrop_total"),
 	}
-	for _, a := range []struct{ id, action, payload, what string }{
-		{tokenID, "mint", `{"amount":"999999"}`, "outsider mints"},
-		{tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"hive:%s"}`, outsider), "outsider seizes token"},
-		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999"}`, outsider), "outsider fakes content shares"},
-		{c5ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999"}`, outsider), "outsider fakes LP shares"},
-		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "outsider airdrops to self"},
-		{c2ID, "claimBucket", `{"epoch":"0"}`, "outsider impersonates a bucket"},
-		{c7ID, "sweepResidual", `{"epoch":"0","amount":"2000"}`, "outsider sweeps yield"},
-	} {
+	readBack := func(k string) string {
+		switch k {
+		case "token.owner":
+			return stateOf(tokenID, "owner")
+		case "token.supply":
+			return stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "supply").String()
+		case "c1.total_staked":
+			return stateOf(c1ID, "total_staked")
+		case "c2.lastEpoch":
+			return stateOf(c2ID, "cfg_lastEpoch_v")
+		case "c3.totalShares":
+			return stateOf(c3ID, "totalShares|0")
+		case "c3.funded":
+			return stateOf(c3ID, "funded|0")
+		case "c3.status":
+			return stateOf(c3ID, "status|0")
+		case "c5.totalShares":
+			return stateOf(c5ID, "totalShares|0")
+		case "c5.funded":
+			return stateOf(c5ID, "funded|0")
+		case "c7.funded":
+			return stateOf(c7ID, "funded|0")
+		case "c6.airdropTotal":
+			return stateOf(c6ID, "airdrop_total")
+		}
+		return ""
+	}
+
+	// A "before" snapshot full of empty strings would compare equal to anything and
+	// turn the whole adversarial phase into a vacuous pass. Every one of these keys
+	// must already hold a value.
+	for k, v := range before {
+		if v == "" || v == "0" {
+			t.Fatalf("pre-attack snapshot %s is %q — the assertion below would be vacuous", k, v)
+		}
+	}
+
+	distInitPayload := fmt.Sprintf(
+		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:%s",`+
+			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+		tokenID, c2ID, outsider, outsider, outsider)
+
+	attacks := []struct{ id, action, payload, what string }{
+		// --- C0 token: the framework handed ownership to C2, nobody else may act ---
+		{tokenID, "mint", `{"amount":"999999"}`, "C0 mint"},
+		{tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"hive:%s"}`, outsider), "C0 seize ownership"},
+		{tokenID, "pause", `{}`, "C0 pause (griefing: would freeze all payouts)"},
+		{tokenID, "unpause", `{}`, "C0 unpause"},
+		{tokenID, "transferFrom", fmt.Sprintf(
+			`{"from":"hive:%s","to":"hive:%s","amount":"1000"}`, holderA, outsider),
+			"C0 transferFrom without allowance (steal a holder's balance)"},
+
+		// --- C1 staking: custody must be untouchable ---
+		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"1","epochLen":"1","allow":"hive:%s"}`, tokenID, outsider), "C1 re-init (would reset the allowlist)"},
+		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, outsider), "C1 stakeFor while not allowlisted"},
+		{c1ID, "unstake", `{"amount":"1000"}`, "C1 unstake stake they never made"},
+		{c1ID, "claimUnstaked", `{}`, "C1 claimUnstaked with nothing queued"},
+
+		// --- C2 emission: the mint authority ---
+		{c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","epochLen":"1","baseAnnual":"9999999","blocksPerYear":"1","dustBucket":"x","timelock":"1","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1","buckets":"x:hive:%s:10000"}`, tokenID, outsider, treasury, outsider), "C2 re-init (would redirect every bucket)"},
+		{c2ID, "claimBucket", `{"epoch":"0"}`, "C2 claimBucket impersonating a bucket target"},
+		{c2ID, "claimBucket", `{"epoch":"00"}`, "C2 claimBucket with a non-canonical epoch alias"},
+		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 queue a token takeover"},
+		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 execute a never-queued takeover"},
+		{c2ID, "cancelTokenOp", `{"op":"pause","nonce":"1"}`, "C2 cancel a token op"},
+
+		// --- C3 content distributor ---
+		{c3ID, "init", distInitPayload, "C3 re-init (would repoint reporter+treasury)"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C3 push fraudulent shares"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
+		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "C3 finalize an epoch they do not control"},
+		{c3ID, "cancelEpoch", `{"epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
+		{c3ID, "sweepUnallocated", `{"epoch":"0","amount":"5000"}`, "C3 sweep the pot"},
+		{c3ID, "claim", `{"epoch":"0"}`, "C3 claim with no share"},
+
+		// --- C5 LP distributor: same surface, separate instance ---
+		{c5ID, "init", distInitPayload, "C5 re-init"},
+		{c5ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C5 push fraudulent shares"},
+		{c5ID, "finalizeEpoch", `{"epoch":"1"}`, "C5 finalize"},
+		{c5ID, "cancelEpoch", `{"epoch":"0"}`, "C5 veto a legitimate epoch"},
+		{c5ID, "sweepUnallocated", `{"epoch":"0","amount":"3000"}`, "C5 sweep the pot"},
+		{c5ID, "claim", `{"epoch":"0"}`, "C5 claim with no share"},
+
+		// --- C6 migration ---
+		{c6ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"99999999"}`, tokenID), "C6 re-init (would raise the airdrop cap)"},
+		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "C6 airdrop to self"},
+		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"1","entries":"hive:%s:1000"}`, outsider), "C6 replay the already-applied batch 1"},
+
+		// --- C7 yield ---
+		{c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
+		{c7ID, "sweepResidual", `{"epoch":"0","amount":"2000"}`, "C7 sweep the yield residual"},
+		{c7ID, "claim", `{"epoch":"0"}`, "C7 claim yield with no stake"},
+	}
+
+	t.Logf("adversarial sweep: %d attacks from outsider hive:%s", len(attacks), outsider)
+	sent := 0
+	for _, a := range attacks {
 		if _, err := d.CallContract(ctx, 3, a.id, a.action, a.payload); err != nil {
-			t.Logf("attack rejected at broadcast (%s): %v", a.what, err)
+			t.Logf("  rejected at broadcast: %s (%v)", a.what, err)
 			continue
 		}
-		t.Logf("attack broadcast (must fail on-chain): %s", a.what)
-		time.Sleep(9 * time.Second)
+		sent++
+		time.Sleep(7 * time.Second)
 	}
-	time.Sleep(45 * time.Second) // let any successful attack settle before asserting nothing moved
+	t.Logf("  %d/%d attacks reached the chain; all must have aborted", sent, len(attacks))
+
+	time.Sleep(45 * time.Second) // let anything that DID land settle before asserting
 	for k, want := range before {
-		var got string
-		switch k {
-		case "c3total":
-			got = stateOf(c3ID, "totalShares|0")
-		case "c5total":
-			got = stateOf(c5ID, "totalShares|0")
-		case "owner":
-			got = stateOf(tokenID, "owner")
-		case "c1total":
-			got = stateOf(c1ID, "total_staked")
-		}
-		if got != want {
+		if got := readBack(k); got != want {
 			t.Fatalf("OUTSIDER CHANGED STATE %s: %q -> %q", k, want, got)
 		}
 	}
-	if s := stateOf(c3ID, "totalShares|1"); s != "" && s != "0" {
-		t.Fatalf("outsider injected epoch-1 content shares: %s", s)
+
+	// nothing may have been created for the attacker anywhere
+	for _, c := range []struct{ id, name string }{{c3ID, "C3"}, {c5ID, "C5"}, {c7ID, "C7"}} {
+		if v := stateOf(c.id, "share|0|hive:"+outsider); v != "" && v != "0" {
+			t.Fatalf("%s granted the outsider a share: %s", c.name, v)
+		}
+		if v := stateOf(c.id, "totalShares|1"); v != "" && v != "0" {
+			t.Fatalf("%s accepted epoch-1 shares from the outsider: %s", c.name, v)
+		}
+		if v := stateOf(c.id, "status|1"); v != "" {
+			t.Fatalf("%s epoch 1 was finalized/cancelled by the outsider: %s", c.name, v)
+		}
 	}
+	if v := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+outsider); v.Sign() != 0 {
+		t.Fatalf("outsider ended up holding %s tokens", v)
+	}
+	if v := stateOf(c1ID, "stake|hive:"+outsider); v != "" && v != "0" {
+		t.Fatalf("outsider acquired stake: %s", v)
+	}
+	// The queued-op table must be empty. The key is tl|<op>:<nonce>[:<newOwner>]
+	// (opKeyOf), NOT tl|<op>|<nonce> — a wrong key here would read empty and pass
+	// vacuously, which is worse than no assertion at all.
+	tlKey := fmt.Sprintf("tl|changeOwner:1:hive:%s", outsider)
+	if v := stateOf(c2ID, tlKey); v != "" {
+		t.Fatalf("outsider queued a token op (%s = %s)", tlKey, v)
+	}
+	t.Logf("adversarial sweep clean: no state moved, outsider holds nothing")
 
 	t.Logf("FULL SYSTEM DEVNET PASSED — 7 contracts + reporter, one emission split 3 ways")
 	t.Logf("hive fixture calls: %v", fixture.hits)
