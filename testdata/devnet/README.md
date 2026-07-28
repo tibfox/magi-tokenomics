@@ -117,6 +117,28 @@ the test rather than the contracts. The lessons generalise:
   `baseAnnual * epochLen / blocksPerYear`. Tripling the epoch tripled every expected
   figure.
 
+## The emission pool (allowance model)
+
+C2 does not mint. It draws each epoch from an account that has `approve`d it, so
+every suite must, **before handing the token to C2** (only the owner may mint):
+
+```go
+token.mint    {"amount": POOL}
+token.approve {"spender": "contract:<C2>", "amount": POOL}
+```
+
+Get this wrong and `distributeEpoch` funds nothing — the symptom is
+`owed never reached N (last "")`, several minutes after the actual mistake.
+
+Two knock-on effects when writing assertions:
+
+- **`totalSupply` no longer tracks emission.** It is constant once the pool is
+  minted. Measure the pool holder's falling balance, or C2's rising one, instead.
+- **Keep the pool holder separate from any participant**, or its balance mixes
+  undrawn pool with earned rewards. The full-system suite conflates them (the
+  deployer holds the pool and also stakes), which is why its conservation check
+  measures a claim *delta* rather than an absolute balance.
+
 ## Operational notes
 
 These cost real resources and have sharp edges. All of these were learned the hard

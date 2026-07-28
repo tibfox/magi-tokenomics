@@ -191,6 +191,11 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	send(1, c6ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "c6.init")
 	waitKey(c6ID, "init", "c6 init")
 
+	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
+	// and approve C2 BEFORE handing the token over — only the owner may mint.
+	send(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	send(1, tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 	send(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token.changeOwner -> C2")
 	waitVal(tokenID, "owner", c2ID, "token ownership handover")
 

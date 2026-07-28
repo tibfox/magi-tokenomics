@@ -154,6 +154,11 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	waitKey(c3ID, "init", "c3 init")
 
 	// hand the token to C2 — from here C2 is the only minter
+	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
+	// and approve C2 BEFORE handing the token over — only the owner may mint.
+	mustCall(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	mustCall(1, tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 	mustCall(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token.changeOwner")
 
 	waitKeyValue(tokenID, "owner", c2ID, "token owner handover")
