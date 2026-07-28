@@ -48,7 +48,7 @@ Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devn
 
 ```bash
 # from a go-vsc-node checkout, after copying in testdata/devnet/*.go
-go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + reporter, ~23 min
+go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + reporter, ~30 min
 ```
 
 ---
@@ -214,23 +214,88 @@ directory's README for how to run them. They are `package devnet` (they use
 go-vsc-node's devnet harness internals), so they must be copied into a go-vsc-node
 checkout to run; `testdata/` keeps them versioned here without breaking the build.
 
-| test | covers |
-|---|---|
-| `magi_tokenomics_devnet_test.go` | C0+C2+C3 + outsider attacks |
-| `magi_c5c6c7_devnet_test.go` | C1+C2+C5+C6+C7 + outsider attacks |
-| `magi_reporter_devnet_test.go` | the real reporter binary driving C3 |
-| `magi_full_devnet_test.go` | **all 7 contracts + reporter in one run** |
+| test | covers | ~time |
+|---|---|---|
+| `magi_tokenomics_devnet_test.go` | C0+C2+C3 + 13 outsider attacks | 10 min |
+| `magi_c5c6c7_devnet_test.go` | C1+C2+C5+C6+C7 + 11 outsider attacks | 18 min |
+| `magi_reporter_devnet_test.go` | the real reporter binary driving C3 | 12 min |
+| `magi_full_devnet_test.go` | **all 7 contracts + reporter**, then 14 staked-holder + 34 outsider attacks | 30 min |
+| `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
 
 They need `reporter/bin/reporter` built first, and take `MAGI_FRAMEWORK_DIR` /
 `MAGI_TOKEN_WASM` to locate the artifacts. Each run builds a ~766MB docker image that
 is **not** cleaned up automatically — remove `devnet-test-*` images between runs or
 the disk fills.
 
+## Security model and how it is verified
+
+The threat model is deliberate: **the deployer is trusted** — they funded the token
+and own the contracts. What must hold is that nobody *else* can move anything, and
+that the one genuinely trusted runtime role (the reporter) is containable when it
+misbehaves.
+
+Every role has been turned against the system on a live devnet chain:
+
+| attacker | attempts | what it establishes |
+|---|---|---|
+| pure outsider | 34 | every privileged action on all 7 contracts is refused |
+| staked holder | 14 | a real position (stake + shares + a collected claim) buys no extra power — double-claims, epoch aliasing, early withdrawal and sweeps all fail |
+| **rogue reporter** | 3 phases | a fraudulent report is *accepted*, then **contained**: guardian veto, funding rolled forward and recovered, Attest quorum unbroken |
+| hostile contract | 16 relayed | a contract cannot borrow its caller's authority |
+| economic (in-process) | 4 | donation, Sybil split, mid-epoch exit/restake and allowance theft are all unprofitable or impossible |
+| posting-key (in-process) | 3 | a posting key cannot satisfy an active-authority role |
+
+### What the reporter can and cannot do
+
+The reporter is the only component that is trusted at runtime, and it is worth being
+precise about what that means. It is *supposed* to publish share lists, so **nothing
+stops it publishing a false one** — the devnet suite asserts the fraud is accepted,
+because containment is not the submission path. It cannot mint, move funds, change
+roles, or pay itself. When it lies:
+
+- a guardian cancels inside the challenge window;
+- the funding rolls into `unallocated` — neither stolen nor stranded — and the
+  guardian recovers it to the **treasury pinned at init**;
+- the rogue claims nothing, then or later.
+
+In **Attest** mode (M-of-N) a single rogue additionally cannot reach threshold,
+cannot equivocate (one vote per authority per action, so backing a second payload is
+refused), and cannot stop an honest majority committing a different payload.
+
+C7 (staking yield) has none of this exposure: it reads C1 directly and pays strictly
+pro-rata, so there is nothing to report and nothing to challenge.
+
+### Two rules the contracts enforce, not convention
+
+- **Reporter and guardian must be disjoint**, and so must guardian and veto. `init`
+  rejects overlaps — one party able to both publish a fraudulent report and refuse to
+  cancel it would make the challenge window meaningless.
+- **The treasury is pinned at init.** Sweeps can only ever go there.
+
+Staked funds sit in C1 and no role — owner, guardian or reporter — can touch them.
+
+### Reading the adversarial suites
+
+Two failure modes make an attack suite look green while proving nothing, and both are
+guarded against explicitly:
+
+- **An attack that aborts for the wrong reason.** The attacker is funded well past
+  the 10,000-RC free tier (deposits polled until credited, then asserted — a recent
+  run had the attacker at RC ~110,000 against ~48,000 needed), and every run logs
+  `N/N attacks reached the chain`. A malformed payload that aborts on parsing proves
+  the parser works, not the authority gate.
+- **A vacuous assertion.** The pre-attack state snapshot is rejected if any baseline
+  value is empty, since an empty baseline compares equal to anything.
+
+One honest limit: C7's `sweepResidual` has a 1000-block maturity, so a devnet run
+can never reach its authority check. Its guardian gate is proven in-process instead
+(`itest/security_regression_test.go`), and the devnet attack is labelled accordingly.
+
 ## Status
 
 All 6 contracts + reporter are complete, audited (crit/high/med resolved), and green:
-65 contract tests, 75 reporter tests, and all four devnet suites including the
-full-system run.
+65 contract tests, 75 reporter tests, and all five devnet suites — including the
+full-system run and the adversarial suites below.
 
 Not done: first real deployment, per-tenant config values, and the governance DAO
 (developed separately).

@@ -186,6 +186,11 @@ You don't need all of it.
   *wrong* list. The defences are that anyone can recompute it exactly, a guardian can
   cancel it during the challenge window, and you can require several machines to
   agree. Staking yield has none of this exposure because it reads the chain directly.
+
+  This is not theoretical: a devnet test has the reporter publish 100% of an epoch's
+  rewards to itself, and shows the fraud being accepted, then vetoed, the funding
+  recovered to the treasury, and the rogue paid nothing. See the README's security
+  section for what that suite establishes.
 - **Something has to poke the schedule.** Contracts can't wake themselves up. It's
   permissionless, so anyone can do it, but if nobody does, nothing happens.
 - **Rounding always favours the pot.** Division truncates, so tiny remainders stay

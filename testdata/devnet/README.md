@@ -33,7 +33,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The four suites
+## The five suites
 
 | test | covers | ~time |
 |---|---|---|
