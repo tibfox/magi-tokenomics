@@ -66,11 +66,25 @@ Attest mode (2-of-3) it proves a single rogue cannot reach threshold, cannot
 equivocate (one vote per authority per action, so backing a second payload is
 refused), and cannot stop the two honest reporters committing *their* payload.
 
-**The attacker account must be funded.** RC is `ledger HBD + 10,000 free`, which is
-about seven transactions; past that, attacks fail with *insufficient RC* instead of
-*not authorised*. That is a false pass — the sweep looks green while proving nothing.
-The test deposits for node 3 for exactly this reason, and logs `N/N attacks reached
-the chain` so a regression is visible.
+**The attacker account must be funded, and the funding must be PROVEN.** RC is
+`ledger HBD + 10,000 free` — about seven transactions. Past that, attacks fail with
+*insufficient RC* instead of *not authorised*: a false pass, green while proving
+nothing.
+
+Three things are needed, and only doing the first is not enough:
+
+1. Deposit in **repeated descending rounds**, so an account moves as much L1 balance
+   as it has rather than stopping at the first amount that happens to succeed.
+2. **Poll until the deposits credit the L2 ledger.** They are L1 transfers to the
+   gateway and settle asynchronously — a 25s sleep produced `hbd=0` for every
+   account. The suites poll for up to 4 minutes and fail if it never lands.
+3. **Assert the resulting headroom.** The tests log
+   `ledger balance hive:X hbd=N -> RC ~N+10000` for every actor and fail if the
+   attacker is not funded well past the free tier. A recent run had the attacker at
+   `hbd=100000` → RC ~110,000, against ~48,000 needed for the 34-attack sweep.
+
+`N/N attacks reached the chain` is also logged, so a regression in any of this is
+visible rather than silent.
 
 Equally, the pre-attack snapshot is checked for emptiness before the sweep runs: a
 baseline of empty strings compares equal to anything, so a mistyped state key would

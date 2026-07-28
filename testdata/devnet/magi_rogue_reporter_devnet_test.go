@@ -83,17 +83,56 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	c3ID := deploy("rr-c3-single", magiWasm(t, "c3-distributor/artifacts/main.wasm"))
 	c5ID := deploy("rr-c5-attest", magiWasm(t, "c5-lp/artifacts/main.wasm"))
 
-	// every reporter and the guardian must be able to transact: an attack (or an
-	// attestation) that dies of RC proves nothing
+	// Every reporter and the guardian must be able to transact freely. RC is
+	// `ledger HBD + 10_000 free`, and the free tier alone is ~7 transactions — a
+	// rogue that runs out of RC would look "contained" when it was merely broke.
+	// Deposit in repeated descending rounds so each account moves as much L1 balance
+	// into the L2 ledger as it has.
 	for _, n := range []int{1, 2, 3, 5} {
-		for _, amt := range []string{"100.000", "50.000", "30.000"} {
-			if _, e := d.Deposit(ctx, n, amt, "hbd"); e == nil {
-				t.Logf("node %d deposited %s HBD", n, amt)
+		moved := 0
+		for round := 0; round < 4; round++ {
+			progressed := false
+			for _, amt := range []string{"200.000", "100.000", "50.000", "20.000", "5.000"} {
+				if _, e := d.Deposit(ctx, n, amt, "hbd"); e == nil {
+					t.Logf("node %d deposited %s HBD (round %d)", n, amt, round+1)
+					moved++
+					progressed = true
+					break
+				}
+			}
+			if !progressed {
 				break
 			}
 		}
+		if moved == 0 {
+			t.Fatalf("node %d could not deposit — it would run on the free tier alone", n)
+		}
 	}
-	time.Sleep(20 * time.Second)
+	// Deposits credit the L2 ledger asynchronously; a fixed sleep is not enough.
+	// Poll, then confirm the rogue is funded past the 10k free tier — a rogue that
+	// runs out of RC would look "contained" when it was merely broke.
+	depDeadline := time.Now().Add(4 * time.Minute)
+	for {
+		ok := true
+		for _, n := range []string{rogue, honestB, honestC, guardian} {
+			b, e := d.GetAccountBalance(ctx, 1, "hive:"+n)
+			if e != nil || b == nil || b.Hbd <= 0 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			break
+		}
+		if time.Now().After(depDeadline) {
+			t.Fatal("deposits never credited the L2 ledger — actors would run on the free tier alone")
+		}
+		time.Sleep(6 * time.Second)
+	}
+	for _, n := range []string{rogue, honestB, honestC, guardian} {
+		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+n)
+		t.Logf("ledger balance hive:%-14s hbd=%d -> RC ~%d", n, b.Hbd, b.Hbd+10000)
+	}
 
 	// ---------------- helpers ----------------
 	callN := func(node int, id, action, payload, what string) {

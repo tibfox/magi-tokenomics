@@ -113,20 +113,77 @@ func TestDevnetMagiFull(t *testing.T) {
 		tokenID, c1ID, c2ID, c3ID, c5ID, c6ID, c7ID)
 
 	// Deposit AFTER deploying — depositing first drains the L1 balance the deploy
-	// fee comes out of. This run makes ~30 contract calls, so fund generously.
-	// Node 3 is the ATTACKER and must be funded as well: RC = ledger HBD + a 10_000
-	// free allowance, which is ~7 transactions. An attack that dies of RC exhaustion
-	// proves nothing about authorisation, so the adversarial phase would silently
-	// become a false pass once it grew past a handful of calls.
-	for _, node := range []int{1, 2, 3} {
-		for _, amt := range []string{"200.000", "100.000", "50.000", "30.000"} {
-			if _, ferr := d.Deposit(ctx, node, amt, "hbd"); ferr == nil {
-				t.Logf("node %d deposited %s HBD for RC", node, amt)
+	// fee comes out of.
+	//
+	// Fund every actor as heavily as L1 allows, the ATTACKER included. RC is
+	// `ledger HBD + 10_000 free`, and the free tier alone is only ~7 transactions —
+	// an attack that dies of RC exhaustion proves nothing about authorisation, so a
+	// thinly-funded attacker turns the whole adversarial phase into a false pass.
+	// Deposit in repeated descending rounds so each account moves as much L1 balance
+	// into the L2 ledger as it has, rather than stopping at the first success.
+	fundNode := func(node int) {
+		moved := 0
+		for round := 0; round < 4; round++ {
+			progressed := false
+			for _, amt := range []string{"200.000", "100.000", "50.000", "20.000", "5.000"} {
+				if _, ferr := d.Deposit(ctx, node, amt, "hbd"); ferr == nil {
+					t.Logf("node %d deposited %s HBD (round %d)", node, amt, round+1)
+					moved++
+					progressed = true
+					break
+				}
+			}
+			if !progressed {
 				break
 			}
 		}
+		if moved == 0 {
+			t.Fatalf("node %d could not deposit anything — it would run on the 10k free tier alone", node)
+		}
 	}
-	time.Sleep(20 * time.Second)
+	for _, node := range []int{1, 2, 3} {
+		fundNode(node)
+	}
+	// Deposits are L1 transfers to the gateway and take a while to credit the L2
+	// ledger — a fixed sleep is not enough (25s produced hbd=0 for every account and
+	// tripped the assertion below). Poll until they land.
+	//
+	// Then PROVE the RC headroom rather than assume it: the attacker in particular
+	// must be funded well past the 10_000 free tier, or PHASE 7b/8 are not testing
+	// what they claim to.
+	type acct struct {
+		node int
+		name string
+	}
+	funded := []acct{{1, owner}, {2, holderB}, {3, outsider}}
+	deadline := time.Now().Add(4 * time.Minute)
+	for {
+		allCredited := true
+		for _, a := range funded {
+			b, berr := d.GetAccountBalance(ctx, 1, "hive:"+a.name)
+			if berr != nil || b == nil || b.Hbd <= 0 {
+				allCredited = false
+				break
+			}
+		}
+		if allCredited {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deposits never credited the L2 ledger — every actor would run on " +
+				"the 10k free tier (~7 txs), so the adversarial phases would fail on RC " +
+				"rather than on authorisation")
+		}
+		time.Sleep(6 * time.Second)
+	}
+	for _, a := range funded {
+		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+a.name)
+		t.Logf("ledger balance hive:%-14s hbd=%d  -> RC ~%d", a.name, b.Hbd, b.Hbd+10000)
+		if a.node == 3 && b.Hbd < 10000 {
+			t.Fatalf("attacker ledger hbd=%d is too thin: the 34-attack sweep needs RC "+
+				"well past the free tier or it fails on RC, not on authority", b.Hbd)
+		}
+	}
 
 	// ---------------- helpers ----------------
 	callN := func(node int, id, action, payload, what string) {
