@@ -33,7 +33,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The five suites
+## The six suites
 
 | test | covers | ~time |
 |---|---|---|
@@ -42,6 +42,7 @@ to your own paths.
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
 | `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks** | 30 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
+| `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -93,6 +94,28 @@ turn every "nothing moved" assertion into a no-op.
 The reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server, so
 they need no Hive access — but they do talk to the devnet's real GraphQL endpoint and
 broadcast real transactions to the devnet chain.
+
+## Writing a multi-epoch test
+
+`magi_multiepoch_devnet_test.go` took five runs to get right, and every failure was
+the test rather than the contracts. The lessons generalise:
+
+- **You cannot place a transaction in a chosen epoch.** Doing so means predicting
+  block timing across every preceding call. A top-up intended for "early epoch 1"
+  landed in epoch 2. Assert across a *range* instead — compare an epoch that is
+  unambiguously before a change against one unambiguously after.
+- **You cannot predict how many epochs will elapse.** A run's own transactions
+  consume real chain time: this one spends ~10 minutes ≈ 6 epochs at
+  `epochLen=30`. Asserting "exactly 3 epochs minted" failed a perfectly healthy
+  system reading 183000. Derive the expectation from the chain — read C2's
+  `cfg_lastEpoch_v` and assert `supply == bootstrap + (lastEpoch+1) x emission`,
+  which proves flat emission over however many epochs actually ran.
+- **`epochLen` must exceed one epoch's processing time.** Each devnet call costs
+  ~9s and an epoch's pull/shares/finalize is ~6 calls (~54s), so a 10-block (30s)
+  epoch makes intra-epoch placement impossible in principle.
+- **Changing `epochLen` changes the emission**, since it is
+  `baseAnnual * epochLen / blocksPerYear`. Tripling the epoch tripled every expected
+  figure.
 
 ## Operational notes
 
