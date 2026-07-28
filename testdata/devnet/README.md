@@ -41,18 +41,30 @@ to your own paths.
 | `magi_c5c6c7_devnet_test.go` | C1 + C2 + C5 + C6 + C7, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
 | `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks** | 30 min |
+| `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
 with exact end-to-end balance conservation — and then attacks it from two directions.
 
-**Two attacker profiles, because they probe different depths.** A pure outsider (no
+**Three attacker profiles, because they probe different depths.** A pure outsider (no
 stake, no share, no tokens) is the easy case: most calls die on the first authority
 check. A *staked holder* is the realistic insider — real stake in C1, real shares in
 C3/C5, claims already collected — so their attacks (double-claim, epoch aliasing,
 early withdrawal, sweeping) reach far deeper into the logic before anything refuses.
 Both phases refuse to run if their attacker lacks the standing that makes the phase
 meaningful.
+
+`magi_rogue_reporter_devnet_test.go` covers the third and hardest profile: the one
+role the system actually trusts. A reporter is *supposed* to publish share lists, so
+nothing stops it publishing a false one — the test asserts the fraud **is accepted**,
+because containment is the guardian and the quorum, not the submission path. It then
+proves the fraud is contained: the guardian cancels inside the challenge window, the
+funding rolls forward to `unallocated` rather than being stolen or stranded, the
+rogue claims nothing, and the guardian recovers it to the **pinned** treasury. In
+Attest mode (2-of-3) it proves a single rogue cannot reach threshold, cannot
+equivocate (one vote per authority per action, so backing a second payload is
+refused), and cannot stop the two honest reporters committing *their* payload.
 
 **The attacker account must be funded.** RC is `ledger HBD + 10,000 free`, which is
 about seven transactions; past that, attacks fail with *insufficient RC* instead of
@@ -86,11 +98,22 @@ way; ignoring them wastes 10–25 minutes per run.
 - **A contract must be initialised by the node that deployed it** — the deployer
   becomes `contract.owner` and `init` aborts otherwise. The tests carry an
   `ownerNode` map for exactly this.
-- **Never assert on an aggregate straight after broadcasting.** `total_staked`,
-  `owed|`, `funded|`, `totalShares|` and the `claimed|` markers all appear as soon as
-  the *first* contributing transaction lands and then grow — waiting only for a key
-  to exist samples a partial value. Use the `waitValue` / `waitStateKeyPresent`
-  helpers, never a bare read.
+- **Never assert on chain state straight after broadcasting.** Two distinct traps,
+  both of which have cost real runs here:
+  - *Aggregates grow.* `total_staked`, `owed|`, `funded|` and `totalShares|` appear
+    as soon as the **first** contributing transaction lands and then keep growing,
+    so waiting merely for the key to exist samples a partial value (this once read
+    `total_staked=600` while the second stake was still in flight). Use
+    `waitValue(id, key, want)`, which polls for an exact value.
+  - *Per-actor state needs a per-actor wait.* Waiting for **one** account's
+    `claimed|<ep>|<acct>` marker says nothing about the others: a balance read a few
+    seconds after a second account's claim is indistinguishable from that claim
+    being rejected (this reported `honest C should hold 2000, has 0` when C's claim
+    was simply still in flight). Loop `waitStateKeyPresent` over **every** actor
+    before comparing any balance.
+
+  Using the helper is not enough on its own — it has to cover every actor and every
+  key you are about to assert on.
 - **Stake before initialising C2.** C2's `genesis` is the block it initialises at,
   and C7 credits `min(stakeAt(start), stakeAt(end))` — so stake arriving later is
   zero at both epoch-0 boundaries and that epoch's yield is unclaimable.

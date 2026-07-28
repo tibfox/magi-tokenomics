@@ -468,8 +468,8 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, holderB), "stakeFor while not allowlisted"},
 		// roles they do not hold
 		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "finalize as a mere shareholder"},
-		{c3ID, "sweepUnallocated", `{"epoch":"0","amount":"5000"}`, "sweep the content pot"},
-		{c7ID, "sweepResidual", `{"epoch":"0","amount":"800"}`, "sweep the yield residual"},
+		{c3ID, "sweepUnallocated", `{"nonce":"2"}`, "sweep the content pot (valid nonce)"},
+		{c7ID, "sweepResidual", `{"epoch":"0"}`, "sweep the yield residual (blocked by maturity before auth)"},
 	}
 	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
 	hsent := 0
@@ -587,7 +587,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
 		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "C3 finalize an epoch they do not control"},
 		{c3ID, "cancelEpoch", `{"epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
-		{c3ID, "sweepUnallocated", `{"epoch":"0","amount":"5000"}`, "C3 sweep the pot"},
+		{c3ID, "sweepUnallocated", `{"nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"epoch":"0"}`, "C3 claim with no share"},
 
 		// --- C5 LP distributor: same surface, separate instance ---
@@ -595,7 +595,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c5ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C5 push fraudulent shares"},
 		{c5ID, "finalizeEpoch", `{"epoch":"1"}`, "C5 finalize"},
 		{c5ID, "cancelEpoch", `{"epoch":"0"}`, "C5 veto a legitimate epoch"},
-		{c5ID, "sweepUnallocated", `{"epoch":"0","amount":"3000"}`, "C5 sweep the pot"},
+		{c5ID, "sweepUnallocated", `{"nonce":"1"}`, "C5 sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c5ID, "claim", `{"epoch":"0"}`, "C5 claim with no share"},
 
 		// --- C6 migration ---
@@ -605,7 +605,7 @@ func TestDevnetMagiFull(t *testing.T) {
 
 		// --- C7 yield ---
 		{c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
-		{c7ID, "sweepResidual", `{"epoch":"0","amount":"2000"}`, "C7 sweep the yield residual"},
+		{c7ID, "sweepResidual", `{"epoch":"0"}`, "C7 sweep the yield residual (aborts on the 1000-block maturity, not on auth)"},
 		{c7ID, "claim", `{"epoch":"0"}`, "C7 claim yield with no stake"},
 	}
 
