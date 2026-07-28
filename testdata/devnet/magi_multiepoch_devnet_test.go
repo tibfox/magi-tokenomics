@@ -174,9 +174,6 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	callN(2, c1ID, "stake", `{"amount":"400"}`, "B stakes 400")
 	waitValue(c1ID, "total_staked", "1000", "C1 total_staked")
 
-	// Hand the token to C2 — without this C2 is not the owner and distributeEpoch
-	// cannot mint, so every epoch silently funds nothing. (Omitting it is what made
-	// the previous run report "epoch0 content owed never reached 18000".)
 	// C2 no longer mints — it PULLS each epoch's emission from an account that has
 	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
 	// only the owner may mint. (C2 no longer needs to own the token at all; the
