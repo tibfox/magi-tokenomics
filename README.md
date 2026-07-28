@@ -146,7 +146,7 @@ independently — determinism guarantees they produce byte-identical payloads.
 | `baseAnnual` / `blocksPerYear` | emission per epoch = `baseAnnual * epochLen / blocksPerYear`. **Flat** — the same every epoch, forever. |
 | `buckets` | `name:target:weightBps` triples, comma-separated. Weights must sum to **10000**. Targets can be any contract or address — a distributor, a DAO, or a plain treasury. |
 | `dustBucket` | which bucket receives the remainder from integer division. Must name a configured bucket. |
-| `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime. |
+| `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~8 epochs of catch-up. |
 | `timelock` | blocks a queued guardian operation waits before it may execute |
 
 Emission stops only when `maxSupply` headroom runs out: the final epoch mints the
@@ -299,6 +299,11 @@ full-system run and the adversarial suites below.
 
 Not done: first real deployment, per-tenant config values, and the governance DAO
 (developed separately).
+
+**RC budgeting:** [`docs/rc-costs.md`](docs/rc-costs.md) — measured RC cost of every
+function, the scaling curves for `submitShares` / `distributeEpoch` / `airdropBatch`,
+and which roles need a funded account (reporter and deployer do; claimants and a
+healthy keeper do not).
 
 **Archived design:** [`docs/halving-schedule.md`](docs/halving-schedule.md) — the
 decaying/halving emission schedule, removed from C2 as out of scope, with the exact

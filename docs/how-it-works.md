@@ -192,7 +192,9 @@ You don't need all of it.
   recovered to the treasury, and the rogue paid nothing. See the README's security
   section for what that suite establishes.
 - **Something has to poke the schedule.** Contracts can't wake themselves up. It's
-  permissionless, so anyone can do it, but if nobody does, nothing happens.
+  permissionless, so anyone can do it, but if nobody does, nothing happens — and the
+  longer it's left, the more expensive the catch-up poke becomes. See
+  [`rc-costs.md`](rc-costs.md).
 - **Rounding always favours the pot.** Division truncates, so tiny remainders stay
   in the contract rather than being over-paid. Splitting your holdings across many
   accounts loses you money rather than gaining it.
