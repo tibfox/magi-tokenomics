@@ -30,6 +30,7 @@ func TestStakingYieldSlice(t *testing.T) {
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	call(t, &ct, c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
 	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, c7ID)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", c2init, owner, 0, true)
 	call(t, &ct, c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, c1ID), owner, 0, true)
 

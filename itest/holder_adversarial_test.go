@@ -38,6 +38,7 @@ func hdBoot(t *testing.T, ct *test_utils.ContractTest) {
 	ct.RegisterContract(hdC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	ct.RegisterContract(hdC7, owner, read("../c7-yield/artifacts/main.wasm"))
 	call(t, ct, hdTok, "init", `{"name":"HD","symbol":"HD","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+	fundC2Pool(t, ct, hdTok, hdC2, "10000000", 0)
 	call(t, ct, hdC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hdveto","vetoThreshold":"1","buckets":"author:contract:%s:5000,yield:contract:%s:5000"}`, hdTok, hdC3, hdC7), owner, 0, true)
 	call(t, ct, hdC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hdTok), owner, 0, true)
 	call(t, ct, hdC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hdreporter","reporterThreshold":"1","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2), owner, 0, true)

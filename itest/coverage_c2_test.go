@@ -136,6 +136,13 @@ func cvBoot(t *testing.T, ct *test_utils.ContractTest, maxSupply string, over ma
 	ct.RegisterContract(cvC2, owner, read(cvC2Wasm))
 	call(t, ct, cvToken, "init",
 		fmt.Sprintf(`{"name":"CV","symbol":"CV","decimals":0,"maxSupply":"%s"}`, maxSupply), owner, 0, true)
+	// C2 no longer mints — it PULLS each epoch's emission from an account that has
+	// approved it. So the pool must exist and be approved before any poke. Minting
+	// the full maxSupply as the pool keeps the old semantics exactly: the pool IS
+	// the supply cap, so "emission stops at maxSupply" still holds.
+	call(t, ct, cvToken, "mint", fmt.Sprintf(`{"amount":"%s"}`, maxSupply), owner, 0, true)
+	call(t, ct, cvToken, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"%s"}`, cvC2, maxSupply), owner, 0, true)
 	call(t, ct, cvC2, "init", cvCfg(over), owner, 0, true)
 	call(t, ct, cvToken, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, cvC2), owner, 0, true)
 }
@@ -150,9 +157,18 @@ func cvOwed(t *testing.T, ct *test_utils.ContractTest, target, epoch string, h u
 	return cvBig(cvField(r.Ret, "owed"))
 }
 
+// cvSupply reports HOW MUCH HAS BEEN EMITTED so far.
+//
+// It used to read token.totalSupply, because C2 minted each epoch and supply grew
+// with emission. C2 now PULLS from a pre-approved pool instead, so total supply is
+// constant from the moment the pool is minted and no longer says anything about
+// emission progress. What tracks emission is how much C2 has drawn out of the pool,
+// i.e. C2's own balance (these tests never let buckets claim, so nothing leaves).
+//
+// This is a real consequence of the allowance model, not a test detail: an external
+// observer can no longer read emission progress off totalSupply either.
 func cvSupply(t *testing.T, ct *test_utils.ContractTest, h uint64) *big.Int {
-	r := call(t, ct, cvToken, "totalSupply", `{}`, "hive:cvreader", h, true)
-	return cvBig(cvField(r.Ret, "totalSupply"))
+	return cvBalance(t, ct, "contract:"+cvC2, h)
 }
 
 func cvBalance(t *testing.T, ct *test_utils.ContractTest, acct string, h uint64) *big.Int {

@@ -179,6 +179,13 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	// ---------------- PHASE 2: init ----------------
 	callN(1, tokenID, "init", `{"name":"Rogue","symbol":"ROG","decimals":0,"maxSupply":"100000000"}`, "token init")
 	waitKey(tokenID, "owner", "token owner")
+	// C2 no longer mints — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
+	// only the owner may mint. (C2 no longer needs to own the token at all; the
+	// handover below is kept only so the guardian token-op passthrough stays live.)
+	callN(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	callN(1, tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 	callN(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token -> C2")
 	callN(1, c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+

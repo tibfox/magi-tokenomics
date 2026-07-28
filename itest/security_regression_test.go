@@ -33,6 +33,7 @@ func TestSec_BoundaryJoinerCannotDilute(t *testing.T) {
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	call(t, &ct, rgC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, rgC7), owner, 0, true)
 	call(t, &ct, rgC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, rgC1), owner, 0, true)
 
@@ -68,6 +69,7 @@ func TestSec_EpochAliasRejected(t *testing.T) {
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
 	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
@@ -92,6 +94,7 @@ func TestSec_StaleEpochRescuable(t *testing.T) {
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
 	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
@@ -143,6 +146,7 @@ func TestSec_StaleRescueCannotDivertLiveEpoch(t *testing.T) {
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	// realistic cadence: 100-block epochs => stale grace must be >= 200 blocks after epoch end
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"100","baseAnnual":"1000000","blocksPerYear":"10000","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
 	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
@@ -173,6 +177,7 @@ func TestSec_C7SweepCannotStealClaimableYield(t *testing.T) {
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	call(t, &ct, fC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, fC7), owner, 0, true)
 	call(t, &ct, fC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, fC1), owner, 0, true)
 
@@ -201,6 +206,7 @@ func TestSec_CannotRequeueToEscapeVeto(t *testing.T) {
 	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
 
 	op := `{"op":"changeOwner","nonce":"1","newOwner":"hive:evil"}`
@@ -234,6 +240,7 @@ func TestSec_KeeperLagCannotStrandEpoch(t *testing.T) {
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	call(t, &ct, kC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, kC7), owner, 0, true)
 	call(t, &ct, kC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, kC1), owner, 0, true)
 

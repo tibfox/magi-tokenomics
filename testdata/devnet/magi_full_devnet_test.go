@@ -272,6 +272,14 @@ func TestDevnetMagiFull(t *testing.T) {
 	initAs(c6ID, fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "cfg_token", "C6 init")
 	callOwner(c6ID, "airdropBatch", fmt.Sprintf(
 		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C6 airdrop")
+	// C2 no longer mints — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
+	// only the owner may mint. (C2 no longer needs to own the token at all; the
+	// handover below is kept only so the guardian token-op passthrough stays live.)
+	callOwner(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	callOwner(tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
+
 	callOwner(tokenID, "changeOwner",
 		fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token ownership -> C2")
 
@@ -413,6 +421,14 @@ func TestDevnetMagiFull(t *testing.T) {
 		t.Fatalf("SEAM BROKEN: reporter totalShares=%s, chain=%s", expected.TotalShares, c3Total)
 	}
 	time.Sleep(15 * time.Second) // challenge window
+
+	// Snapshot before claiming. An ABSOLUTE balance check no longer works: holderA
+	// is also the emission pool holder, so its balance carries ~990k of undrawn
+	// pool. What must hold is that each holder GAINS exactly content+lp+yield.
+	preClaim := map[string]*big.Int{
+		holderA: stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderA),
+		holderB: stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderB),
+	}
 	claim := func(node int, id, what string) { callN(node, id, "claim", `{"epoch":"0"}`, what) }
 	claim(1, c3ID, "A claims content")
 	claim(2, c3ID, "B claims content")
@@ -439,9 +455,8 @@ func TestDevnetMagiFull(t *testing.T) {
 	// CONSERVATION — end to end, against real token balances.
 	//
 	// C3/C5 record only `claimed|<ep>|<acct>` = "1" (no per-account amount), so the
-	// only honest check is the holder's actual token balance. Each holder airdropped
-	// N and staked all of it, so their balance is exactly the sum of the three
-	// claims — which is also a cross-contract conservation proof.
+	// only honest measure is the holder's actual token balance — as a DELTA across
+	// the claims, since holderA also holds the undrawn emission pool.
 	c3TotalN := bigOf(c3Total)
 	c5TotalN := bigOf(waitKey(c5ID, "totalShares|0", "C5 totalShares"))
 	share := func(id, acct string) *big.Int { return bigOf(stateOf(id, "share|0|hive:"+acct)) }
@@ -459,11 +474,13 @@ func TestDevnetMagiFull(t *testing.T) {
 		yield := payout(c7Funded, stakeOf[acct], big.NewInt(1000))
 		want := new(big.Int).Add(content, new(big.Int).Add(lp, yield))
 
-		got := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+acct)
-		t.Logf("%s: content=%s lp=%s yield=%s -> want %s, on-chain balance %s",
+		now := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+acct)
+		got := new(big.Int).Sub(now, preClaim[acct])
+		t.Logf("%s: content=%s lp=%s yield=%s -> want %s, gained %s",
 			acct, content, lp, yield, want, got)
 		if got.Cmp(want) != 0 {
-			t.Fatalf("%s token balance %s != content+lp+yield %s", acct, got, want)
+			t.Fatalf("%s gained %s from its three claims, want content+lp+yield = %s",
+				acct, got, want)
 		}
 	}
 

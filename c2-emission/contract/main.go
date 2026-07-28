@@ -159,6 +159,21 @@ func Init(payload *string) *string {
 
 	// read + store the token's immutable maxSupply (getInfo → {"maxSupply":"..."} )
 	info := sdk.ContractCall(tok, "getInfo", "", nil)
+	// SOURCE of the emission pool. C2 no longer mints: it pulls each epoch's
+	// emission from an account that has approved it (token.transferFrom, the same
+	// allowance mechanism C1 uses for staking). Defaults to the deploying owner.
+	//
+	// This is why C2 does NOT need to own the token. Owning it was the framework's
+	// single largest trust concession — the owner contract permanently held mint,
+	// pause and changeOwner. Under the allowance model C2 holds no authority over
+	// the token at all; it is merely an approved spender, and token ownership can be
+	// renounced or handed to a DAO independently.
+	src := f(payload, "source")
+	if src == "" {
+		src = *owner
+	}
+	validateLedgerAddr(src)
+	set("cfg_source", src)
 	set("cfg_maxSupply", pickField(info, "maxSupply"))
 	if parseBig(getStr("cfg_maxSupply")).Sign() <= 0 {
 		sdk.Abort("token maxSupply must be > 0 (getInfo) — M-A")
@@ -192,10 +207,24 @@ func DistributeEpoch(_ *string) *string {
 	if has {
 		next = last + 1
 	}
-	maxSupply := parseBig(getStr("cfg_maxSupply"))
-	// Snapshot supply ONCE and track locally as we mint — do not rely on
-	// read-your-writes across ContractCalls within the tx (M3).
-	supply := parseBig(pickField(sdk.ContractCall(getStr("cfg_token"), "totalSupply", "", nil), "totalSupply"))
+	// How much the source can actually give us: min(what it approved, what it
+	// holds). Snapshot ONCE and decrement locally — read-your-writes across
+	// ContractCalls within a tx is not reliable (M3).
+	//
+	// This replaces the old maxSupply-headroom bound. The terminal semantics are
+	// identical: when the pool is exhausted the final epoch takes what remains and
+	// `terminal` latches, so later pokes are permanent no-ops rather than aborting
+	// transactions forever (which is what an unguarded transferFrom would do).
+	source := getStr("cfg_source")
+	tok := getStr("cfg_token")
+	allowed := parseBig(pickField(sdk.ContractCall(tok, "allowance",
+		`{"owner":"`+source+`","spender":"`+self()+`"}`, nil), "allowance"))
+	held := parseBig(pickField(sdk.ContractCall(tok, "balanceOf",
+		`{"account":"`+source+`"}`, nil), "balance"))
+	available := allowed
+	if held.Cmp(available) < 0 {
+		available = held
+	}
 	done := uint64(0)
 	// Fully-elapsed epoch indices are 0..current-1 (H1).
 	maxCatch := getU("cfg_maxCatch")
@@ -204,21 +233,23 @@ func DistributeEpoch(_ *string) *string {
 	}
 	for ep := next; ep < current && done < maxCatch; ep++ {
 		emission := emissionForEpoch(ep)
-		headroom := new(big.Int).Sub(maxSupply, supply)
-		if headroom.Sign() <= 0 {
-			set("terminal", "1")
+		if available.Sign() <= 0 {
+			set("terminal", "1") // pool exhausted or allowance revoked
 			break
 		}
-		minted := emission
+		amount := emission
 		terminal := false
-		if minted.Cmp(headroom) >= 0 {
-			minted = headroom
+		if amount.Cmp(available) >= 0 {
+			amount = available
 			terminal = true
 		}
-		if minted.Sign() > 0 {
-			adapter.Mint(asset(), self(), minted) // fungible: credits C2 (owner)
-			supply = new(big.Int).Add(supply, minted)
-			recordAllocations(ep, minted)
+		if amount.Sign() > 0 {
+			// transferFrom(source -> C2). Aborts if the source revoked the allowance
+			// or moved the tokens between our snapshot and now; the whole poke then
+			// reverts and can simply be retried.
+			adapter.PullFrom(asset(), source, amount)
+			available = new(big.Int).Sub(available, amount)
+			recordAllocations(ep, amount)
 		}
 		setU("cfg_lastEpoch_v", ep)
 		set("cfg_lastEpoch", "1")
@@ -574,6 +605,16 @@ func getStr(k string) string {
 	}
 	return ""
 }
+// validateLedgerAddr requires a known ledger domain. The emission source is an
+// account we call transferFrom against, so a bare id would be unusable.
+func validateLedgerAddr(a string) {
+	validateAddr(a)
+	if !hasPrefix(a, "hive:") && !hasPrefix(a, "contract:") &&
+		!hasPrefix(a, "did:") && !hasPrefix(a, "system:") {
+		sdk.Abort("source must be a ledger address (hive:/contract:/did:/system:)")
+	}
+}
+
 func validateAddr(a string) {
 	if len(a) == 0 || len(a) > 256 {
 		sdk.Abort("bad address")

@@ -79,12 +79,17 @@ deposit HBD                             # for RC
 token.init                              # deployer owns it at this point
 token.mint  {amount}                    # credits the OWNER (mint has no `to` field)
 token.transfer -> contract:<C6>         # fund the airdrop float
+token.transfer -> <source>              # move the emission pool to its holder
 C6.init ; C6.airdropBatch               # seed holders
 C1.init                                 # staking must be live before anyone stakes
   holders: token.approve -> C1 ; C1.stake
-token.changeOwner -> contract:<C2>      # hand the token over
-C2.init                                 # <- sets `genesis`; the emission clock starts here
+<source>: token.approve -> contract:<C2>  # let C2 draw the pool
+C2.init  {"source": "<source>"}         # <- sets `genesis`; the clock starts here
 C3.init / C5.init / C7.init             # they adopt C2's schedule automatically
+
+# token ownership is now OPTIONAL: C2 does not need it. Hand it over only if you
+# want C2's timelocked guardian pause/changeOwner passthrough; otherwise renounce
+# it or give it to a DAO.
 ```
 
 After this, each epoch runs: `C2.distributeEpoch` → `<dist>.pullFunding` →
@@ -132,6 +137,7 @@ independently — determinism guarantees they produce byte-identical payloads.
 
 ```json
 {"token":"vsc1...", "kind":"0", "tokenId":"",
+ "source":"hive:treasury",
  "genesis":"", "epochLen":"28800",
  "baseAnnual":"1000000", "blocksPerYear":"10512000",
  "buckets":"content:contract:vsc1C3:5000,lp:contract:vsc1C5:3000,yield:contract:vsc1C7:2000",
@@ -142,6 +148,7 @@ independently — determinism guarantees they produce byte-identical payloads.
 
 | field | meaning |
 |---|---|
+| `source` | the account holding the emission pool, which must `approve` this C2 to spend it. Defaults to the deploying owner. **C2 does not mint** — it draws each epoch from this allowance. |
 | `genesis` | first block of epoch 0. **Omit it** to start at the init block — that is the normal case. A genesis in the past is rejected (it would force a huge catch-up). |
 | `baseAnnual` / `blocksPerYear` | emission per epoch = `baseAnnual * epochLen / blocksPerYear`. **Flat** — the same every epoch, forever. |
 | `buckets` | `name:target:weightBps` triples, comma-separated. Weights must sum to **10000**. Targets can be any contract or address — a distributor, a DAO, or a plain treasury. |
@@ -149,10 +156,31 @@ independently — determinism guarantees they produce byte-identical payloads.
 | `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~8 epochs of catch-up. |
 | `timelock` | blocks a queued guardian operation waits before it may execute |
 
-Emission stops only when `maxSupply` headroom runs out: the final epoch mints the
-remainder and latches `terminal`, after which pokes are permanent no-ops. There is
-no time-based cap — see [`docs/halving-schedule.md`](docs/halving-schedule.md) if you
-need a decaying schedule.
+**C2 pulls, it does not mint.** Each epoch it draws `min(emission, available)` from
+`source`, where `available = min(allowance(source→C2), balanceOf(source))`, using
+`token.transferFrom` — the same allowance mechanism C1 uses for staking. Emission
+stops when the pool is exhausted or the allowance is revoked: the final epoch takes
+what remains and latches `terminal`, after which pokes are permanent no-ops.
+
+Two consequences worth understanding before you deploy:
+
+- **C2 never needs to own the token.** It holds no `mint`, `pause` or `changeOwner`
+  authority, so token ownership can be renounced or given to a DAO independently.
+  This removes what was the framework's single largest trust concession.
+- **`totalSupply` no longer tracks emission.** The whole pool exists from the moment
+  it is minted, so an explorer or market-cap tracker cannot read emission progress
+  from supply — watch the `source` account's balance falling instead.
+- **The schedule becomes revocable.** The pool holder can `decreaseAllowance` or move
+  the tokens and emission stops. Under the old minting model the schedule was
+  enforced by code. If you need the stronger guarantee, hold the pool in a timelocked
+  multisig, or keep the source separate from any operational account.
+
+Keep the `source` **separate from any participant account** — if the pool holder is
+also a staker or earner, its balance mixes the undrawn pool with its own rewards and
+accounting becomes hard to reason about.
+
+See [`docs/halving-schedule.md`](docs/halving-schedule.md) for a decaying schedule,
+which the pool model makes straightforward.
 
 ### C3 / C5 — distributors (content, LP)
 

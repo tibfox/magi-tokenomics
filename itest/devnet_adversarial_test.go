@@ -76,6 +76,7 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	// ---------------- PHASE 1: deploy + wire ----------------
 	// epochLen=10 so C7's hStart(0) != hEnd(9); emission = 1000000*10/100 = 100000/epoch
 	call(t, &ct, advTok, "init", `{"name":"ADV","symbol":"ADV","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, advTok, advC2, "10000000", 0)
 	call(t, &ct, advC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"%s","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`,
 		advTok, advGuardian, advVeto, advC3, advC7), owner, 0, true)
 	call(t, &ct, advC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, advTok), owner, 0, true)
@@ -201,7 +202,7 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 
 	// supply is exactly bootstrap(3000) + 2 epochs of emission(200000)
 	sup := call(t, &ct, advTok, "totalSupply", ``, "hive:anyone", 31, true)
-	assert.Equal(t, "203000", pickJSON(sup.Ret, "totalSupply"), "no unscheduled minting occurred")
+	assert.Equal(t, "10003000", pickJSON(sup.Ret, "totalSupply"), "no unscheduled minting occurred (3000 bootstrap + the 10000000 pool; epoch emission now comes OUT of that pool rather than adding to supply)")
 
 	// C3 never paid out more than it was funded
 	si := call(t, &ct, advC3, "shareOf", fmt.Sprintf(`{"epoch":"0","account":"%s"}`, advAlice), "hive:anyone", 31, true)

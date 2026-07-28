@@ -23,9 +23,14 @@ running this can have completely different economics.
 Think of it as a water system.
 
 **The tap — emission (C2).**
-On a fixed schedule it creates new tokens. It becomes the owner of your token, so
-it's the only thing that can mint. It doesn't hand tokens to people; it pours them
-into buckets.
+On a fixed schedule it releases tokens into buckets. It doesn't create them: you
+mint the whole pool up front, park it in an account, and let C2 spend from it — the
+same "approve a spender" pattern every token uses. C2 draws that epoch's amount and
+pours it into buckets.
+
+That means C2 has **no power over your token at all** — it can't mint, pause, or
+change the owner. The flip side: whoever holds the pool can revoke the approval and
+stop emission, so the schedule is a promise backed by whoever holds it, not by code.
 
 **The buckets — you define them.**
 You decide the buckets and how the flow splits, e.g. 50% content / 30% liquidity /
@@ -106,9 +111,15 @@ owner, not the guardian.
 | epoch length | how often payouts happen | 1 day |
 | buckets | who gets what share | 50% content, 30% LP, 20% stakers |
 | max supply | the hard ceiling | 21,000,000 |
+| the pool | how much C2 is approved to distribute | 10,000,000 |
 
-Emission is **flat** — the same amount every epoch, forever. It stops only when the
-max supply is reached. There's no built-in halving; if you want a decaying schedule,
+Emission is **flat** — the same amount every epoch, forever. It stops when the pool
+runs dry (or the approval is withdrawn).
+
+One thing to know: because the whole pool is minted up front, **total supply doesn't
+grow as rewards go out**. Explorers will show the full supply from day one, with most
+of it sitting in the pool account. To see how much has actually been distributed,
+watch that account's balance fall. There's no built-in halving; if you want a decaying schedule,
 the design is preserved in [`halving-schedule.md`](halving-schedule.md) and can be
 put back.
 

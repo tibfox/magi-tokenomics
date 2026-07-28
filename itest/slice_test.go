@@ -76,6 +76,7 @@ func TestVerticalSlice(t *testing.T) {
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, c3ID)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", c2init, owner, 0, true)
 	c3init := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID)
 	call(t, &ct, c3ID, "init", c3init, owner, 0, true)
@@ -98,4 +99,21 @@ func TestVerticalSlice(t *testing.T) {
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:bob"}`, "hive:x", 2, true)
 	assert.Contains(t, a.Ret, `"60000"`, "alice should get 60% of 100000")
 	assert.Contains(t, b.Ret, `"40000"`, "bob should get 40% of 100000")
+}
+
+// fundC2Pool mints the emission pool to `owner` and approves C2 to spend it.
+//
+// C2 no longer mints: it PULLS each epoch's emission from an account that has
+// approved it (token.transferFrom — the same allowance mechanism C1 uses for
+// staking). That means the pool must exist and be approved BEFORE any keeper poke,
+// and before ownership moves to C2 if the test does that, since only the token
+// owner may mint.
+//
+// Minting the full maxSupply as the pool preserves the old semantics exactly: the
+// pool IS the supply cap, so "emission stops at maxSupply" still holds.
+func fundC2Pool(t *testing.T, ct *test_utils.ContractTest, tokenID, c2ID, amount string, h uint64) {
+	t.Helper()
+	call(t, ct, tokenID, "mint", fmt.Sprintf(`{"amount":"%s"}`, amount), owner, h, true)
+	call(t, ct, tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"%s"}`, c2ID, amount), owner, h, true)
 }

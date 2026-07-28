@@ -98,6 +98,7 @@ func caSetupC3(t *testing.T, rMode, rAuth, rThr string) *test_utils.ContractTest
 	ct.RegisterContract(caC3ID, caOwner, read("../c3-distributor/artifacts/main.wasm"))
 
 	call(t, &ct, caTokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, caOwner, 0, true)
+	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 	call(t, &ct, caC3ID, "init", caC3InitPayload(rMode, rAuth, rThr, "0", "hive:guardian", "1"), caOwner, 0, true)
 	call(t, &ct, caTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, caC2ID), caOwner, 0, true)
@@ -259,6 +260,7 @@ func TestCovAuth_ConfigValidationRejectsBadPolicies(t *testing.T) {
 	ct.RegisterContract(caC3ID, caOwner, read("../c3-distributor/artifacts/main.wasm"))
 
 	call(t, &ct, caTokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, caOwner, 0, true)
+	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 
 	bad := func(name, payload, want string) {
@@ -399,6 +401,7 @@ func caSetupC3Policy(t *testing.T, rMode, rAuth, rThr, gMode, gAuth, gThr string
 	ct.RegisterContract(caC3ID, caOwner, read("../c3-distributor/artifacts/main.wasm"))
 
 	call(t, &ct, caTokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, caOwner, 0, true)
+	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 	call(t, &ct, caC3ID, "init", caC3InitPayload(rMode, rAuth, rThr, gMode, gAuth, gThr), caOwner, 0, true)
 	call(t, &ct, caTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, caC2ID), caOwner, 0, true)

@@ -173,6 +173,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	call(t, &ct, seamToken, "init",
 		`{"name":"Tribe","symbol":"TRIBE","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, seamToken, seamC2, "500000000", 0)
 	call(t, &ct, seamToken, "changeOwner",
 		fmt.Sprintf(`{"newOwner":"contract:%s"}`, seamC2), owner, 0, true)
 	call(t, &ct, seamC2, "init", fmt.Sprintf(
@@ -297,6 +298,7 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 
 	call(t, &ct, seamToken, "init",
 		`{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, seamToken, seamC2, "500000000", 0)
 	call(t, &ct, seamToken, "changeOwner",
 		fmt.Sprintf(`{"newOwner":"contract:%s"}`, seamC2), owner, 0, true)
 	call(t, &ct, seamC2, "init", fmt.Sprintf(

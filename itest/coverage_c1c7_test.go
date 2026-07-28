@@ -398,6 +398,7 @@ func c17BootYield(t *testing.T) test_utils.ContractTest {
 	call(t, &ct, c17C1, "init",
 		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"11","epochLen":"10","allow":""}`, tokenID), c17Owner, 0, true)
 	// baseAnnual*epochLen/blocksPerYear = 1000000*10/100 = 100000 per epoch
+	fundC2Pool(t, &ct, tokenID, c17C2, "500000000", 0)
 	call(t, &ct, c17C2, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`,
 		tokenID, c17C7), c17Owner, 0, true)

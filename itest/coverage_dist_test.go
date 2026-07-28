@@ -87,6 +87,13 @@ func covBoot(t *testing.T, distWasm, distID, window, reporter string) *test_util
 	ct.RegisterContract(distID, owner, read(distWasm))
 
 	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
+	// C2 no longer mints — it PULLS each epoch's emission from an account that has
+	// approved it. So the pool must exist and be approved before any poke. Minting
+	// the full maxSupply as the pool keeps the old semantics exactly: the pool IS
+	// the supply cap, so "emission stops at maxSupply" still holds.
+	call(t, &ct, covTokenID, "mint", `{"amount":"1000000000"}`, owner, 0, true)
+	call(t, &ct, covTokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000000"}`, covC2ID), owner, 0, true)
 	call(t, &ct, covC2ID, "init", covC2Init(distID), owner, 0, true)
 	call(t, &ct, distID, "init", covDistInit(window, reporter), owner, 0, true)
 	call(t, &ct, covTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, covC2ID), owner, 0, true)

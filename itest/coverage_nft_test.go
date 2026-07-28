@@ -167,6 +167,7 @@ func TestCovNFT_FungibleEmissionAndClaimStillWorks(t *testing.T) {
 	for _, c := range all {
 		byName[c.name] = c.tmpl
 	}
+	fundC2Pool(t, ct, nftTokenID, nftC2ID, "500000000", 0)
 	call(t, ct, nftC2ID, "init", nftPayload(byName["c2-emission"], "0", ""), nftOwner, 0, true)
 	call(t, ct, nftC3ID, "init", nftPayload(byName["c3-distributor"], "0", ""), nftOwner, 0, true)
 	call(t, ct, nftC7ID, "init", nftPayload(byName["c7-yield"], "0", ""), nftOwner, 0, true)

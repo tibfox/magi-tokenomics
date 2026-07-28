@@ -106,6 +106,9 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 	record("C1 staking", "stakeAtHeight", "query, historical", call(t, &ct, pC1, "stakeAtHeight",
 		fmt.Sprintf(`{"account":"%s","height":"2"}`, alice), alice, 40, true))
 
+	// Fund the pool BEFORE handing the token over — only the owner may mint.
+	fundC2Pool(t, &ct, pTok, pC2, "500000000", 40)
+
 	record("C0 token", "changeOwner", "hand token to C2", call(t, &ct, pTok, "changeOwner",
 		fmt.Sprintf(`{"newOwner":"contract:%s"}`, pC2), owner, 40, true))
 

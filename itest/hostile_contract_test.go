@@ -41,6 +41,7 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	ct.RegisterContract(hosEvil, hosMal, read("../hostile/artifacts/main.wasm"))
 
 	call(t, &ct, hosTok, "init", `{"name":"H","symbol":"H","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
 	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`, hosTok, hosC3, hosC7), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
 	call(t, &ct, hosC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hosreporter","reporterThreshold":"1","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2), owner, 0, true)

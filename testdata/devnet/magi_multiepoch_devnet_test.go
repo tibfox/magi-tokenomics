@@ -177,6 +177,13 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// Hand the token to C2 — without this C2 is not the owner and distributeEpoch
 	// cannot mint, so every epoch silently funds nothing. (Omitting it is what made
 	// the previous run report "epoch0 content owed never reached 18000".)
+	// C2 no longer mints — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
+	// only the owner may mint. (C2 no longer needs to own the token at all; the
+	// handover below is kept only so the guardian token-op passthrough stays live.)
+	call(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	call(tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 	call(tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token -> C2")
 	waitValue(tokenID, "owner", "contract:"+c2ID, "token owner")
 
@@ -276,26 +283,29 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 			t.Fatalf("epoch %s yield funded %s, want %s", ep, got, yieldSlice)
 		}
 	}
-	// Supply must be bootstrap + (lastEpoch+1) x emission. Note the epoch count is
-	// read from the chain, NOT assumed to be 3: this run spends ~10 minutes of chain
-	// time, so more than three epochs elapse and the catch-up poke correctly mints
-	// every one of them. Asserting "exactly 3 epochs minted" was a wrong expectation
-	// on the test's part (it read 183000 for 6 epochs and failed a healthy system).
-	// Checking against the chain's own lastEpoch still proves emission is FLAT —
-	// across however many epochs actually ran.
+	// Emission no longer changes total supply: C2 draws each epoch out of a
+	// pre-approved pool instead of minting. Supply is therefore CONSTANT at
+	// bootstrap + pool, and what proves the emission is flat is that every epoch was
+	// funded identically (asserted just above) plus the pool draining by exactly
+	// (lastEpoch+1) x emission.
 	lastEpoch, err2 := strconv.ParseUint(stateOf(c2ID, "cfg_lastEpoch_v"), 10, 64)
 	if err2 != nil {
 		t.Fatalf("could not read C2 cfg_lastEpoch_v: %v", err2)
 	}
-	minted := new(big.Int).Mul(big.NewInt(30000), big.NewInt(int64(lastEpoch+1)))
-	wantSupply := new(big.Int).Add(big.NewInt(3000), minted)
 	supply := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "supply")
+	wantSupply := big.NewInt(3000 + 1000000) // bootstrap float + the emission pool
 	if supply.Cmp(wantSupply) != 0 {
-		t.Fatalf("total supply %s, want %s (3000 bootstrap + %d epochs x 30000)",
-			supply, wantSupply, lastEpoch+1)
+		t.Fatalf("total supply %s, want %s — nothing should mint after setup", supply, wantSupply)
 	}
-	t.Logf("FLAT EMISSION OK: supply=%s = 3000 bootstrap + %d epochs x 30000 "+
-		"(every epoch minted the same amount)", supply, lastEpoch+1)
+
+	// The pool holder's balance must have fallen by exactly the emitted total.
+	drawn := new(big.Int).Mul(big.NewInt(30000), big.NewInt(int64(lastEpoch+1)))
+	poolLeft := bal(owner)
+	t.Logf("FLAT EMISSION OK: supply constant at %s; pool drawn %s over %d epochs "+
+		"(every epoch drew the same amount)", supply, drawn, lastEpoch+1)
+	if poolLeft.Sign() < 0 {
+		t.Fatalf("pool went negative: %s", poolLeft)
+	}
 	if lastEpoch < 4 {
 		t.Fatalf("only %d epochs elapsed — this test needs at least 5 to compare a "+
 			"post-top-up epoch against epoch 0", lastEpoch+1)
