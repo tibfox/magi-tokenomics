@@ -66,9 +66,12 @@ with inverted incentives:
 
 An epoch pays out only if all four happen, in this order:
 
-1. `C2.distributeEpoch` — keeper poke; mints the epoch's emission and records
-   bucket `owed`. Permissionless and idempotent. Set `submit.keeper` to have the
-   reporter do it, or leave it to a separate keeper.
+1. `C2.distributeEpoch` — keeper poke; DRAWS the epoch's emission from the approved
+   pool (`token.transferFrom`; C2 does not mint) and records bucket `owed`.
+   Permissionless and idempotent. Set `submit.keeper` to have the reporter do it, or
+   leave it to a separate keeper. If the pool cannot cover a whole epoch the poke is
+   a harmless no-op returning `{"distributed":"0","starved":true}` — top the pool up
+   and the next poke resumes and pays the backlog.
 2. `C3.pullFunding` — moves this epoch's slice from C2 into C3, recording
    `funded[epoch]`.
 3. `C3.submitShares` × N pages — the report.

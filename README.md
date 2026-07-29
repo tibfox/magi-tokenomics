@@ -11,9 +11,9 @@ whole system in plain language. This file is the build-and-deploy reference.
 
 | | contract | what it does |
 |---|---|---|
-| C0 | *(external)* `magi_token-contract` | the token itself. **Unmodified** — the framework takes ownership of it, it does not fork it. |
+| C0 | *(external)* `magi_token-contract` | the token itself. **Unmodified** — the framework drives it through its existing allowance interface, it does not fork it. |
 | C1 | `c1-staking` | staking with height checkpoints, so any epoch's stake can be proven after the fact |
-| C2 | `c2-emission` | mints each epoch's emission and splits it across named buckets. Becomes the token's owner. |
+| C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
 | C3 | `c3-distributor` | content/author rewards — accepts share lists, pays claims |
 | C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance |
 | C6 | `c6-migration` | one-off snapshot import / airdrop |
@@ -294,6 +294,8 @@ checkout to run; `testdata/` keeps them versioned here without breaking the buil
 | `magi_reporter_devnet_test.go` | the real reporter binary driving C3 | 12 min |
 | `magi_full_devnet_test.go` | **all 7 contracts + reporter**, then 14 staked-holder + 34 outsider attacks | 30 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
+| `magi_multiepoch_devnet_test.go` | **operation over time**: catch-up, flat emission, stake history, unstake maturity | 30 min |
+| `magi_refill_devnet_test.go` | **batched minting**: pool drained, refilled, backlog paid in full | 17 min |
 
 They need `reporter/bin/reporter` built first, and take `MAGI_FRAMEWORK_DIR` /
 `MAGI_TOKEN_WASM` to locate the artifacts. Each run builds a ~766MB docker image that

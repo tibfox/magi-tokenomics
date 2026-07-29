@@ -43,6 +43,7 @@ to your own paths.
 | `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks** | 30 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
+| `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -95,6 +96,16 @@ The reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server
 they need no Hive access — but they do talk to the devnet's real GraphQL endpoint and
 broadcast real transactions to the devnet chain.
 
+### `magi_refill_devnet_test.go`
+
+Proves a drained pool can be REFILLED — the property that makes batched minting
+viable. Pool is sized to exactly one epoch's emission, so epoch 0 funds and epoch 1
+starves regardless of how many epochs really elapsed when each poke lands; devnet
+wall-clock timing is not controllable, so the dependency is designed out rather than
+raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
+deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
+would make the refill impossible. The test therefore fails if anyone reintroduces it.
+
 ## Verification status against the allowance model
 
 C2 changed from minting each epoch to drawing from an approved pool. Every suite
@@ -109,20 +120,15 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
+| `magi_reporter_devnet_test.go` | n/a — see below | — |
 
-All five verified. Keep this table honest as the code moves on — "patched and
-compiles" is not "verified", and this table is the only place that distinction
-is recorded.
+`magi_reporter_devnet_test.go` deploys C2 only so C3 has a `funder` address; it never
+calls `distributeEpoch` or `pullFunding`, so no pool is drawn and the emission model
+cannot affect it. It has NOT been re-run since the change, and that is the reason —
+not an oversight.
 
-### `magi_refill_devnet_test.go`
-
-Proves a drained pool can be REFILLED — the property that makes batched minting
-viable. Pool is sized to exactly one epoch's emission, so epoch 0 funds and epoch 1
-starves regardless of how many epochs really elapsed when each poke lands; devnet
-wall-clock timing is not controllable, so the dependency is designed out rather than
-raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
-deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
-would make the refill impossible. The test therefore fails if anyone reintroduces it.
+Keep this table honest as the code moves on: "patched and compiles" is not
+"verified", and this table is the only place that distinction is recorded.
 
 ## Writing a multi-epoch test
 
