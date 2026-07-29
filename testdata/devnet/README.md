@@ -95,6 +95,23 @@ The reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server
 they need no Hive access — but they do talk to the devnet's real GraphQL endpoint and
 broadcast real transactions to the devnet chain.
 
+## Verification status against the allowance model
+
+C2 changed from minting each epoch to drawing from an approved pool. Every suite
+had to be re-run, because a suite that never mints a pool now funds nothing and
+fails several minutes later with a misleading message. Where each one stands:
+
+| suite | run against the pool model | runtime |
+|---|---|---|
+| `magi_full_devnet_test.go` | yes | 1869s |
+| `magi_multiepoch_devnet_test.go` | yes | 1903s |
+| `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
+| `magi_tokenomics_devnet_test.go` | **no** — setup patched, not executed | — |
+| `magi_c5c6c7_devnet_test.go` | **no** — setup patched, not executed | — |
+
+Keep this table honest. "Patched and compiles" is not "verified"; the last two
+rows are the ones to run before trusting the set.
+
 ## Writing a multi-epoch test
 
 `magi_multiepoch_devnet_test.go` took five runs to get right, and every failure was
