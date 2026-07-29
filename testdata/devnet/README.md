@@ -104,7 +104,7 @@ fails several minutes later with a misleading message. Where each one stands:
 | suite | run against the pool model | runtime |
 |---|---|---|
 | `magi_full_devnet_test.go` | yes | 1869s |
-| `magi_multiepoch_devnet_test.go` | yes | 1903s |
+| `magi_multiepoch_devnet_test.go` | yes | 1903s, re-run 1928s after the refill change |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |

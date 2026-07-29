@@ -156,11 +156,18 @@ independently — determinism guarantees they produce byte-identical payloads.
 | `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~8 epochs of catch-up. |
 | `timelock` | blocks a queued guardian operation waits before it may execute |
 
-**C2 pulls, it does not mint.** Each epoch it draws `min(emission, available)` from
-`source`, where `available = min(allowance(source→C2), balanceOf(source))`, using
-`token.transferFrom` — the same allowance mechanism C1 uses for staking. Emission
-stops when the pool is exhausted or the allowance is revoked: the final epoch takes
-what remains and latches `terminal`, after which pokes are permanent no-ops.
+**C2 pulls, it does not mint.** Each epoch it draws the full `emission` from `source`
+using `token.transferFrom` — the same allowance mechanism C1 uses for staking —
+bounded by `available = min(allowance(source→C2), balanceOf(source))`.
+
+**Exhaustion pauses emission; it does not end it.** An epoch is funded in full or not
+at all. When `available` cannot cover the next epoch the poke changes no state and
+returns `{"distributed":"0","starved":true}`. Top the pool up and the next poke
+resumes from exactly where it stopped, paying the epochs that elapsed meanwhile
+(oldest first, `maxCatch` per poke). Nothing latches.
+
+That is what makes **batched minting** work — see
+[Minting the pool in batches](#minting-the-pool-in-batches) below.
 
 Two consequences worth understanding before you deploy:
 
@@ -181,6 +188,44 @@ accounting becomes hard to reason about.
 
 See [`docs/halving-schedule.md`](docs/halving-schedule.md) for a decaying schedule,
 which the pool model makes straightforward.
+
+#### Minting the pool in batches
+
+You do not have to mint the whole supply up front. Minting in tranches (25% at a
+time, say) limits how much is pre-minted and revocable at any moment, at the cost of
+having to top up before each tranche runs out.
+
+```bash
+# batch 1 — before handing ownership anywhere, since mint is owner-only
+token.mint             {"amount":"25000000"}
+token.approve          {"spender":"contract:<C2>","amount":"25000000"}
+
+# ... epochs run until the pool cannot cover one, then pokes report starved ...
+
+# batch 2 — increaseAllowance, NOT approve
+token.mint             {"amount":"25000000"}
+token.increaseAllowance {"spender":"contract:<C2>","amount":"25000000"}
+```
+
+Three things to get right:
+
+- **Use `increaseAllowance`, not `approve`.** `approve` **overwrites** the allowance,
+  so re-approving would silently discard whatever the previous batch had left
+  unspent. `increaseAllowance` adds to it atomically.
+- **Do not hand token ownership to C2 if you intend to mint again.** `mint` is
+  owner-only, and C2's guardian passthrough permits only `pause`/`unpause`/
+  `changeOwner` — *not* `mint`. After `changeOwner(C2)` the only route to batch 2 is
+  to queue a `changeOwner` back through the timelock, mint, and hand it over again.
+  Under the allowance model C2 needs no ownership at all, so the simplest answer is
+  not to transfer it.
+- **A gap is paid retroactively.** If the pool sits empty for a while, the refill
+  causes every skipped epoch to be funded on subsequent pokes. Emission stays a
+  strict function of elapsed time, but a long outage means a large catch-up drawing
+  against the fresh batch — size the top-up with the backlog in mind.
+
+A remainder smaller than one epoch is never paid out as a short epoch; it waits in
+the pool for the next top-up. If you are minting a genuinely final batch and want the
+pool to land empty, size it to a whole multiple of the per-epoch emission.
 
 ### C3 / C5 — distributors (content, LP)
 

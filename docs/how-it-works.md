@@ -113,8 +113,25 @@ owner, not the guardian.
 | max supply | the hard ceiling | 21,000,000 |
 | the pool | how much C2 is approved to distribute | 10,000,000 |
 
-Emission is **flat** — the same amount every epoch, forever. It stops when the pool
-runs dry (or the approval is withdrawn).
+Emission is **flat** — the same amount every epoch, forever. It pauses when the pool
+runs dry (or the approval is withdrawn), and resumes if you top the pool up.
+
+**You can mint the pool in batches.** Rather than creating the whole supply on day
+one, you can mint, say, 25% at a time and add the next slice when it runs low. Less
+sits pre-minted, and the schedule keeps running across the boundary. Two rules:
+
+- Use **`increaseAllowance`** to top up, not `approve` — `approve` replaces the
+  figure and would throw away whatever the last batch had left over.
+- **Don't hand token ownership to the emission contract** if you plan to mint again.
+  Only the owner can mint, and the emission contract has no way to do it. It doesn't
+  need to own the token anyway.
+
+If the pool sits empty for a while, the missed days aren't lost — once refilled, the
+system pays them out one at a time until it has caught up. A long gap therefore means
+a large catch-up, so top up with that in mind.
+
+One small thing: a leftover too small to cover a whole day is never paid out as a
+part-day. It waits in the pool for the next top-up.
 
 One thing to know: because the whole pool is minted up front, **total supply doesn't
 grow as rewards go out**. Explorers will show the full supply from day one, with most

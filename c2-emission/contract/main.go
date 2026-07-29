@@ -17,7 +17,7 @@ import (
 func main() {}
 
 const (
-	kInit     = "init"
+	kInit           = "init"
 	defaultMaxCatch = 50
 )
 
@@ -25,8 +25,9 @@ const (
 
 // Init config (all economic params immutable after init, D2):
 // {"token","kind","tokenId","genesis","epochLen","baseAnnual","blocksPerYear","dustBucket",
-//  "guardianMode","guardianAuth","guardianThreshold","timelock",
-//  "buckets":"name:target:weightBps,name:target:weightBps,..."}
+//
+//	"guardianMode","guardianAuth","guardianThreshold","timelock",
+//	"buckets":"name:target:weightBps,name:target:weightBps,..."}
 //
 //go:wasmexport init
 func Init(payload *string) *string {
@@ -192,9 +193,6 @@ func Init(payload *string) *string {
 //go:wasmexport distributeEpoch
 func DistributeEpoch(_ *string) *string {
 	assertInit()
-	if present("terminal") {
-		return str(`{"terminal":true}`)
-	}
 	genesis := getU("cfg_genesis")
 	el := getU("cfg_epochLen")
 	h := blockHeight()
@@ -207,14 +205,19 @@ func DistributeEpoch(_ *string) *string {
 	if has {
 		next = last + 1
 	}
+	// Already caught up — return before touching the token so an idle poke costs
+	// two ContractCalls less. This is the common case once a keeper is running.
+	if next >= current {
+		return str(`{"distributed":0}`)
+	}
 	// How much the source can actually give us: min(what it approved, what it
 	// holds). Snapshot ONCE and decrement locally — read-your-writes across
 	// ContractCalls within a tx is not reliable (M3).
 	//
-	// This replaces the old maxSupply-headroom bound. The terminal semantics are
-	// identical: when the pool is exhausted the final epoch takes what remains and
-	// `terminal` latches, so later pokes are permanent no-ops rather than aborting
-	// transactions forever (which is what an unguarded transferFrom would do).
+	// Exhaustion is NOT permanent. The pool is meant to be refilled in batches, so
+	// a poke that cannot fund the next epoch reports `starved` and changes no
+	// state; a later top-up (mint + increaseAllowance) resumes from exactly here
+	// and pays the backlog that accrued meanwhile.
 	source := getStr("cfg_source")
 	tok := getStr("cfg_token")
 	allowed := parseBig(pickField(sdk.ContractCall(tok, "allowance",
@@ -231,35 +234,37 @@ func DistributeEpoch(_ *string) *string {
 	if maxCatch == 0 {
 		maxCatch = defaultMaxCatch
 	}
+	starved := false
 	for ep := next; ep < current && done < maxCatch; ep++ {
 		emission := emissionForEpoch(ep)
-		if available.Sign() <= 0 {
-			set("terminal", "1") // pool exhausted or allowance revoked
+		// All-or-nothing per epoch. A partially funded epoch would still be marked
+		// done and never revisited, so a later top-up could not repair it — and with
+		// a pool refilled in batches that boundary recurs at EVERY batch, not just
+		// once at the end. Waiting instead means every epoch is eventually paid in
+		// full. The cost is that a remainder smaller than one epoch never emits;
+		// size the final approve to land on a whole multiple if that matters.
+		if available.Cmp(emission) < 0 {
+			starved = true
 			break
 		}
-		amount := emission
-		terminal := false
-		if amount.Cmp(available) >= 0 {
-			amount = available
-			terminal = true
-		}
-		if amount.Sign() > 0 {
+		if emission.Sign() > 0 {
 			// transferFrom(source -> C2). Aborts if the source revoked the allowance
 			// or moved the tokens between our snapshot and now; the whole poke then
 			// reverts and can simply be retried.
-			adapter.PullFrom(asset(), source, amount)
-			available = new(big.Int).Sub(available, amount)
-			recordAllocations(ep, amount)
+			adapter.PullFrom(asset(), source, emission)
+			available = new(big.Int).Sub(available, emission)
+			recordAllocations(ep, emission)
 		}
 		setU("cfg_lastEpoch_v", ep)
 		set("cfg_lastEpoch", "1")
 		done++
-		if terminal {
-			set("terminal", "1")
-			break
-		}
 	}
-	return str(`{"distributed":"` + strconv.FormatUint(done, 10) + `"}`)
+	out := `{"distributed":"` + strconv.FormatUint(done, 10) + `"`
+	if starved {
+		// NOT terminal — a refill resumes from here and pays the backlog.
+		out += `,"starved":true`
+	}
+	return str(out + `}`)
 }
 
 // recordAllocations splits `minted` across buckets (remainder→dustBucket) and
@@ -448,10 +453,11 @@ func EmissionForEpochQ(payload *string) *string {
 
 // emissionForEpoch is FLAT: every epoch emits the same amount.
 //
-// A decaying (halving) schedule was removed as out of scope. Emission now stops
-// only when maxSupply headroom runs out, which latches `terminal` in
-// distributeEpoch. The epoch index is therefore unused, but is kept in the
-// signature so a future schedule can be reintroduced without touching callers.
+// A decaying (halving) schedule was removed as out of scope. Emission pauses
+// whenever the approved pool cannot cover a whole epoch, and resumes on refill;
+// it has no permanent end state. The epoch index is therefore unused, but is
+// kept in the signature so a future schedule can be reintroduced without
+// touching callers.
 func emissionForEpoch(_ uint64) *big.Int {
 	el := getU("cfg_epochLen")
 	base := parseBig(getStr("cfg_baseAnnual"))
@@ -587,10 +593,10 @@ func pu(s string) uint64 {
 	}
 	return n
 }
-func getU(k string) uint64 { return pu(getStr(k)) }
-func setU(k string, v uint64) { set(k, strconv.FormatUint(v, 10)) }
-func set(k, v string) { sdk.StateSetObject(k, v) }
-func getBig(k string) *big.Int { return parseBig(getStr(k)) }
+func getU(k string) uint64        { return pu(getStr(k)) }
+func setU(k string, v uint64)     { set(k, strconv.FormatUint(v, 10)) }
+func set(k, v string)             { sdk.StateSetObject(k, v) }
+func getBig(k string) *big.Int    { return parseBig(getStr(k)) }
 func setBig(k string, v *big.Int) { set(k, v.String()) }
 func parseBig(s string) *big.Int {
 	n := new(big.Int)
@@ -605,6 +611,7 @@ func getStr(k string) string {
 	}
 	return ""
 }
+
 // validateLedgerAddr requires a known ledger domain. The emission source is an
 // account we call transferFrom against, so a bare id would be unusable.
 func validateLedgerAddr(a string) {

@@ -1,3 +1,9 @@
+> **Note (2026-07-29):** this archive predates the allowance/pool model. The code
+> below still mints per epoch and latches `terminal` on exhaustion; C2 now pulls
+> from an approved pool and exhaustion only *pauses* emission. Restoring a decaying
+> schedule means changing `emissionForEpoch` only — ignore the `terminal`-latching
+> parts of the checklist below, which no longer describe how C2 behaves.
+
 # Halving (decaying emission) schedule — REMOVED, preserved for possible reuse
 
 **Status:** removed from C2 on 2026-07-26 as out of scope. Emission is now flat.

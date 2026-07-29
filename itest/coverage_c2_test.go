@@ -15,7 +15,7 @@ import (
 
 // Coverage tests for C2 (emission controller) — the economic core. The pre-existing
 // suite only ever exercised ONE epoch through ONE 100%-weight bucket, so the
-// flat emission, maxSupply exhaustion, keeper catch-up, multi-bucket splitting
+// flat emission, pool exhaustion, keeper catch-up, multi-bucket splitting
 // (incl. dust/remainder), claim authorization, the guardian passthrough round-trip
 // and the init validation gauntlet were all untested. These fill that gap.
 //
@@ -129,8 +129,13 @@ func cvCfg(over map[string]string) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// cvBoot registers + inits the token and C2, and hands token ownership to C2 so
-// it can mint. maxSupply is a knob (the exhaustion test needs a tiny one).
+// cvBoot registers + inits the token and C2 and mints the WHOLE maxSupply as the
+// approved pool, so "the pool is exhausted" and "maxSupply is reached" coincide —
+// which is what most of these tests want. maxSupply is a knob (the exhaustion tests
+// need a tiny one). The ownership handover at the end is legacy: C2 needs no
+// authority over the token under the allowance model, and keeping ownership is what
+// makes batched refills possible (see TestCovEmit_RefillResumesAndPaysBacklog,
+// which deliberately skips it).
 func cvBoot(t *testing.T, ct *test_utils.ContractTest, maxSupply string, over map[string]string) {
 	ct.RegisterContract(cvToken, owner, read(tokenWasmPath))
 	ct.RegisterContract(cvC2, owner, read(cvC2Wasm))
@@ -190,7 +195,7 @@ func cvDrain(t *testing.T, ct *test_utils.ContractTest, h uint64) string {
 		last = call(t, ct, cvC2, "distributeEpoch", ``, "hive:cvkeeper", h, true).Ret
 		if strings.Contains(last, `"distributed":"0"`) ||
 			strings.Contains(last, `"distributed":0`) ||
-			strings.Contains(last, `"terminal":true`) {
+			strings.Contains(last, `"starved":true`) {
 			return last
 		}
 	}
@@ -216,10 +221,14 @@ func TestCovEmit_EmissionIsFlatForever(t *testing.T) {
 	}
 }
 
-// With halving gone, maxSupply headroom is the ONLY thing that ends emission: the
-// final epoch mints just the remainder and `terminal` latches so later pokes are
-// permanent no-ops.
-func TestCovEmit_SupplyHeadroomIsTheOnlyTerminator(t *testing.T) {
+// With halving gone, the approved pool is the ONLY thing that pauses emission — and
+// it pauses it, it does not END it. An epoch is funded in full or not at all, so a
+// remainder smaller than one epoch is left in the pool rather than paid out short.
+//
+// Funding an epoch short would be unrepairable: the epoch is marked done and never
+// revisited, so a later top-up could not top IT up. With a pool refilled in batches
+// that boundary recurs at every batch, not once at the end.
+func TestCovEmit_PoolExhaustionPausesWithoutPartialEpochs(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := test_utils.NewContractTest()
 	t.Cleanup(func() { ct.DataLayer.Stop() })
@@ -227,14 +236,64 @@ func TestCovEmit_SupplyHeadroomIsTheOnlyTerminator(t *testing.T) {
 	cvBoot(t, &ct, "230000", map[string]string{})
 
 	ret := cvPoke(t, &ct, 100)
-	assert.Equal(t, "3", cvField(ret, "distributed"), "2 full epochs + the partial one")
+	assert.Equal(t, "2", cvField(ret, "distributed"),
+		"2 full epochs — the 30000 remainder must NOT become a third, partial epoch")
 
 	total := cvSupply(t, &ct, 100)
-	assert.Equal(t, "230000", total.String(), "must mint exactly up to maxSupply, never past it")
+	assert.Equal(t, "200000", total.String(), "only whole epochs are ever funded")
 
 	r2 := cvPoke(t, &ct, 500)
-	assert.Contains(t, r2, `"terminal":true`, "terminal must latch once headroom is gone")
-	assert.Equal(t, total.String(), cvSupply(t, &ct, 500).String(), "no mint after terminal")
+	assert.Contains(t, r2, `"starved":true`, "a poke that cannot fund the next epoch says so")
+	assert.NotContains(t, r2, `"terminal"`,
+		"exhaustion must NOT latch — a refill has to be able to resume the schedule")
+	assert.Equal(t, total.String(), cvSupply(t, &ct, 500).String(), "nothing is drawn while starved")
+}
+
+// A drained pool is not the end of the schedule. Minting the supply in batches (say
+// 25% at a time) only works if a top-up resumes emission from exactly where it
+// stopped AND pays the epochs that elapsed while the pool sat empty.
+func TestCovEmit_RefillResumesAndPaysBacklog(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+
+	ct.RegisterContract(cvToken, owner, read(tokenWasmPath))
+	ct.RegisterContract(cvC2, owner, read(cvC2Wasm))
+	call(t, &ct, cvToken, "init",
+		`{"name":"CV","symbol":"CV","decimals":0,"maxSupply":"1000000"}`, owner, 0, true)
+	// Batch 1: two epochs' worth. Ownership is deliberately NOT handed to C2 — under
+	// the allowance model C2 needs no authority over the token, and keeping mint with
+	// the owner is exactly what makes batched refills possible.
+	call(t, &ct, cvToken, "mint", `{"amount":"200000"}`, owner, 0, true)
+	call(t, &ct, cvToken, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"200000"}`, cvC2), owner, 0, true)
+	call(t, &ct, cvC2, "init", cvCfg(map[string]string{}), owner, 0, true)
+
+	// 3 epochs have elapsed but the pool covers only 2.
+	r1 := cvPoke(t, &ct, 3)
+	assert.Equal(t, "2", cvField(r1, "distributed"))
+	assert.Contains(t, r1, `"starved":true`)
+
+	// Time passes with the pool still empty: epochs 2..9 accrue unfunded.
+	assert.Contains(t, cvPoke(t, &ct, 10), `"starved":true`)
+	assert.Equal(t, "200000", cvSupply(t, &ct, 10).String(), "still nothing drawn")
+	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 10).String(), "epoch 2 unfunded so far")
+
+	// Batch 2: mint another 300000 and ADD it to the allowance. increaseAllowance,
+	// not approve — approve OVERWRITES and would clobber any unspent remainder.
+	call(t, &ct, cvToken, "mint", `{"amount":"300000"}`, owner, 10, true)
+	call(t, &ct, cvToken, "increaseAllowance",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"300000"}`, cvC2), owner, 10, true)
+
+	// The backlog is now paid, oldest first, and each epoch gets its FULL emission.
+	r2 := cvPoke(t, &ct, 10)
+	assert.Equal(t, "3", cvField(r2, "distributed"), "300000 funds exactly 3 backlog epochs")
+	assert.Equal(t, "500000", cvSupply(t, &ct, 10).String())
+	for _, ep := range []string{"2", "3", "4"} {
+		assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, ep, 10).String(),
+			"backlog epoch "+ep+" must be paid in full, not pro-rated")
+	}
+	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "5", 10).String(), "and no further")
 }
 
 // ---- epoch accounting ----------------------------------------------------
@@ -330,7 +389,7 @@ func TestCovEmit_CatchUpAfterDowntime(t *testing.T) {
 // The schedule must stop dead at the token's hard cap: the last funded epoch gets
 // only the remaining headroom, `terminal` latches, later pokes are no-ops, and
 // totalSupply NEVER exceeds maxSupply at any point.
-func TestCovEmit_MaxSupplyExhaustsMidSchedule(t *testing.T) {
+func TestCovEmit_PoolExhaustsMidSchedule(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := test_utils.NewContractTest()
 	t.Cleanup(func() { ct.DataLayer.Stop() })
@@ -345,57 +404,58 @@ func TestCovEmit_MaxSupplyExhaustsMidSchedule(t *testing.T) {
 	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 2), "distributed"))
 	assert.Equal(t, "200000", cvSupply(t, &ct, 2).String())
 
-	// epoch 2 wants 100000 but only 50000 of headroom is left
-	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 3), "distributed"))
-	assert.Equal(t, "50000", cvOwed(t, &ct, cvSolo, "2", 3).String(),
-		"final epoch must mint only the remaining headroom")
+	// epoch 2 wants 100000 but only 50000 is left, so it is not funded AT ALL
+	assert.Equal(t, "0", cvField(cvPoke(t, &ct, 3), "distributed"))
+	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 3).String(),
+		"an epoch is never funded short — the 50000 stays in the pool")
 	s := cvSupply(t, &ct, 3)
-	assert.Equal(t, cvCap, s.String(), "supply must land exactly on maxSupply")
-	assert.False(t, s.Cmp(cap_) > 0, "totalSupply must never exceed maxSupply")
+	assert.Equal(t, "200000", s.String(), "only whole epochs drawn")
+	assert.False(t, s.Cmp(cap_) > 0, "drawn must never exceed the pool")
 
-	// terminal latched; later pokes are no-ops and allocate nothing
-	assert.Contains(t, cvPoke(t, &ct, 4), `"terminal":true`)
-	assert.Contains(t, cvPoke(t, &ct, 50), `"terminal":true`)
-	assert.Equal(t, cvCap, cvSupply(t, &ct, 50).String(), "no mint past the cap")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "3", 50).String(), "no allocation past the cap")
+	// starved, but NOT latched: later pokes re-check and would resume on a refill
+	assert.Contains(t, cvPoke(t, &ct, 4), `"starved":true`)
+	assert.Contains(t, cvPoke(t, &ct, 50), `"starved":true`)
+	assert.Equal(t, "200000", cvSupply(t, &ct, 50).String(), "no draw past the pool")
+	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "3", 50).String(), "no allocation past the pool")
 	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "4", 50).String())
 
-	// conservation: everything minted is owed to somebody
+	// conservation: everything drawn is owed to somebody
 	total := new(big.Int)
 	for ep := 0; ep < 6; ep++ {
 		total.Add(total, cvOwed(t, &ct, cvSolo, fmt.Sprint(ep), 50))
 	}
-	assert.Equal(t, cvCap, total.String(), "sum of owed == total minted")
+	assert.Equal(t, "200000", total.String(), "sum of owed == total drawn")
 }
 
 // Same cap, but reached in a single catch-up poke — the headroom clamp must hold
 // inside the loop too (it tracks supply locally rather than re-reading it).
-func TestCovEmit_MaxSupplyClampInsideCatchUp(t *testing.T) {
+func TestCovEmit_PoolClampInsideCatchUp(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := test_utils.NewContractTest()
 	t.Cleanup(func() { ct.DataLayer.Stop() })
 	const cvCap = "250000"
 	cvBoot(t, &ct, cvCap, map[string]string{})
 
-	// one poke long after genesis: 10 epochs elapsed, only 2.5 fit under the cap
-	assert.Equal(t, "3", cvField(cvPoke(t, &ct, 10), "distributed"),
-		"catch-up must stop at the cap, not mint all 10 epochs")
+	// one poke long after genesis: 10 epochs elapsed, the pool covers only 2 whole ones
+	assert.Equal(t, "2", cvField(cvPoke(t, &ct, 10), "distributed"),
+		"catch-up must stop at the pool, not draw all 10 epochs")
 	s := cvSupply(t, &ct, 10)
-	assert.Equal(t, cvCap, s.String())
-	assert.False(t, s.Cmp(cvBig(cvCap)) > 0, "totalSupply must never exceed maxSupply")
+	assert.Equal(t, "200000", s.String())
+	assert.False(t, s.Cmp(cvBig(cvCap)) > 0, "drawn must never exceed the pool")
 
 	total := new(big.Int)
 	for ep := 0; ep < 10; ep++ {
 		total.Add(total, cvOwed(t, &ct, cvSolo, fmt.Sprint(ep), 10))
 	}
-	assert.Equal(t, cvCap, total.String(), "sum of owed == total minted")
+	assert.Equal(t, "200000", total.String(), "sum of owed == total drawn")
 	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "0", 10).String())
 	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "1", 10).String())
-	assert.Equal(t, "50000", cvOwed(t, &ct, cvSolo, "2", 10).String())
+	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 10).String(),
+		"the 50000 remainder is left in the pool, not paid as a partial epoch")
 	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "3", 10).String())
 
-	assert.Contains(t, cvPoke(t, &ct, 11), `"terminal":true`)
-	assert.Equal(t, cvCap, cvSupply(t, &ct, 11).String())
+	assert.Contains(t, cvPoke(t, &ct, 11), `"starved":true`)
+	assert.Equal(t, "200000", cvSupply(t, &ct, 11).String())
 }
 
 // ---- multi-bucket splitting + dust ---------------------------------------
