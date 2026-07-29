@@ -33,7 +33,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The six suites
+## The seven suites
 
 | test | covers | ~time |
 |---|---|---|
@@ -108,10 +108,21 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
+| `magi_refill_devnet_test.go` | yes | 1006s |
 
 All five verified. Keep this table honest as the code moves on — "patched and
 compiles" is not "verified", and this table is the only place that distinction
 is recorded.
+
+### `magi_refill_devnet_test.go`
+
+Proves a drained pool can be REFILLED — the property that makes batched minting
+viable. Pool is sized to exactly one epoch's emission, so epoch 0 funds and epoch 1
+starves regardless of how many epochs really elapsed when each poke lands; devnet
+wall-clock timing is not controllable, so the dependency is designed out rather than
+raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
+deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
+would make the refill impossible. The test therefore fails if anyone reintroduces it.
 
 ## Writing a multi-epoch test
 
