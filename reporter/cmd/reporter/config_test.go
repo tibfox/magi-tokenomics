@@ -181,3 +181,101 @@ func TestLoadConfig_MissingFileIsAnError(t *testing.T) {
 		t.Fatal("a missing config file must error")
 	}
 }
+
+// LP mode reads the indexer, not Hive. It must validate WITHOUT the content-only
+// settings, or every LP operator has to carry a meaningless tag and curve config.
+func TestValidate_LPModeNeedsIndexerNotContentSettings(t *testing.T) {
+	lp := func() *Config {
+		c, err := LoadConfig(writeCfg(t, ExampleConfig))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Source.Kind = SourceLP
+		c.Indexer.API = "http://indexer:8081/v1/graphql"
+		c.Indexer.Pool = "vsc1pool"
+		// deliberately strip everything content-specific
+		c.Source.Tag = ""
+		c.Source.Weight = ""
+		c.Source.Attribution = ""
+		c.Shares.AuthorCurve = ""
+		c.Shares.CurationCurve = ""
+		return c
+	}
+	if err := lp().Validate(); err != nil {
+		t.Fatalf("an LP config with no content settings must validate, got: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"no indexer api", func(c *Config) { c.Indexer.API = "" }, "indexer.api"},
+		{"no pool", func(c *Config) { c.Indexer.Pool = "" }, "indexer.pool"},
+		{"negative page size", func(c *Config) { c.Indexer.PageSize = -1 }, "page_size"},
+	} {
+		c := lp()
+		tc.mutate(c)
+		err := c.Validate()
+		if err == nil {
+			t.Fatalf("%s: expected an error", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error should mention %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// Splitting validation by kind must not let a typo through as "content".
+func TestValidate_UnknownSourceKindIsRejected(t *testing.T) {
+	c, err := LoadConfig(writeCfg(t, ExampleConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Source.Kind = "liquidity" // close, but not the accepted value
+	err = c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "source.kind") {
+		t.Fatalf("an unknown kind must be rejected, got: %v", err)
+	}
+}
+
+// Kind defaults to content, so every existing config keeps its meaning.
+func TestKind_DefaultsToContentAndStillValidatesTag(t *testing.T) {
+	c, err := LoadConfig(writeCfg(t, ExampleConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Source.Kind != "" {
+		t.Fatalf("the example config should not set a kind, got %q", c.Source.Kind)
+	}
+	if c.Kind() != SourceContent {
+		t.Fatalf("Kind() = %q, want %q", c.Kind(), SourceContent)
+	}
+	// and the content-only rules must still bite in the default mode
+	c.Source.Tag = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "source.tag") {
+		t.Fatalf("content mode must still require source.tag, got: %v", err)
+	}
+}
+
+// The LP example must load AND validate, or `init-config lp` hands operators a file
+// that fails on first use.
+func TestExampleLPConfig_LoadsAndValidates(t *testing.T) {
+	c, err := LoadConfig(writeCfg(t, ExampleLPConfig))
+	if err != nil {
+		t.Fatalf("LP example config failed to load: %v", err)
+	}
+	if c.Kind() != SourceLP {
+		t.Fatalf("Kind() = %q, want %q", c.Kind(), SourceLP)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("LP example config failed to validate: %v", err)
+	}
+	if c.Indexer.Pool == "" || c.Indexer.API == "" {
+		t.Fatal("the LP example must carry an indexer api and pool")
+	}
+	// The LP example must not smuggle in content policy it cannot honour.
+	if c.Source.Tag != "" {
+		t.Fatalf("LP example should not set source.tag, got %q", c.Source.Tag)
+	}
+}

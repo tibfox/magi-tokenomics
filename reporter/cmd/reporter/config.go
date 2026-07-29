@@ -28,6 +28,24 @@ type Config struct {
 		NetID string `json:"net_id"` // "vsc-mainnet" / "vsc-testnet" — must match the chain
 	} `json:"vsc"`
 
+	// Indexer is the LP data source, required only when source.kind = "lp".
+	//
+	// LP shares cannot come from the DEX itself: it stores balances as current state
+	// with no height checkpoints, so a past epoch cannot be priced and paying against
+	// live balances would be flash-liquidity gameable. The indexer's add_liq/rem_liq
+	// event log is replayed instead — see the lpsrc package doc.
+	//
+	// This is deliberately configurable per operator: several reporters running Attest
+	// mode may each point at a DIFFERENT indexer and must still agree, which holds
+	// because the reporter does its own arithmetic over raw events pinned to explicit
+	// heights. Nothing here may depend on an indexer-side view.
+	Indexer struct {
+		API      string `json:"api"`       // Hasura GraphQL endpoint, e.g. http://host:8081/v1/graphql
+		Secret   string `json:"secret"`    // x-hasura-admin-secret; empty when public
+		Pool     string `json:"pool"`      // pool contract id, as indexer_contract_id
+		PageSize int    `json:"page_size"` // rows per GraphQL page; 0 = default
+	} `json:"indexer"`
+
 	Contracts struct {
 		Distributor string `json:"distributor"` // C3 (content) or C5 (LP)
 		Funder      string `json:"funder"`      // C2; empty = a separate keeper pokes it
@@ -53,6 +71,10 @@ type Config struct {
 		Attribution string   `json:"attribution"`
 		Weight      string   `json:"weight"` // hive_rshares | token_stake
 		Exclude     []string `json:"exclude"`
+		// Kind selects the data source: "content" (default) reads Hive posts/votes
+		// for C3; "lp" replays liquidity events from the indexer for C5. The rest of
+		// the pipeline — canonicalisation, pagination, submission, Attest — is shared.
+		Kind string `json:"kind"`
 	} `json:"source"`
 
 	Shares struct {
@@ -148,33 +170,8 @@ func (c *Config) Validate() error {
 	if c.Epoch.Len == 0 {
 		return fmt.Errorf("epoch.len is required and must be > 0")
 	}
-	if c.Source.Tag == "" {
-		return fmt.Errorf("source.tag is required")
-	}
-	switch hivesrc.WeightMode(c.Source.Weight) {
-	case hivesrc.WeightHiveRshares:
-	case hivesrc.WeightTokenStake:
-		if c.Contracts.Stake == "" {
-			return fmt.Errorf("source.weight=token_stake requires contracts.stake (the C1 contract id)")
-		}
-	default:
-		return fmt.Errorf("source.weight must be %q or %q, got %q",
-			hivesrc.WeightHiveRshares, hivesrc.WeightTokenStake, c.Source.Weight)
-	}
-	switch hivesrc.Attribution(c.Source.Attribution) {
-	case hivesrc.AttributeCashout, hivesrc.AttributeCreated:
-	default:
-		return fmt.Errorf("source.attribution must be %q or %q, got %q",
-			hivesrc.AttributeCashout, hivesrc.AttributeCreated, c.Source.Attribution)
-	}
-	if c.Shares.AuthorRewardBps < 0 || c.Shares.AuthorRewardBps > 10000 {
-		return fmt.Errorf("shares.author_reward_bps must be 0..10000, got %d", c.Shares.AuthorRewardBps)
-	}
-	if _, _, err := parseCurve(c.Shares.AuthorCurve); err != nil {
-		return fmt.Errorf("shares.author_curve: %w", err)
-	}
-	if _, _, err := parseCurve(c.Shares.CurationCurve); err != nil {
-		return fmt.Errorf("shares.curation_curve: %w", err)
+	if err := c.validateSource(); err != nil {
+		return err
 	}
 	if c.Page.MaxBytes > 4096 {
 		return fmt.Errorf("page.max_bytes must be <= 4096 (the auth module's payload cap), got %d", c.Page.MaxBytes)
@@ -186,6 +183,72 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("submit.keeper requires contracts.funder (the C2 contract id)")
 	}
 	return nil
+}
+
+// SourceKind is the data source driving share computation.
+const (
+	SourceContent = "content" // Hive posts and votes -> C3
+	SourceLP      = "lp"      // indexer liquidity events -> C5
+)
+
+// Kind returns the configured source kind, defaulting to content.
+func (c *Config) Kind() string {
+	if c.Source.Kind == "" {
+		return SourceContent
+	}
+	return c.Source.Kind
+}
+
+// validateSource applies the checks that belong to one source kind only. Content
+// requires a tag and a weighting/attribution policy; LP requires an indexer and a
+// pool, and has no use for either — validating them anyway would force operators to
+// carry meaningless content settings in an LP config.
+func (c *Config) validateSource() error {
+	switch c.Kind() {
+	case SourceLP:
+		if c.Indexer.API == "" {
+			return fmt.Errorf("source.kind=lp requires indexer.api (the Hasura GraphQL endpoint)")
+		}
+		if c.Indexer.Pool == "" {
+			return fmt.Errorf("source.kind=lp requires indexer.pool (the pool contract id)")
+		}
+		if c.Indexer.PageSize < 0 {
+			return fmt.Errorf("indexer.page_size must be >= 0 (0 selects the default)")
+		}
+		return nil
+	case SourceContent:
+		if c.Source.Tag == "" {
+			return fmt.Errorf("source.tag is required")
+		}
+		switch hivesrc.WeightMode(c.Source.Weight) {
+		case hivesrc.WeightHiveRshares:
+		case hivesrc.WeightTokenStake:
+			if c.Contracts.Stake == "" {
+				return fmt.Errorf("source.weight=token_stake requires contracts.stake (the C1 contract id)")
+			}
+		default:
+			return fmt.Errorf("source.weight must be %q or %q, got %q",
+				hivesrc.WeightHiveRshares, hivesrc.WeightTokenStake, c.Source.Weight)
+		}
+		switch hivesrc.Attribution(c.Source.Attribution) {
+		case hivesrc.AttributeCashout, hivesrc.AttributeCreated:
+		default:
+			return fmt.Errorf("source.attribution must be %q or %q, got %q",
+				hivesrc.AttributeCashout, hivesrc.AttributeCreated, c.Source.Attribution)
+		}
+		if c.Shares.AuthorRewardBps < 0 || c.Shares.AuthorRewardBps > 10000 {
+			return fmt.Errorf("shares.author_reward_bps must be 0..10000, got %d", c.Shares.AuthorRewardBps)
+		}
+		if _, _, err := parseCurve(c.Shares.AuthorCurve); err != nil {
+			return fmt.Errorf("shares.author_curve: %w", err)
+		}
+		if _, _, err := parseCurve(c.Shares.CurationCurve); err != nil {
+			return fmt.Errorf("shares.curation_curve: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("source.kind must be %q or %q, got %q", SourceContent, SourceLP, c.Source.Kind)
+	}
 }
 
 // parseCurve reads a "num/den" rational exponent. A bare "2" means "2/1".
@@ -255,6 +318,39 @@ const ExampleConfig = `{
     "keeper":        true,
     "pull_funding":  true,
     "finalize":      true
+  }
+}
+`
+
+// ExampleLPConfig is what `reporter init-config lp` writes: the same pipeline fed
+// from the indexer's liquidity events instead of Hive, for a C5 instance.
+//
+// Note what is ABSENT — no tag, no weighting, no curation curve, no author split.
+// Those are content policy; an LP epoch is priced purely on how much liquidity was
+// held at both boundaries. `hive.api` is still needed because epoch selection reads
+// the chain head.
+const ExampleLPConfig = `{
+  "hive":      { "api": ["https://api.hive.blog"] },
+  "vsc":       { "api": "https://api.vsc.eco/api/v1/graphql", "net_id": "vsc-mainnet" },
+  "indexer":   {
+    "api":       "https://indexer.example.com/v1/graphql",
+    "secret":    "",
+    "pool":      "vsc1...POOL",
+    "page_size": 1000
+  },
+  "contracts": {
+    "distributor": "vsc1...C5",
+    "funder":      "vsc1...C2",
+    "stake":       ""
+  },
+  "epoch":  { "genesis": 0, "len": 28800 },
+  "source": { "kind": "lp" },
+  "page":   { "max_entries": 12, "max_bytes": 3500 },
+  "submit": {
+    "rc_limit":      10000,
+    "keeper":        false,
+    "finalize":      true,
+    "progress_file": "reporter-progress.json"
   }
 }
 `

@@ -40,9 +40,8 @@ at a plain treasury wallet. It's your call.
 **The payout contracts — who actually gets paid.**
 
 - **Content rewards (C3)** — for posting and voting on Hive.
-- **LP rewards (C5)** — for providing liquidity. Same machinery, separate instance.
-  **Not usable out of the box:** nothing currently works out who provided liquidity,
-  so you would have to supply that list yourself. See the README.
+- **LP rewards (C5)** — for providing liquidity. Same machinery, separate instance;
+  you run a second copy of the reporter in "lp" mode to feed it.
 - **Staking yield (C7)** — for locking tokens up.
 
 **Staking (C1).**
@@ -55,10 +54,16 @@ A one-off tool for launch: import a snapshot of existing holders and pay them ou
 Used once, then it just sits there.
 
 **The reporter — a program you run, not a contract.**
-Contracts cannot read Hive. So a small service reads Hive posts and votes, works out
-who earned what, and sends that list to **C3**. It's covered in its
-[own README](../reporter/README.md). It does **not** do this for LP rewards — it only
-understands posts and votes, not liquidity.
+Contracts cannot read the outside world. So a small service works out who earned what
+and sends that list in. It runs in one of two modes: reading **Hive posts and votes**
+to feed content rewards, or reading **liquidity history** to feed LP rewards. You run
+one copy per reward type. It's covered in its [own README](../reporter/README.md).
+
+For liquidity there's a wrinkle worth knowing: the exchange only records who holds
+liquidity *right now*, and a reward day is worked out after it has ended. So the
+service replays the deposit and withdrawal history to reconstruct who held what, and
+pays on **the smaller of your start-of-day and end-of-day position**. Otherwise you
+could add liquidity for a minute at the right moment and collect a whole day.
 
 ## How money actually moves
 
@@ -74,8 +79,7 @@ Each round (an "epoch", usually a day):
 1. Someone pokes C2 — anyone can, it's not privileged.
 2. C2 creates that day's tokens and records how much each bucket is owed.
 3. Each payout contract pulls its share.
-4. For content, the reporter submits the list of who earned what. (For LP you would
-   have to submit that list yourself — see the note on C5 above.)
+4. For content and LP, a reporter submits the list of who earned what.
 5. A **challenge window** opens — a guardian can cancel a bad report during it.
 6. After the window, people claim.
 
@@ -175,6 +179,17 @@ Hive keeps voting open on a post for 7 days. So there's a choice:
 
 The default is the fair one.
 
+### The LP rewards
+
+| setting | what it decides |
+|---|---|
+| indexer | which indexer to read liquidity history from — you can point at your own |
+| pool | which liquidity pool counts |
+
+There is no curve or split to choose here: an LP day is scored purely on how much
+liquidity you held, and you are paid on the smaller of your two day-boundary
+positions.
+
 ### Staking
 
 | setting | what it decides |
@@ -232,9 +247,9 @@ You don't need all of it.
   accounts loses you money rather than gaining it.
 - **NFT-backed tokens are not supported.** The setting exists but is deliberately
   blocked rather than half-working.
-- **LP rewards have no data source.** C5 pays out correctly, but nothing tells it who
-  provided liquidity — the reporter only understands posts and votes. Doing it
-  properly is harder than it sounds: the DEX records who holds LP *right now*, but
-  keeps no history, so a past day cannot be scored after the fact. Paying against
-  live balances would let someone add liquidity just before the snapshot and remove
-  it straight after. Staking avoids this because C1 keeps a history on purpose.
+- **LP rewards depend on an indexer.** Content rewards can be checked by anyone
+  against Hive. LP rewards are reconstructed from an indexer's event log, because the
+  exchange keeps no history of its own and putting that history on-chain would cost
+  gas nobody wants to pay. The events come from public transactions and the indexer is
+  publicly queryable, so the numbers can still be checked independently and a guardian
+  can still cancel a bad report — but it is one more operator you are relying on.

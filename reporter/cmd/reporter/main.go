@@ -26,6 +26,7 @@ import (
 
 	"magi_token/reporter/broadcast"
 	"magi_token/reporter/hivesrc"
+	"magi_token/reporter/lpsrc"
 	"magi_token/reporter/sharecore"
 	"magi_token/reporter/submit"
 	"magi_token/reporter/vscapi"
@@ -43,7 +44,7 @@ const usage = `reporter — magi-tokenomics share reporter
 usage: reporter <command> [flags]
 
 commands:
-  init-config              write an example config to stdout
+  init-config [lp]         write an example config to stdout ("lp" for a C5/LP one)
   epoch     -config F      show head/epoch state and verify config against chain
   compute   -config F      fetch + compute an epoch's shares (no chain writes)
   plan      -config F      print the ordered calls that would be broadcast
@@ -71,6 +72,10 @@ func run(args []string) error {
 
 	switch cmd {
 	case "init-config":
+		if len(os.Args) > 2 && os.Args[2] == "lp" {
+			fmt.Print(ExampleLPConfig)
+			return nil
+		}
 		fmt.Print(ExampleConfig)
 		return nil
 	case "help", "-h", "--help":
@@ -319,10 +324,13 @@ func orDash(v, dflt string) string {
 type computed struct {
 	Epoch  uint64
 	Window hivesrc.Window
-	Posts  int
-	Result sharecore.Result
-	Canon  string
-	Pages  []sharecore.Page
+	Posts  int // content mode: posts scored
+	// Providers is the LP-mode analogue of Posts: liquidity providers with a
+	// non-zero position at BOTH epoch boundaries.
+	Providers int
+	Result    sharecore.Result
+	Canon     string
+	Pages     []sharecore.Page
 }
 
 func (a *app) compute(epochFlag string) (*computed, error) {
@@ -333,6 +341,10 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 	if problems := a.verifyChainConfig(); len(problems) > 0 {
 		return nil, fmt.Errorf("refusing to compute: %s", strings.Join(problems, "; "))
 	}
+	if a.cfg.Kind() == SourceLP {
+		return a.computeLP(ep)
+	}
+
 	win, err := hivesrc.EpochWindow(a.hive, a.cfg.Epoch.Genesis, a.cfg.Epoch.Len, ep)
 	if err != nil {
 		return nil, err
@@ -378,6 +390,41 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 	}, nil
 }
 
+// computeLP prices one epoch from the indexer's liquidity event log.
+//
+// The epoch's block range is derived arithmetically, NOT via hivesrc.EpochWindow:
+// that resolves both boundaries to Hive timestamps, which LP has no use for, and
+// would make two Hive round-trips that can fail for no reason. The interval is the
+// same closed one the contracts use, [g+ep*el, g+(ep+1)*el-1].
+func (a *app) computeLP(ep uint64) (*computed, error) {
+	g, el := a.cfg.Epoch.Genesis, a.cfg.Epoch.Len
+	win := hivesrc.Window{
+		Epoch:      ep,
+		StartBlock: g + ep*el,
+		EndBlock:   g + (ep+1)*el - 1,
+	}
+	res, err := lpsrc.LPShares(
+		&lpsrc.HTTPTransport{Endpoint: a.cfg.Indexer.API, Secret: a.cfg.Indexer.Secret},
+		lpsrc.Options{
+			Pool:     a.cfg.Indexer.Pool,
+			Start:    win.StartBlock,
+			End:      win.EndBlock,
+			PageSize: a.cfg.Indexer.PageSize,
+		})
+	if err != nil {
+		return nil, err
+	}
+	canon := sharecore.Canonicalize(res)
+	return &computed{
+		Epoch:     ep,
+		Window:    win,
+		Providers: len(res.Shares),
+		Result:    res,
+		Canon:     canon,
+		Pages:     sharecore.Paginate(canon, a.cfg.Page.MaxEntries, a.cfg.Page.MaxBytes),
+	}, nil
+}
+
 func (a *app) cmdCompute(epochFlag string, asJSON bool) error {
 	c, err := a.compute(epochFlag)
 	if err != nil {
@@ -387,17 +434,26 @@ func (a *app) cmdCompute(epochFlag string, asJSON bool) error {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"epoch": c.Epoch, "start_block": c.Window.StartBlock, "end_block": c.Window.EndBlock,
 			"start_time": c.Window.StartTime, "end_time": c.Window.EndTime,
-			"posts": c.Posts, "accounts": len(c.Result.Shares),
+			"kind": a.cfg.Kind(), "posts": c.Posts, "providers": c.Providers,
+			"accounts":     len(c.Result.Shares),
 			"total_shares": c.Result.Total.String(),
 			"canonical":    c.Canon, "pages": c.Pages,
 		})
 	}
-	fmt.Printf("epoch %d  blocks %d..%d  (%s .. %s UTC)\n",
-		c.Epoch, c.Window.StartBlock, c.Window.EndBlock,
-		c.Window.StartTime.Format(hivesrc.HiveTimeLayout),
-		c.Window.EndTime.Format(hivesrc.HiveTimeLayout))
-	fmt.Printf("posts %d  accounts %d  total shares %s  pages %d\n",
-		c.Posts, len(c.Result.Shares), c.Result.Total, len(c.Pages))
+	if a.cfg.Kind() == SourceLP {
+		// No timestamps are resolved in LP mode, so printing them would show a zero
+		// time and read as a bug.
+		fmt.Printf("epoch %d  blocks %d..%d  (lp)\n", c.Epoch, c.Window.StartBlock, c.Window.EndBlock)
+		fmt.Printf("providers %d  total shares %s  pages %d\n",
+			c.Providers, c.Result.Total, len(c.Pages))
+	} else {
+		fmt.Printf("epoch %d  blocks %d..%d  (%s .. %s UTC)\n",
+			c.Epoch, c.Window.StartBlock, c.Window.EndBlock,
+			c.Window.StartTime.Format(hivesrc.HiveTimeLayout),
+			c.Window.EndTime.Format(hivesrc.HiveTimeLayout))
+		fmt.Printf("posts %d  accounts %d  total shares %s  pages %d\n",
+			c.Posts, len(c.Result.Shares), c.Result.Total, len(c.Pages))
+	}
 	if len(c.Pages) == 0 {
 		fmt.Println("\nnothing to report for this epoch")
 		return nil

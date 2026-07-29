@@ -15,10 +15,10 @@ whole system in plain language. This file is the build-and-deploy reference.
 | C1 | `c1-staking` | staking with height checkpoints, so any epoch's stake can be proven after the fact |
 | C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
 | C3 | `c3-distributor` | content/author rewards — accepts share lists, pays claims |
-| C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance. **You must supply the share data yourself** — the reporter does not compute LP shares. |
+| C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance. Fed by the reporter in `source.kind: "lp"` mode, which replays the indexer's liquidity events. |
 | C6 | `c6-migration` | one-off snapshot import / airdrop |
 | C7 | `c7-yield` | staking yield — **trustless**, reads C1 directly, needs no reporter |
-| — | `reporter/` | off-chain service that turns Hive activity into share lists ([README](reporter/README.md)) |
+| — | `reporter/` | off-chain service that turns Hive activity (or DEX liquidity history) into share lists ([README](reporter/README.md)) |
 | — | `auth/`, `adapter/` | shared modules: multi-party authorisation, value-asset abstraction |
 
 `sdk/` and `runtime/` are copied verbatim from `magi_token-contract` and **must never
@@ -41,7 +41,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 
 ```bash
 GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 65 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 75 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 85 reporter tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -96,150 +96,22 @@ After this, each epoch runs: `C2.distributeEpoch` → `<dist>.pullFunding` →
 `submitShares` pages → `finalizeEpoch` → holders `claim`. The reporter does all of
 that **for C3 only**; C7 needs just `pullFunding` and then holders claim.
 
-> **C5 has no data source.** The contract works and is tested, but nothing computes
-> LP shares: the reporter derives shares from Hive posts and votes, and has no
-> liquidity input. Point a bucket at C5 and its funding will accumulate unclaimed
-> until a guardian sweeps it. Using C5 means writing a producer that reads LP
-> positions and calls `C5.submitShares` on the same schedule.
+> **C5 is fed from the indexer, not the DEX.** Run a second reporter instance with
+> `source.kind: "lp"` and an `indexer` block (`reporter init-config lp`). It replays
+> `add_liq`/`rem_liq` events to reconstruct each provider's LP balance at a height,
+> and credits `min(LP(epochStart), LP(epochEnd))`.
 >
-> Against `vsc-eco/dex-contracts` the balances are there (`lp-{address}` per provider,
-> `tlp` for the total) but **only as current state — there are no height
-> checkpoints**, so a past epoch cannot be priced after the fact. Reading live LP
-> would be flash-liquidity gameable in the obvious way (add before the snapshot,
-> remove after), which is exactly what C1's checkpoints and C7's
-> `min(stakeAt(start), stakeAt(end))` exist to prevent. A producer would have to
-> reconstruct LP history from `add_liquidity`/`remove_liquidity` itself.
-
-## Init reference
-
-Every contract takes `token` and `kind`. **`kind` must be `"0"`** (fungible);
-editioned-NFT mode fails closed — see [NFT mode](#nft-mode-not-available). `tokenId`
-must be empty. Amounts and heights are **decimal strings**, not numbers.
-
-### Shared: authority blocks
-
-`auth` appears wherever a role is configured (`guardian`, `veto`, `reporter`). Each
-role takes three fields, e.g. `guardianMode` / `guardianAuth` / `guardianThreshold`:
-
-| mode | meaning | `Auth` format |
-|---|---|---|
-| `"0"` Single | one account acts alone | `hive:alice` |
-| `"1"` Cosigned | M-of-N, all signatures in **one** transaction | `hive:a,hive:b,hive:c` |
-| `"2"` Attest | M-of-N, submitted **separately**; identical payloads accumulate until the threshold is met | `hive:a,hive:b,hive:c` |
-
-`Threshold` is M. Attest is what lets several machines run the reporter
-independently — determinism guarantees they produce byte-identical payloads.
-
-> Guardian and veto authorities must be **disjoint**, and so must reporter and
-> guardian. `init` rejects overlaps: one party that could both push a fraudulent
-> report and refuse to cancel it defeats the challenge window.
-
-### C1 — staking
-
-```json
-{"token":"vsc1...", "kind":"0", "tokenId":"",
- "cooldown":"86400", "epochLen":"28800", "allow":""}
-```
-
-| field | meaning |
-|---|---|
-| `cooldown` | blocks an unstake waits before it can be withdrawn. **Must exceed `epochLen`**, so a staker cannot exit an epoch they are still earning for. |
-| `epochLen` | epoch length in blocks (3s/block: 1 day ≈ 28,800) |
-| `allow` | comma-separated allowlist for `stakeFor` (staking on someone else's behalf). Empty = nobody. **Immutable after init.** |
-
-### C2 — emission
-
-```json
-{"token":"vsc1...", "kind":"0", "tokenId":"",
- "source":"hive:treasury",
- "genesis":"", "epochLen":"28800",
- "baseAnnual":"1000000", "blocksPerYear":"10512000",
- "buckets":"content:contract:vsc1C3:5000,lp:contract:vsc1C5:3000,yield:contract:vsc1C7:2000",
- "dustBucket":"content", "maxCatch":"50", "timelock":"5760",
- "guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1",
- "vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1"}
-```
-
-| field | meaning |
-|---|---|
-| `source` | the account holding the emission pool, which must `approve` this C2 to spend it. Defaults to the deploying owner. **C2 does not mint** — it draws each epoch from this allowance. |
-| `genesis` | first block of epoch 0. **Omit it** to start at the init block — that is the normal case. A genesis in the past is rejected (it would force a huge catch-up). |
-| `baseAnnual` / `blocksPerYear` | emission per epoch = `baseAnnual * epochLen / blocksPerYear`. **Flat** — the same every epoch, forever. |
-| `buckets` | `name:target:weightBps` triples, comma-separated. Weights must sum to **10000**. Targets can be any contract or address — a distributor, a DAO, or a plain treasury. |
-| `dustBucket` | which bucket receives the remainder from integer division. Must name a configured bucket. |
-| `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~6 epochs of catch-up (~9 with one bucket). |
-| `timelock` | blocks a queued guardian operation waits before it may execute |
-
-**C2 pulls, it does not mint.** Each epoch it draws the full `emission` from `source`
-using `token.transferFrom` — the same allowance mechanism C1 uses for staking —
-bounded by `available = min(allowance(source→C2), balanceOf(source))`.
-
-**Exhaustion pauses emission; it does not end it.** An epoch is funded in full or not
-at all. When `available` cannot cover the next epoch the poke changes no state and
-returns `{"distributed":"0","starved":true}`. Top the pool up and the next poke
-resumes from exactly where it stopped, paying the epochs that elapsed meanwhile
-(oldest first, `maxCatch` per poke). Nothing latches.
-
-That is what makes **batched minting** work — see
-[Minting the pool in batches](#minting-the-pool-in-batches) below.
-
-Two consequences worth understanding before you deploy:
-
-- **C2 never needs to own the token.** It holds no `mint`, `pause` or `changeOwner`
-  authority, so token ownership can be renounced or given to a DAO independently.
-  This removes what was the framework's single largest trust concession.
-- **`totalSupply` no longer tracks emission.** The whole pool exists from the moment
-  it is minted, so an explorer or market-cap tracker cannot read emission progress
-  from supply — watch the `source` account's balance falling instead.
-- **The schedule becomes revocable.** The pool holder can `decreaseAllowance` or move
-  the tokens and emission stops. Under the old minting model the schedule was
-  enforced by code. If you need the stronger guarantee, hold the pool in a timelocked
-  multisig, or keep the source separate from any operational account.
-
-Keep the `source` **separate from any participant account** — if the pool holder is
-also a staker or earner, its balance mixes the undrawn pool with its own rewards and
-accounting becomes hard to reason about.
-
-See [`docs/halving-schedule.md`](docs/halving-schedule.md) for a decaying schedule,
-which the pool model makes straightforward.
-
-#### Minting the pool in batches
-
-You do not have to mint the whole supply up front. Minting in tranches (25% at a
-time, say) limits how much is pre-minted and revocable at any moment, at the cost of
-having to top up before each tranche runs out.
-
-```bash
-# batch 1 — before handing ownership anywhere, since mint is owner-only
-token.mint             {"amount":"25000000"}
-token.approve          {"spender":"contract:<C2>","amount":"25000000"}
-
-# ... epochs run until the pool cannot cover one, then pokes report starved ...
-
-# batch 2 — increaseAllowance, NOT approve
-token.mint             {"amount":"25000000"}
-token.increaseAllowance {"spender":"contract:<C2>","amount":"25000000"}
-```
-
-Three things to get right:
-
-- **Use `increaseAllowance`, not `approve`.** `approve` **overwrites** the allowance,
-  so re-approving would silently discard whatever the previous batch had left
-  unspent. `increaseAllowance` adds to it atomically.
-- **Do not hand token ownership to C2 if you intend to mint again.** `mint` is
-  owner-only, and C2's guardian passthrough permits only `pause`/`unpause`/
-  `changeOwner` — *not* `mint`. After `changeOwner(C2)` the only route to batch 2 is
-  to queue a `changeOwner` back through the timelock, mint, and hand it over again.
-  Under the allowance model C2 needs no ownership at all, so the simplest answer is
-  not to transfer it.
-- **A gap is paid retroactively.** If the pool sits empty for a while, the refill
-  causes every skipped epoch to be funded on subsequent pokes. Emission stays a
-  strict function of elapsed time, but a long outage means a large catch-up drawing
-  against the fresh batch — size the top-up with the backlog in mind.
-
-A remainder smaller than one epoch is never paid out as a short epoch; it waits in
-the pool for the next top-up. If you are minting a genuinely final batch and want the
-pool to land empty, size it to a whole multiple of the per-epoch emission.
+> The DEX cannot be read directly for this: it stores balances as current state
+> (`lp-{address}`, total at `tlp`) with **no height checkpoints**, so a finished epoch
+> cannot be priced from it, and paying against live balances would be
+> flash-liquidity gameable — add just before the snapshot, remove just after. The
+> `min(start, end)` rule mirrors C7's anti-flash-stake rule for exactly that reason.
+>
+> LP rewards therefore inherit a trust assumption on the indexer operator. It is not
+> a new one: the reporter was already trusted to submit an honest list, the events
+> derive from on-chain transactions, and Hasura is publicly queryable — so anyone can
+> recompute independently and a guardian can still veto in the challenge window.
+> Details in [`reporter/README.md`](reporter/README.md).
 
 ### C3 / C5 — distributors (content, LP)
 

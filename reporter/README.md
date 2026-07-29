@@ -64,6 +64,54 @@ with inverted incentives:
 
 ## The four on-chain steps
 
+## Two source kinds
+
+`source.kind` selects where shares come from. The rest of the pipeline —
+canonicalisation, pagination, submission, Attest quorum — is identical either way.
+
+| kind | reads | feeds |
+|---|---|---|
+| `content` (default) | Hive posts and votes | C3 |
+| `lp` | the indexer's liquidity event log | C5 |
+
+`reporter init-config lp` writes a ready LP config. It needs an `indexer` block:
+
+```json
+"indexer": {
+  "api":       "https://indexer.example.com/v1/graphql",
+  "secret":    "",
+  "pool":      "vsc1...POOL",
+  "page_size": 1000
+}
+```
+
+**Why LP does not read the DEX directly.** `vsc-eco/dex-contracts` keeps LP balances
+as current state (`lp-{address}`, total at `tlp`) with no height checkpoints. An epoch
+is priced after it ends, so live state cannot answer "who held LP during epoch 41",
+and paying against it would be flash-liquidity gameable — add just before the
+snapshot, remove just after. So the reporter replays `add_liq`/`rem_liq` events:
+
+```
+LP(provider, H) = SUM(lp_minted where height <= H) - SUM(lp_burned where height <= H)
+```
+
+and credits **`min(LP(start), LP(end))`**, mirroring what C7 does for stake:
+liquidity must be present at BOTH epoch boundaries to earn anything.
+
+**The indexer is configurable per operator, on purpose.** Several reporters running
+Attest mode may each point at a different indexer and must still produce
+byte-identical payloads. That holds because the reporter does its own arithmetic over
+raw events pinned to explicit heights — it never depends on an indexer-side view.
+Do not "optimise" this by moving the aggregation into SQL: a view that differs between
+deployments turns a quorum into a silent byte-mismatch.
+
+This does mean LP rewards inherit a trust assumption on the indexer operator. It is
+not a *new* one — the reporter was already trusted to submit an honest list, the
+events derive from on-chain transactions, and Hasura is publicly queryable, so anyone
+can recompute independently and a guardian can still veto during the challenge window.
+
+## The epoch sequence
+
 An epoch pays out only if all four happen, in this order:
 
 1. `C2.distributeEpoch` — keeper poke; DRAWS the epoch's emission from the approved
