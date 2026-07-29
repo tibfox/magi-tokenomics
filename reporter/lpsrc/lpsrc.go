@@ -42,6 +42,7 @@ import (
 	"math/big"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"magi_token/reporter/sharecore"
@@ -285,9 +286,30 @@ func LPShares(t Transport, o Options) (sharecore.Result, error) {
 		if credit.Sign() == 0 {
 			continue // sharecore.Canonicalize drops zeroes anyway; skip explicitly
 		}
+		// The distributor credits only domain-prefixed ledger addresses and SILENTLY
+		// SKIPS anything else. So a bare provider name would not be an odd entry — it
+		// would mean the whole epoch pays nobody while its funding accumulates, with
+		// nothing in the logs. Refuse to build such a report.
+		if !isLedgerAddr(name) {
+			return sharecore.Result{Shares: map[string]*big.Int{}, Total: new(big.Int)},
+				fmt.Errorf("provider %q is not a ledger address (needs a hive:/contract:/did:/system: prefix) — "+
+					"the distributor would skip it and the epoch would pay nobody", name)
+		}
 		c := new(big.Int).Set(credit)
 		res.Shares[name] = c
 		res.Total.Add(res.Total, c)
 	}
 	return res, nil
+}
+
+// isLedgerAddr mirrors the distributor's own check (c5-lp/contract: isLedgerAddr).
+// Kept deliberately identical: if these ever diverge, the reporter would submit
+// entries the contract discards.
+func isLedgerAddr(a string) bool {
+	for _, p := range []string{"hive:", "contract:", "did:", "system:"} {
+		if strings.HasPrefix(a, p) {
+			return true
+		}
+	}
+	return false
 }

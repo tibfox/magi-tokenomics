@@ -349,6 +349,7 @@ const ExampleLPConfig = `{
   "submit": {
     "rc_limit":      10000,
     "keeper":        false,
+    "pull_funding":  true,
     "finalize":      true,
     "progress_file": "reporter-progress.json"
   }

@@ -278,4 +278,24 @@ func TestExampleLPConfig_LoadsAndValidates(t *testing.T) {
 	if c.Source.Tag != "" {
 		t.Fatalf("LP example should not set source.tag, got %q", c.Source.Tag)
 	}
+	// pull_funding has no default — it is a plain bool, so omitting it yields false
+	// and the distributor never gets funded. The epoch then reports shares against
+	// zero funding and pays nobody, silently. Both examples must set it.
+	if !c.Submit.PullFunding {
+		t.Fatal("LP example must set submit.pull_funding, or C5 is never funded")
+	}
+	if !c.Submit.Finalize {
+		t.Fatal("LP example must set submit.finalize, or the epoch never closes")
+	}
+}
+
+// The same trap in the content example.
+func TestExampleConfig_PullsFunding(t *testing.T) {
+	c, err := LoadConfig(writeCfg(t, ExampleConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Submit.PullFunding {
+		t.Fatal("content example must set submit.pull_funding")
+	}
 }

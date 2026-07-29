@@ -240,3 +240,33 @@ func TestLPShares_RejectsBadOptions(t *testing.T) {
 }
 
 var _ = big.NewInt
+
+// The distributor credits only domain-prefixed ledger addresses and silently skips
+// the rest. A bare provider name would therefore not be one bad entry — it would be
+// an epoch that pays nobody while its funding accumulates, with nothing logged.
+func TestLPShares_BareProviderNameIsRefused(t *testing.T) {
+	f := &fakeIndexer{adds: []row{{"alice", "1000", 1}}}
+	_, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+	if err == nil {
+		t.Fatal("a bare provider name must be refused, not submitted")
+	}
+	if !strings.Contains(err.Error(), "ledger address") {
+		t.Fatalf("error should explain the prefix requirement, got: %v", err)
+	}
+}
+
+// contract: and did: providers are legitimate — a contract can hold LP.
+func TestLPShares_AcceptsAllLedgerDomains(t *testing.T) {
+	f := &fakeIndexer{adds: []row{
+		{"hive:alice", "100", 1},
+		{"contract:vsc1pool", "200", 1},
+		{"did:key:z6Mk", "300", 1},
+	}}
+	res, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+	if err != nil {
+		t.Fatalf("all ledger domains must be accepted: %v", err)
+	}
+	if len(res.Shares) != 3 {
+		t.Fatalf("want 3 providers, got %v", mustShares(t, res))
+	}
+}
