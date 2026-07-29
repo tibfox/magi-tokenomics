@@ -85,23 +85,36 @@ reporter serving a busy tribe needs a funded account, not the free tier.
 
 | epochs | buckets | RC | free tier |
 |---:|---:|---:|---|
-| 1 | 1 | 994 | ok |
-| 5 | 1 | 4,044 | ok |
-| 10 | 1 | 7,857 | ok |
-| 25 | 1 | 19,371 | **exceeds** |
-| 50 | 1 | 38,534 | **exceeds** |
-| 1 | 3 | 1,433 | ok |
-| 10 | 3 | 12,248 | **exceeds** |
-| 50 | 3 | 60,652 | **exceeds** |
+| 1 | 1 | 1,279 | ok |
+| 5 | 1 | 5,242 | ok |
+| 10 | 1 | 10,196 | **exceeds** |
+| 25 | 1 | 25,134 | **exceeds** |
+| 50 | 1 | 50,004 | **exceeds** |
+| 1 | 3 | 1,718 | ok |
+| 10 | 3 | 14,587 | **exceeds** |
+| 50 | 3 | 72,122 | **exceeds** |
 
-About **~770 RC per epoch per bucket**. This is the cost that catches operators out:
-a keeper that stops for a fortnight and then pokes once has to catch up every missed
-epoch in a single transaction.
+About **~995 RC per epoch** with one bucket and **~1,437** with three, over a fixed
+base of ~280. This is the cost that catches operators out: a keeper that stops for a
+fortnight and then pokes once has to catch up every missed epoch in a single
+transaction.
+
+> **Re-measured 2026-07-29 for the allowance model, and the numbers went UP** — about
+> 19% per epoch with one bucket. C2 used to `mint`; it now does a cross-contract
+> `transferFrom` per epoch plus two reads (`allowance`, `balanceOf`) per poke. The
+> previous figures in this table (~770 RC/epoch/bucket) were measured under the
+> minting model and are no longer accurate.
+>
+> The measurement itself had also silently broken: `rc_measure_test.go` never minted
+> a pool, so every poke returned `{"distributed":"0","starved":true}` and the table
+> was recording a 271-RC no-op. If these numbers ever look suspiciously flat, check
+> the `ret=` column shows a non-zero `distributed` before trusting them.
 
 **This is what `maxCatch` is for.** It caps how many epochs one poke will process
-(1..1000, default 50). With 3 buckets, the free tier covers only ~8 epochs of
-catch-up — so either keep the keeper running, fund it, or set `maxCatch` low enough
-that a poke always fits your keeper's RC and simply poke repeatedly until caught up.
+(1..1000, default 50). The free tier now covers only **~9 epochs of catch-up with one
+bucket and ~6 with three** — so either keep the keeper running, fund it, or set
+`maxCatch` low enough that a poke always fits your keeper's RC and simply poke
+repeatedly until caught up.
 
 ### `airdropBatch` — scales with recipients
 

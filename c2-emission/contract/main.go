@@ -89,9 +89,9 @@ func Init(payload *string) *string {
 		sdk.Abort("timelock must be > 0 blocks")
 	}
 	setU("cfg_timelock", tl)
-	// maxCatch: epochs distributed per poke. Measured cost ~840 RC/epoch (1 bucket)
-	// and ~1280 RC/epoch (3 buckets) plus ~200 base, so size it against the rc_limit
-	// the keeper will actually use (e.g. 50 epochs x 3 buckets ~ 64k RC). Pokes are
+	// maxCatch: epochs distributed per poke. Measured cost ~995 RC/epoch (1 bucket)
+	// and ~1437 RC/epoch (3 buckets) plus ~280 base, so size it against the rc_limit
+	// the keeper will actually use (e.g. 50 epochs x 3 buckets ~ 72k RC). Pokes are
 	// permissionless and repeatable, so a lower value simply needs more pokes.
 	if mc := f(payload, "maxCatch"); mc != "" {
 		mcv := pu(mc)

@@ -44,6 +44,14 @@ func TestRC_DistributeEpochCatchUpCost(t *testing.T) {
 		call(t, &ct, rcTok, "init", `{"name":"R","symbol":"R","decimals":0,"maxSupply":"100000000000"}`, owner, 0, true)
 		call(t, &ct, rcC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"1000","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1","buckets":"%s"}`,
 			rcTok, buckets), owner, 0, true)
+		// C2 DRAWS from an approved pool; it no longer mints. Without a funded pool
+		// every poke below returns {"distributed":"0","starved":true} and this whole
+		// table silently measures a no-op (271 RC) instead of real emission.
+		// emission = baseAnnual*epochLen/blocksPerYear = 1000000*1/1000 = 1000/epoch,
+		// so 1000000 covers the 50-epoch worst case many times over.
+		call(t, &ct, rcTok, "mint", `{"amount":"1000000"}`, owner, 0, true)
+		call(t, &ct, rcTok, "approve",
+			fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, rcC2), owner, 0, true)
 		call(t, &ct, rcTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, rcC2), owner, 0, true)
 
 		// epochLen=1, genesis=0 → poking at height N catches up N epochs (capped by maxCatch)

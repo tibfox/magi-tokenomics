@@ -318,6 +318,19 @@ func TestDevnetMagiReporter(t *testing.T) {
 	mustCall(tokenID, "init",
 		`{"name":"MagiTribe","symbol":"MTRIBE","decimals":0,"maxSupply":"1000000000"}`, "token init")
 	waitKey(tokenID, "owner", "token owner")
+	// C2 DRAWS each epoch from an approved pool — it does not mint. The pool must
+	// therefore exist and be approved BEFORE ownership moves, because `mint` is
+	// owner-only. Without this the run does not fail here: distributeEpoch quietly
+	// funds nothing and the failure surfaces minutes later as "epoch 0 was never
+	// finalized on chain", pointing nowhere near the cause.
+	//
+	// 1000000 is 100 epochs at this config (baseAnnual*epochLen/blocksPerYear =
+	// 1000000*10/1000 = 10000/epoch), so the pool cannot starve however long the run
+	// takes to reach the poke.
+	mustCall(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
+	mustCall(tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
+	waitKey(tokenID, fmt.Sprintf("alw|hive:%s|contract:%s", owner, c2ID), "C2 allowance")
 	mustCall(tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token->C2 ownership")
 
 	// genesis omitted => C2 adopts the CURRENT block height, which is how a real

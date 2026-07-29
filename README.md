@@ -153,7 +153,7 @@ independently — determinism guarantees they produce byte-identical payloads.
 | `baseAnnual` / `blocksPerYear` | emission per epoch = `baseAnnual * epochLen / blocksPerYear`. **Flat** — the same every epoch, forever. |
 | `buckets` | `name:target:weightBps` triples, comma-separated. Weights must sum to **10000**. Targets can be any contract or address — a distributor, a DAO, or a plain treasury. |
 | `dustBucket` | which bucket receives the remainder from integer division. Must name a configured bucket. |
-| `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~8 epochs of catch-up. |
+| `maxCatch` | max epochs one `distributeEpoch` poke will process (1..1000). Bounds the RC cost of a single call after downtime — see [`docs/rc-costs.md`](docs/rc-costs.md); with 3 buckets the free tier covers only ~6 epochs of catch-up (~9 with one bucket). |
 | `timelock` | blocks a queued guardian operation waits before it may execute |
 
 **C2 pulls, it does not mint.** Each epoch it draws the full `emission` from `source`
