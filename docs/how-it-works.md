@@ -41,6 +41,8 @@ at a plain treasury wallet. It's your call.
 
 - **Content rewards (C3)** — for posting and voting on Hive.
 - **LP rewards (C5)** — for providing liquidity. Same machinery, separate instance.
+  **Not usable out of the box:** nothing currently works out who provided liquidity,
+  so you would have to supply that list yourself. See the README.
 - **Staking yield (C7)** — for locking tokens up.
 
 **Staking (C1).**
@@ -54,8 +56,9 @@ Used once, then it just sits there.
 
 **The reporter — a program you run, not a contract.**
 Contracts cannot read Hive. So a small service reads Hive posts and votes, works out
-who earned what, and sends that list to C3/C5. It's covered in its
-[own README](../reporter/README.md).
+who earned what, and sends that list to **C3**. It's covered in its
+[own README](../reporter/README.md). It does **not** do this for LP rewards — it only
+understands posts and votes, not liquidity.
 
 ## How money actually moves
 
@@ -71,7 +74,8 @@ Each round (an "epoch", usually a day):
 1. Someone pokes C2 — anyone can, it's not privileged.
 2. C2 creates that day's tokens and records how much each bucket is owed.
 3. Each payout contract pulls its share.
-4. For content and LP, the reporter submits the list of who earned what.
+4. For content, the reporter submits the list of who earned what. (For LP you would
+   have to submit that list yourself — see the note on C5 above.)
 5. A **challenge window** opens — a guardian can cancel a bad report during it.
 6. After the window, people claim.
 
@@ -209,7 +213,7 @@ You don't need all of it.
 
 ## The honest limitations
 
-- **The reporter is trusted-ish.** It decides who earned what for content and LP. It
+- **The reporter is trusted-ish.** It decides who earned what for content. It
   can't mint or steal — it only submits a list of numbers — but it could submit a
   *wrong* list. The defences are that anyone can recompute it exactly, a guardian can
   cancel it during the challenge window, and you can require several machines to
@@ -228,3 +232,9 @@ You don't need all of it.
   accounts loses you money rather than gaining it.
 - **NFT-backed tokens are not supported.** The setting exists but is deliberately
   blocked rather than half-working.
+- **LP rewards have no data source.** C5 pays out correctly, but nothing tells it who
+  provided liquidity — the reporter only understands posts and votes. Doing it
+  properly is harder than it sounds: the DEX records who holds LP *right now*, but
+  keeps no history, so a past day cannot be scored after the fact. Paying against
+  live balances would let someone add liquidity just before the snapshot and remove
+  it straight after. Staking avoids this because C1 keeps a history on purpose.

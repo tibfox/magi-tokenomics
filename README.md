@@ -15,7 +15,7 @@ whole system in plain language. This file is the build-and-deploy reference.
 | C1 | `c1-staking` | staking with height checkpoints, so any epoch's stake can be proven after the fact |
 | C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
 | C3 | `c3-distributor` | content/author rewards — accepts share lists, pays claims |
-| C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance |
+| C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance. **You must supply the share data yourself** — the reporter does not compute LP shares. |
 | C6 | `c6-migration` | one-off snapshot import / airdrop |
 | C7 | `c7-yield` | staking yield — **trustless**, reads C1 directly, needs no reporter |
 | — | `reporter/` | off-chain service that turns Hive activity into share lists ([README](reporter/README.md)) |
@@ -94,7 +94,21 @@ C3.init / C5.init / C7.init             # they adopt C2's schedule automatically
 
 After this, each epoch runs: `C2.distributeEpoch` → `<dist>.pullFunding` →
 `submitShares` pages → `finalizeEpoch` → holders `claim`. The reporter does all of
-that for C3/C5; C7 needs only `pullFunding` and then holders claim.
+that **for C3 only**; C7 needs just `pullFunding` and then holders claim.
+
+> **C5 has no data source.** The contract works and is tested, but nothing computes
+> LP shares: the reporter derives shares from Hive posts and votes, and has no
+> liquidity input. Point a bucket at C5 and its funding will accumulate unclaimed
+> until a guardian sweeps it. Using C5 means writing a producer that reads LP
+> positions and calls `C5.submitShares` on the same schedule.
+>
+> Against `vsc-eco/dex-contracts` the balances are there (`lp-{address}` per provider,
+> `tlp` for the total) but **only as current state — there are no height
+> checkpoints**, so a past epoch cannot be priced after the fact. Reading live LP
+> would be flash-liquidity gameable in the obvious way (add before the snapshot,
+> remove after), which is exactly what C1's checkpoints and C7's
+> `min(stakeAt(start), stakeAt(end))` exist to prevent. A producer would have to
+> reconstruct LP history from `add_liquidity`/`remove_liquidity` itself.
 
 ## Init reference
 
