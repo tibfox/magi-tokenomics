@@ -106,11 +106,12 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_full_devnet_test.go` | yes | 1869s |
 | `magi_multiepoch_devnet_test.go` | yes | 1903s |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
-| `magi_tokenomics_devnet_test.go` | **no** — setup patched, not executed | — |
-| `magi_c5c6c7_devnet_test.go` | **no** — setup patched, not executed | — |
+| `magi_tokenomics_devnet_test.go` | yes | 591s |
+| `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 
-Keep this table honest. "Patched and compiles" is not "verified"; the last two
-rows are the ones to run before trusting the set.
+All five verified. Keep this table honest as the code moves on — "patched and
+compiles" is not "verified", and this table is the only place that distinction
+is recorded.
 
 ## Writing a multi-epoch test
 
