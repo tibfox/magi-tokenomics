@@ -519,19 +519,28 @@ func TestDevnetMagiReporter(t *testing.T) {
 		want := new(big.Int).Div(new(big.Int).Mul(fundedN, share), totalN)
 		t.Logf("hive:%s share=%s -> expected payout %s", cl.acct, share, want)
 
+		// Measure the claim as a DELTA, not an absolute balance. The deployer holds
+		// the emission pool AND earns a share here, so its balance mixes the undrawn
+		// pool with its rewards — an absolute assertion would be off by whatever the
+		// pool has left (it read 973286 for a 3286 payout, the other 970000 being
+		// pool). Everyone else starts at zero, so the delta is the honest measure
+		// either way.
+		before := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
+
 		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", `{"epoch":"0"}`); err != nil {
 			t.Fatalf("claim for %s failed to broadcast: %v", cl.acct, err)
 		}
 		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|0|hive:"+cl.acct, 3*time.Minute) {
 			t.Fatalf("claim by %s never landed on chain", cl.acct)
 		}
-		// the token contract must show exactly that balance
-		got := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
+		// the token contract must show exactly that payout arriving
+		after := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
+		got := new(big.Int).Sub(after, before)
 		if got.Cmp(want) != 0 {
-			t.Fatalf("%s token balance = %s, want %s (funded*share/totalShares)",
-				cl.acct, got, want)
+			t.Fatalf("%s claim paid %s (balance %s -> %s), want %s (funded*share/totalShares)",
+				cl.acct, got, before, after, want)
 		}
-		t.Logf("hive:%s claimed and holds exactly %s", cl.acct, want)
+		t.Logf("hive:%s claimed exactly %s (balance %s -> %s)", cl.acct, want, before, after)
 	}
 
 	t.Logf("REPORTER DEVNET TEST PASSED — the reporter's own payloads drove a live chain")

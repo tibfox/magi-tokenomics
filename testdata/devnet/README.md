@@ -120,12 +120,24 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_reporter_devnet_test.go` | n/a — see below | — |
+| `magi_reporter_devnet_test.go` | fix in progress — see below | — |
 
-`magi_reporter_devnet_test.go` deploys C2 only so C3 has a `funder` address; it never
-calls `distributeEpoch` or `pullFunding`, so no pool is drawn and the emission model
-cannot affect it. It has NOT been re-run since the change, and that is the reason —
-not an oversight.
+**Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
+unaffected, on the grounds that it never calls `distributeEpoch` or `pullFunding`.
+That was wrong, and wrong in an instructive way: those calls do not appear in the
+test source because they come from the **reporter's generated plan** at runtime, so
+grepping the file finds nothing. Running it showed it had been broken all along by
+the pool change — it minted no pool, so emission funded nothing and the run died
+minutes later at `epoch 0 was never finalized on chain`.
+
+It now mints and approves before the ownership handover, and the funding half is
+confirmed on chain (`funded=10000`, epoch finalized, reporter and chain agreeing on
+`totalShares`). A second defect surfaced behind it: the deployer holds the pool AND
+earns a share, so the claim check's absolute-balance assertion read 973286 for a 3286
+payout — the other 970000 being undrawn pool. That is the trap documented below, and
+it is now measured as a delta. **That last fix has not yet completed a run.**
+
+Do not mark a suite verified from reasoning about its source. Run it.
 
 Keep this table honest as the code moves on: "patched and compiles" is not
 "verified", and this table is the only place that distinction is recorded.
