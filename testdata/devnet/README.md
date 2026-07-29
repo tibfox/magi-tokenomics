@@ -120,7 +120,7 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_reporter_devnet_test.go` | fix in progress — see below | — |
+| `magi_reporter_devnet_test.go` | yes | 721s |
 
 **Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
 unaffected, on the grounds that it never calls `distributeEpoch` or `pullFunding`.
@@ -135,7 +135,9 @@ confirmed on chain (`funded=10000`, epoch finalized, reporter and chain agreeing
 `totalShares`). A second defect surfaced behind it: the deployer holds the pool AND
 earns a share, so the claim check's absolute-balance assertion read 973286 for a 3286
 payout — the other 970000 being undrawn pool. That is the trap documented below, and
-it is now measured as a delta. **That last fix has not yet completed a run.**
+it is now measured as a delta — which the passing run shows plainly:
+`magi.test1 claimed exactly 3286 (balance 970000 -> 973286)` beside
+`magi.test2 claimed exactly 537 (balance 0 -> 537)`.
 
 Do not mark a suite verified from reasoning about its source. Run it.
 
