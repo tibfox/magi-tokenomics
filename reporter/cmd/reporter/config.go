@@ -35,10 +35,20 @@ type Config struct {
 	// live balances would be flash-liquidity gameable. The indexer's add_liq/rem_liq
 	// event log is replayed instead — see the lpsrc package doc.
 	//
-	// This is deliberately configurable per operator: several reporters running Attest
-	// mode may each point at a DIFFERENT indexer and must still agree, which holds
-	// because the reporter does its own arithmetic over raw events pinned to explicit
-	// heights. Nothing here may depend on an indexer-side view.
+	// Configurable per operator so an operator is not forced onto someone else's
+	// indexer, and so the aggregation stays in the reporter: nothing here may depend
+	// on an indexer-side view, because a view that differs between deployments turns
+	// an Attest quorum into a silent byte-mismatch.
+	//
+	// CAVEAT — reporters sharing an Attest quorum should point at the SAME indexer.
+	// An earlier version of this comment claimed different indexers were safe because
+	// the reporter pins its arithmetic to explicit heights. That is wrong: the heights
+	// are not the reporter's, they come from the indexer. Its ingestion falls back
+	// between a transaction's L1 anchored height and the state-output height when the
+	// transaction_pool lookup misses (magi-mongo-indexer fetcher/mongo.go), and that
+	// height is part of the per-event dedupe key, so two instances can legitimately
+	// assign different heights to the same event and land it in different epochs.
+	// Same indexer, same answer; different indexers, no guarantee.
 	Indexer struct {
 		API      string `json:"api"`       // Hasura GraphQL endpoint, e.g. http://host:8081/v1/graphql
 		Secret   string `json:"secret"`    // x-hasura-admin-secret; empty when public

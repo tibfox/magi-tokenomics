@@ -161,7 +161,15 @@ func (a *app) resolveEpoch(flagVal string) (uint64, uint64, error) {
 		}
 		// Refuse an epoch that has not closed: submitting a partial report and then
 		// finalizing it would permanently lock out the rest of that epoch.
-		end := a.cfg.Epoch.Genesis + (ep+1)*a.cfg.Epoch.Len - 1
+		//
+		// Bounds-check first. A large -epoch wraps the arithmetic to a small,
+		// plausible-looking block range, which would sail through the head test below
+		// and score real blocks under a nonsense epoch index.
+		_, end, ok := hivesrc.EpochBounds(a.cfg.Epoch.Genesis, a.cfg.Epoch.Len, ep)
+		if !ok {
+			return 0, head, fmt.Errorf("epoch %d is out of range for genesis %d and epochLen %d "+
+				"(its block range overflows)", ep, a.cfg.Epoch.Genesis, a.cfg.Epoch.Len)
+		}
 		if head < end {
 			return 0, head, fmt.Errorf("epoch %d has not closed yet (ends at block %d, head is %d)", ep, end, head)
 		}
@@ -414,11 +422,12 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 // same closed one the contracts use, [g+ep*el, g+(ep+1)*el-1].
 func (a *app) computeLP(ep uint64) (*computed, error) {
 	g, el := a.cfg.Epoch.Genesis, a.cfg.Epoch.Len
-	win := hivesrc.Window{
-		Epoch:      ep,
-		StartBlock: g + ep*el,
-		EndBlock:   g + (ep+1)*el - 1,
+	start, end, ok := hivesrc.EpochBounds(g, el, ep)
+	if !ok {
+		return nil, fmt.Errorf("epoch %d is out of range for genesis %d and epochLen %d "+
+			"(its block range overflows)", ep, g, el)
 	}
+	win := hivesrc.Window{Epoch: ep, StartBlock: start, EndBlock: end}
 	res, err := lpsrc.LPShares(
 		&lpsrc.HTTPTransport{Endpoint: a.cfg.Indexer.API, Secret: a.cfg.Indexer.Secret},
 		lpsrc.Options{

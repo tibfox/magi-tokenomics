@@ -30,8 +30,16 @@
 // would make the challenge window theatre.
 //
 // DETERMINISM — every query is pinned to explicit block heights, never to "now", so
-// two machines querying at different moments (or querying different indexers) derive
-// identical shares. That is what keeps Attest mode usable for LP.
+// two machines querying the SAME indexer at different moments derive identical
+// shares. That is what keeps Attest mode usable for LP.
+//
+// It does NOT extend across different indexers, and an earlier version of this note
+// wrongly claimed it did. The heights are the indexer's, not ours: its ingestion
+// falls back between a transaction's L1 anchored height and the state-output height
+// when the transaction_pool lookup misses, and the height is inside the per-event
+// dedupe key — so two instances can assign different heights to the same event, place
+// it either side of an epoch boundary, and produce byte-different payloads that never
+// merge to a quorum. Reporters sharing an Attest threshold must share an indexer.
 package lpsrc
 
 import (

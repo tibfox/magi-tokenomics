@@ -126,12 +126,20 @@ On a low-traffic chain that will refuse epochs whose data is in fact complete. T
 what `indexer.allow_stale` is for. It defaults to **false**: an operator who wants
 throughput should have to say so, rather than discover silent underpayment later.
 
-**The indexer is configurable per operator, on purpose.** Several reporters running
-Attest mode may each point at a different indexer and must still produce
-byte-identical payloads. That holds because the reporter does its own arithmetic over
-raw events pinned to explicit heights — it never depends on an indexer-side view.
-Do not "optimise" this by moving the aggregation into SQL: a view that differs between
-deployments turns a quorum into a silent byte-mismatch.
+**The indexer is configurable per operator, on purpose** — so nobody is forced onto
+someone else's, and so the aggregation stays in the reporter. Do not "optimise" it by
+moving the aggregation into SQL: a view that differs between deployments turns a
+quorum into a silent byte-mismatch.
+
+**But reporters sharing an Attest quorum should point at the SAME indexer.** An
+earlier version of this document claimed different indexers were safe, on the grounds
+that the reporter pins its arithmetic to explicit heights. That was wrong — the
+heights are the indexer's, not ours. Its ingestion falls back between a transaction's
+L1 anchored height and the state-output height when the `transaction_pool` lookup
+misses, and that height is part of the per-event dedupe key. Two instances can
+therefore assign different heights to the same event, place it either side of an epoch
+boundary, and produce payloads that never merge to a threshold. Same indexer, same
+answer.
 
 This does mean LP rewards inherit a trust assumption on the indexer operator. It is
 not a *new* one — the reporter was already trusted to submit an honest list, the

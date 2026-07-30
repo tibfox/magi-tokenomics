@@ -85,10 +85,15 @@ func EpochWindow(tr Transport, genesis, epochLen, ep uint64) (Window, error) {
 	if epochLen == 0 {
 		return Window{}, fmt.Errorf("epochLen must be > 0")
 	}
+	start, end, ok := EpochBounds(genesis, epochLen, ep)
+	if !ok {
+		return Window{}, fmt.Errorf("epoch %d is out of range for genesis %d and epochLen %d "+
+			"(its block range overflows)", ep, genesis, epochLen)
+	}
 	w := Window{
 		Epoch:      ep,
-		StartBlock: genesis + ep*epochLen,
-		EndBlock:   genesis + (ep+1)*epochLen - 1,
+		StartBlock: start,
+		EndBlock:   end,
 	}
 	var err error
 	if w.StartTime, err = BlockTime(tr, w.StartBlock); err != nil {
@@ -118,4 +123,34 @@ func LatestClosedEpoch(genesis, epochLen, head uint64) (uint64, error) {
 		return 0, fmt.Errorf("epoch 0 is still in progress")
 	}
 	return cur - 1, nil
+}
+
+// EpochBounds returns the closed block interval of an epoch — the same
+// [g+ep*el, g+(ep+1)*el-1] the contracts use — and reports whether it is
+// representable.
+//
+// The overflow check is not academic. `-epoch` is operator input, and
+// g+(ep+1)*el-1 wraps for large ep: with g=100 and el=28800, epoch 640511947003808
+// yields start=118884, end=147683. Both look like ordinary block numbers, so a
+// closed-epoch test of the form `head < end` passes trivially and the reporter
+// would score a REAL past block range and submit it under a nonsense epoch index —
+// scoring those blocks twice, once legitimately and once not.
+func EpochBounds(genesis, epochLen, ep uint64) (start, end uint64, ok bool) {
+	if epochLen == 0 {
+		return 0, 0, false
+	}
+	next := ep + 1
+	if next < ep {
+		return 0, 0, false // ep is max uint64
+	}
+	span := next * epochLen
+	if span/epochLen != next {
+		return 0, 0, false // multiplication wrapped
+	}
+	end = genesis + span
+	if end < genesis {
+		return 0, 0, false // addition wrapped
+	}
+	start = genesis + ep*epochLen
+	return start, end - 1, true
 }

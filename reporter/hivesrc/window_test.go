@@ -319,3 +319,65 @@ func TestCollect_EndToEndWithFakeTransport(t *testing.T) {
 		t.Fatalf("votes should be time-ordered, got %s first", posts[0].Votes[0].Voter)
 	}
 }
+
+// -epoch is operator input, and the boundary arithmetic wraps for large values. The
+// dangerous case is not the obvious one: a wrapped epoch produces a SMALL, plausible
+// block range, so a "has this epoch closed?" test of the form `head < end` passes and
+// the reporter scores a real past range under a nonsense epoch index.
+func TestEpochBounds_RejectsOverflowingEpochs(t *testing.T) {
+	const g, el = uint64(100), uint64(28800)
+
+	// the wrap that looks legitimate: end < genesis would be caught by eye, this is not
+	if _, _, ok := EpochBounds(g, el, 640511947003808); ok {
+		t.Fatal("an epoch whose range wraps to a small block window must be rejected")
+	}
+	// max uint64
+	if _, _, ok := EpochBounds(g, el, ^uint64(0)); ok {
+		t.Fatal("max-uint64 epoch must be rejected")
+	}
+	// epochLen 0 is not a usable schedule
+	if _, _, ok := EpochBounds(g, 0, 1); ok {
+		t.Fatal("epochLen 0 must be rejected")
+	}
+	// and the ordinary cases still work, matching the contracts' closed interval
+	for _, tc := range []struct{ ep, wantStart, wantEnd uint64 }{
+		{0, 100, 28899},
+		{1, 28900, 57699},
+		{41, 1180900, 1209699},
+	} {
+		start, end, ok := EpochBounds(g, el, tc.ep)
+		if !ok {
+			t.Fatalf("epoch %d must be representable", tc.ep)
+		}
+		if start != tc.wantStart || end != tc.wantEnd {
+			t.Fatalf("epoch %d = [%d,%d], want [%d,%d]", tc.ep, start, end, tc.wantStart, tc.wantEnd)
+		}
+	}
+}
+
+// The bounds must be exactly what the contracts compute, or the reporter scores a
+// different range than the chain will pay for. C7 uses g+ep*el .. g+(ep+1)*el-1 and
+// C3/C5's epochEnd is g+(n+1)*el-1.
+func TestEpochBounds_MatchesContractInterval(t *testing.T) {
+	const g, el = uint64(7), uint64(30)
+	for ep := uint64(0); ep < 5; ep++ {
+		start, end, ok := EpochBounds(g, el, ep)
+		if !ok {
+			t.Fatalf("epoch %d unexpectedly rejected", ep)
+		}
+		if want := g + ep*el; start != want {
+			t.Fatalf("epoch %d start = %d, contracts use %d", ep, start, want)
+		}
+		if want := g + (ep+1)*el - 1; end != want {
+			t.Fatalf("epoch %d end = %d, contracts use %d", ep, end, want)
+		}
+		// consecutive epochs must tile without gap or overlap
+		if ep > 0 {
+			prevEnd := g + ep*el - 1
+			if start != prevEnd+1 {
+				t.Fatalf("epoch %d starts at %d but epoch %d ended at %d — blocks are lost or double-counted",
+					ep, start, ep-1, prevEnd)
+			}
+		}
+	}
+}
