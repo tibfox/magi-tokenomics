@@ -725,3 +725,43 @@ func TestCovEmit_InitValidationRejectsBadConfig(t *testing.T) {
 	// ...nor initialized by a non-owner (checked on a still-virgin contract)
 	call(t, &ct, cvBad0, "init", cvCfg(nil), "hive:cvstranger", 0, false)
 }
+
+// A zero emission rate must be rejected at init.
+//
+// The three inputs are each validated individually, but the rate is
+// baseAnnual*epochLen/blocksPerYear with INTEGER division, so all three can be
+// valid while the result truncates to zero. Nothing downstream would complain:
+// distributeEpoch keeps advancing epochs and marking them done while funding
+// nothing, forever, every poke reporting success.
+func TestCovEmit_ZeroEmissionRateIsRejectedAtInit(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(cvToken, owner, read(tokenWasmPath))
+	call(t, &ct, cvToken, "init",
+		`{"name":"CV","symbol":"CV","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+
+	// 1000 * 1 / 10512000 == 0. The abort message does not survive -panic=trap, so
+	// assert the init is REJECTED and that it left no state behind.
+	ct.RegisterContract(cvBad0, owner, read(cvC2Wasm))
+	call(t, &ct, cvBad0, "init", cvCfg(map[string]string{
+		"baseAnnual": "1000", "epochLen": "1", "blocksPerYear": "10512000",
+	}), owner, 0, false)
+	st := call(t, &ct, cvBad0, "emissionForEpochQ", `{"epoch":"0"}`, "hive:cvreader", 1, false)
+	_ = st // querying an uninitialised C2 must itself abort, proving init rolled back
+
+	// Just enough to round to 1 must still be accepted — the guard must reject only
+	// the genuinely dead configuration, not merely small ones.
+	ct.RegisterContract(cvBad1, owner, read(cvC2Wasm))
+	call(t, &ct, cvBad1, "init", cvCfg(map[string]string{
+		"baseAnnual": "10512000", "epochLen": "1", "blocksPerYear": "10512000",
+	}), owner, 0, true)
+	assert.Equal(t, "1", cvEmissionOf(t, &ct, cvBad1, "0", 1).String())
+}
+
+// cvEmissionOf reads emissionForEpochQ from a NAMED C2 instance (cvEmission is
+// hardcoded to the shared one).
+func cvEmissionOf(t *testing.T, ct *test_utils.ContractTest, id, epoch string, h uint64) *big.Int {
+	r := call(t, ct, id, "emissionForEpochQ", `{"epoch":"`+epoch+`"}`, "hive:cvreader", h, true)
+	return cvBig(cvField(r.Ret, "emission"))
+}

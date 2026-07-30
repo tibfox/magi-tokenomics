@@ -26,16 +26,23 @@ func TestLive_SchemaMatchesRealIndexer(t *testing.T) {
 		t.Skip("set LPSRC_LIVE_INDEXER and LPSRC_LIVE_POOL to run the live schema check")
 	}
 
-	// Start == End deliberately: this asks for positions at ONE instant, i.e. the
-	// current book. Spanning [0, now] would instead ask "who held LP at height 0 AND
-	// now", and min() correctly answers nobody — which looks like a schema failure
-	// but is the anti-flash rule doing its job. Epoch scoring wants the span; a
-	// schema check wants the instant.
-	const now = uint64(1) << 62
-	res, err := LPShares(
-		&HTTPTransport{Endpoint: endpoint, Secret: os.Getenv("LPSRC_LIVE_SECRET")},
-		Options{Pool: pool, Start: now, End: now},
-	)
+	tr := &HTTPTransport{Endpoint: endpoint, Secret: os.Getenv("LPSRC_LIVE_SECRET")}
+
+	// indexer_health is part of the schema contract now (the freshness gate reads it),
+	// so verify it independently before relying on it.
+	h, err := IndexerHeight(tr)
+	if err != nil {
+		t.Fatalf("indexer_health is unreadable — the freshness gate depends on it: %v", err)
+	}
+	t.Logf("indexer reports latest_block_height = %d", h)
+
+	// Score AT the indexer's own height, which does two things: the freshness gate
+	// passes on proof rather than being bypassed, and Start == End asks for positions
+	// at ONE instant. Spanning [0, h] would instead ask who held LP at height 0 AND
+	// now, and min() correctly answers nobody — which reads as a schema failure but is
+	// the anti-flash rule working. Epoch scoring wants a span; a schema check wants
+	// the instant.
+	res, err := LPShares(tr, Options{Pool: pool, Start: h, End: h})
 	// A schema mismatch surfaces here: Hasura returns its complaint in the errors
 	// array and fetchTable turns it into this failure rather than an empty result.
 	if err != nil {

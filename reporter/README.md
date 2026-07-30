@@ -98,6 +98,24 @@ LP(provider, H) = SUM(lp_minted where height <= H) - SUM(lp_burned where height 
 and credits **`min(LP(start), LP(end))`**, mirroring what C7 does for stake:
 liquidity must be present at BOTH epoch boundaries to earn anything.
 
+**Freshness is gated by default.** A lagging indexer does not error — it returns fewer
+rows — so scoring an epoch it has not reached underpays providers irreversibly, with
+nothing in any log. Before scoring, the reporter reads
+`indexer_health.latest_block_height` and refuses unless the indexer is provably past
+the epoch's end block.
+
+That proof is **one-sided**, and it matters that you know which side. `indexer_health`
+is `MAX(block_height) FROM contract_logs` — the last log the indexer *wrote*, not the
+position it has *scanned* to. So `height >= epochEnd` proves sufficiency and passes;
+`height < epochEnd` is ambiguous — either the indexer has stalled, or no tracked
+contract has emitted anything since, which on a quiet chain is normal and means the
+data is complete. Nothing exposed distinguishes those, so the gate passes only on
+proof and refuses otherwise.
+
+On a low-traffic chain that will refuse epochs whose data is in fact complete. That is
+what `indexer.allow_stale` is for. It defaults to **false**: an operator who wants
+throughput should have to say so, rather than discover silent underpayment later.
+
 **The indexer is configurable per operator, on purpose.** Several reporters running
 Attest mode may each point at a different indexer and must still produce
 byte-identical payloads. That holds because the reporter does its own arithmetic over

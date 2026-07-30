@@ -55,12 +55,19 @@ type lpFixture struct {
 	pool   string
 	events []lpEvent
 	hits   int
+	health uint64 // what indexer_health reports; the reporter's freshness gate reads it
 }
 
 func (f *lpFixture) set(events []lpEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = events
+}
+
+func (f *lpFixture) setHealth(h uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.health = h
 }
 
 // serve implements enough of Hasura's contract for the reporter's queries: filter by
@@ -80,7 +87,17 @@ func (f *lpFixture) serve(t *testing.T) *httptest.Server {
 		f.hits++
 		events := append([]lpEvent(nil), f.events...)
 		pool := f.pool
+		health := f.health
 		f.mu.Unlock()
+
+		// The reporter refuses to score an epoch the indexer has not provably reached,
+		// so it asks for indexer_health first. Answering it is part of being a
+		// believable stand-in.
+		if strings.Contains(req.Query, "indexer_health") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"data":{"indexer_health":[{"latest_block_height":%d}]}}`, health)
+			return
+		}
 
 		wantAdd := strings.Contains(req.Query, "add_liq_events")
 		num := func(k string) uint64 {
@@ -383,6 +400,10 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 			time.Sleep(time.Duration(epochLen) * 3 * time.Second)
 		}
 		head.set(epEnd + 2)
+		// The indexer must also be provably past the epoch end, or the reporter
+		// correctly refuses to score it. Advancing this in step with the chain is what
+		// a healthy indexer looks like.
+		fx.setHealth(epEnd + 1)
 
 		epFlag := strconv.FormatUint(ep, 10)
 		planJSON := runReporter("plan", "-epoch", epFlag, "-json")

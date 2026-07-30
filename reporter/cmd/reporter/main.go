@@ -406,10 +406,11 @@ func (a *app) computeLP(ep uint64) (*computed, error) {
 	res, err := lpsrc.LPShares(
 		&lpsrc.HTTPTransport{Endpoint: a.cfg.Indexer.API, Secret: a.cfg.Indexer.Secret},
 		lpsrc.Options{
-			Pool:     a.cfg.Indexer.Pool,
-			Start:    win.StartBlock,
-			End:      win.EndBlock,
-			PageSize: a.cfg.Indexer.PageSize,
+			Pool:       a.cfg.Indexer.Pool,
+			Start:      win.StartBlock,
+			End:        win.EndBlock,
+			PageSize:   a.cfg.Indexer.PageSize,
+			AllowStale: a.cfg.Indexer.AllowStale,
 		})
 	if err != nil {
 		return nil, err

@@ -25,10 +25,21 @@ type fakeIndexer struct {
 	adds, rems []row
 	pageSize   int
 	calls      int
+	health     uint64
 }
 
+// health lets a test pretend the indexer is at a given block. Zero means "far ahead",
+// so existing tests are unaffected by the freshness gate.
 func (f *fakeIndexer) Query(query string, vars map[string]any, out any) error {
 	f.calls++
+	if strings.Contains(query, "indexer_health") {
+		h := f.health
+		if h == 0 {
+			h = 1 << 62
+		}
+		return json.Unmarshal([]byte(fmt.Sprintf(
+			`{"data":{"indexer_health":[{"latest_block_height":%d}]}}`, h)), out)
+	}
 	src := f.adds
 	amountKey := "lp_minted"
 	if strings.Contains(query, "rem_liq") {
@@ -314,6 +325,9 @@ type floodIndexer struct{ calls int }
 
 func (f *floodIndexer) Query(query string, vars map[string]any, out any) error {
 	f.calls++
+	if strings.Contains(query, "indexer_health") {
+		return json.Unmarshal([]byte(`{"data":{"indexer_health":[{"latest_block_height":999999}]}}`), out)
+	}
 	limit := vars["limit"].(int)
 	rows := make([]string, 0, limit)
 	for i := 0; i < limit; i++ { // always a FULL page
@@ -332,4 +346,64 @@ func TestLPShares_UnboundedIndexerIsCutOff(t *testing.T) {
 		t.Fatalf("error should name the cause, got: %v", err)
 	}
 	t.Logf("cut off after %d calls", f.calls)
+}
+
+// A lagging indexer does not error — it returns FEWER ROWS — so scoring an epoch it
+// has not reached underpays providers irreversibly. Refuse unless it can be PROVEN
+// to have indexed past the epoch end.
+func TestLPShares_RefusesWhenIndexerMayBeBehind(t *testing.T) {
+	f := &fakeIndexer{
+		adds:   []row{{"hive:alice", "1000", 10}},
+		health: 90, // epoch ends at 100, so blocks 91..100 are unverified
+	}
+	_, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+	if err == nil {
+		t.Fatal("an epoch past the indexer's newest log must be refused")
+	}
+	for _, want := range []string{"indexer may be behind", "91..100", "allow_stale"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// Proof of sufficiency: indexed at or past the epoch end is enough.
+func TestLPShares_ProceedsWhenIndexerIsProvablyAhead(t *testing.T) {
+	for _, h := range []uint64{100, 101, 5000} {
+		f := &fakeIndexer{adds: []row{{"hive:alice", "1000", 10}}, health: h}
+		res, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+		if err != nil {
+			t.Fatalf("health %d >= end 100 must pass, got: %v", h, err)
+		}
+		if len(res.Shares) != 1 {
+			t.Fatalf("health %d: want alice credited, got %v", h, mustShares(t, res))
+		}
+	}
+}
+
+// The escape hatch works, and must be explicit — never the default.
+func TestLPShares_AllowStaleOverridesTheGate(t *testing.T) {
+	f := &fakeIndexer{adds: []row{{"hive:alice", "1000", 10}}, health: 90}
+	if _, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100}); err == nil {
+		t.Fatal("the gate must be ON by default")
+	}
+	res, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100, AllowStale: true})
+	if err != nil {
+		t.Fatalf("AllowStale must bypass the gate: %v", err)
+	}
+	if len(res.Shares) != 1 {
+		t.Fatalf("want alice credited, got %v", mustShares(t, res))
+	}
+}
+
+// A broken health query must not be read as "fresh".
+func TestLPShares_UnreadableHealthIsNotTreatedAsFresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"errors":[{"message":"indexer_health not found"}]}`)
+	}))
+	defer srv.Close()
+	_, err := LPShares(&HTTPTransport{Endpoint: srv.URL}, Options{Pool: "p", Start: 1, End: 2})
+	if err == nil || !strings.Contains(err.Error(), "cannot verify indexer freshness") {
+		t.Fatalf("an unreadable health view must fail closed, got: %v", err)
+	}
 }

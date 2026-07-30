@@ -114,6 +114,10 @@ type Options struct {
 	Start, End uint64
 	// PageSize bounds each GraphQL page. 0 uses a sane default.
 	PageSize int
+	// AllowStale skips the freshness gate. Default (false) is the safe setting: refuse
+	// to score an epoch unless the indexer can be PROVEN to have processed past its
+	// end. See checkFresh for why that proof is one-sided.
+	AllowStale bool
 }
 
 const defaultPageSize = 1000
@@ -245,6 +249,11 @@ func LPShares(t Transport, o Options) (sharecore.Result, error) {
 	if pageSize <= 0 {
 		pageSize = defaultPageSize
 	}
+	if !o.AllowStale {
+		if err := checkFresh(t, o.End); err != nil {
+			return res, err
+		}
+	}
 
 	adds, err := fetchTable(t, addQuery, o.Pool, o.End, pageSize, +1)
 	if err != nil {
@@ -365,4 +374,76 @@ func isLedgerAddr(a string) bool {
 		}
 	}
 	return false
+}
+
+// healthQuery reads the indexer's own view of how far it has got. `indexer_health` is
+// MAX(block_height) FROM contract_logs across every contract it tracks.
+const healthQuery = `query{ indexer_health { latest_block_height } }`
+
+type healthResp struct {
+	Data struct {
+		Rows []struct {
+			Height json.Number `json:"latest_block_height"`
+		} `json:"indexer_health"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+// IndexerHeight returns the highest block the indexer has recorded a log for.
+func IndexerHeight(t Transport) (uint64, error) {
+	var resp healthResp
+	if err := t.Query(healthQuery, map[string]any{}, &resp); err != nil {
+		return 0, err
+	}
+	if len(resp.Errors) > 0 {
+		return 0, fmt.Errorf("indexer_health query failed: %s", resp.Errors[0].Message)
+	}
+	if len(resp.Data.Rows) == 0 {
+		return 0, fmt.Errorf("indexer_health returned no rows")
+	}
+	h, err := resp.Data.Rows[0].Height.Int64()
+	if err != nil || h < 0 {
+		return 0, fmt.Errorf("indexer_health latest_block_height %q is not a height", resp.Data.Rows[0].Height)
+	}
+	return uint64(h), nil
+}
+
+// checkFresh refuses to score an epoch the indexer may not have finished indexing.
+//
+// THE FAILURE THIS PREVENTS: a lagging indexer does not error, it returns FEWER ROWS.
+// Balances come out understated, the report is submitted and finalized, and providers
+// are underpaid irreversibly with nothing in any log. That is the single most
+// dangerous property of sourcing rewards from an index.
+//
+// WHAT THE EVIDENCE CAN AND CANNOT PROVE. `indexer_health.latest_block_height` is
+// MAX(block_height) FROM contract_logs — the last log the indexer WROTE, not the
+// position it has SCANNED to. So:
+//
+//	height >= epochEnd  =>  it has demonstrably processed past our window. PROOF of
+//	                        sufficiency, and the check passes.
+//	height <  epochEnd  =>  AMBIGUOUS. Either the indexer has stalled, or no tracked
+//	                        contract has emitted anything since — which on a quiet
+//	                        chain is entirely normal and means our data is complete.
+//
+// Nothing exposed distinguishes those two, so the check is deliberately one-sided:
+// pass only on proof, refuse otherwise. On a low-activity chain that WILL refuse
+// legitimately-complete epochs, which is why AllowStale exists — but it defaults off,
+// because an operator who wants throughput should have to say so rather than discover
+// silent underpayment later.
+func checkFresh(t Transport, end uint64) error {
+	h, err := IndexerHeight(t)
+	if err != nil {
+		return fmt.Errorf("cannot verify indexer freshness: %w", err)
+	}
+	if h >= end {
+		return nil
+	}
+	return fmt.Errorf("indexer may be behind: its newest indexed log is block %d but this epoch "+
+		"ends at %d, so liquidity events in blocks %d..%d may not be indexed yet. Either the "+
+		"indexer is lagging (scoring now would underpay, irreversibly) or the chain has simply "+
+		"been quiet (the data is complete). That cannot be told apart from what the indexer "+
+		"exposes. Wait for it to catch up, or set indexer.allow_stale if you accept the risk",
+		h, end, h+1, end)
 }

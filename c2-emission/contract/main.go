@@ -79,6 +79,18 @@ func Init(payload *string) *string {
 		sdk.Abort("blocksPerYear>0")
 	}
 	setU("cfg_blocksPerYear", by)
+	// Emission is baseAnnual*epochLen/blocksPerYear with INTEGER division, so all
+	// three being individually valid does not make the result non-zero: e.g.
+	// baseAnnual=1000, epochLen=1, blocksPerYear=10512000 truncates to 0.
+	//
+	// A zero rate does not fail visibly. distributeEpoch would keep advancing epochs
+	// and marking them done while funding nothing at all, forever, with every poke
+	// reporting success. Reject the configuration instead of shipping a schedule that
+	// silently pays nobody. Checked here, after all three inputs are stored, because
+	// emissionForEpoch reads them back from state.
+	if emissionForEpoch(0).Sign() <= 0 {
+		sdk.Abort("emission rounds to zero: baseAnnual*epochLen must be >= blocksPerYear")
+	}
 	set("cfg_dustBucket", f(payload, "dustBucket"))
 	// guardian auth config
 	set("cfg_gMode", f(payload, "guardianMode"))

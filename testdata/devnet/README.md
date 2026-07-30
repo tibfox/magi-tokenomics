@@ -121,7 +121,7 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1415s |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1415s, re-run 1205s after the audit fixes |
 | `magi_reporter_devnet_test.go` | yes | 721s |
 
 **Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
@@ -167,6 +167,10 @@ passing three times:
 Event heights are positioned relative to the real `cfg_genesis` read off-chain.
 `page_size: 2` forces the indexer paging walk (26 queries in the passing run). Claims
 are asserted as deltas because the deployer also holds the undrawn pool.
+
+The fake indexer also answers `indexer_health`, advancing in step with the chain,
+because the reporter refuses to score an epoch the indexer cannot be proven to have
+passed. A stand-in that ignored that query would be refused — as it should be.
 
 **What it cannot catch:** a mismatch between the reporter's queries and the REAL
 Hasura schema. A fake server written alongside the queries will always agree with

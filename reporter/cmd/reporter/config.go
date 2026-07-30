@@ -44,6 +44,16 @@ type Config struct {
 		Secret   string `json:"secret"`    // x-hasura-admin-secret; empty when public
 		Pool     string `json:"pool"`      // pool contract id, as indexer_contract_id
 		PageSize int    `json:"page_size"` // rows per GraphQL page; 0 = default
+		// AllowStale disables the freshness gate. Leave it FALSE unless you accept
+		// the consequence: a lagging indexer returns fewer rows rather than an error,
+		// so scoring an epoch it has not reached underpays providers irreversibly.
+		//
+		// The gate can only prove freshness, never staleness — indexer_health reports
+		// the last log WRITTEN, not the position SCANNED — so on a quiet chain it
+		// refuses epochs whose data is in fact complete. This is the knob for that
+		// case, and it is opt-in deliberately: defaulting it on would trade a loud
+		// refusal for a silent underpayment.
+		AllowStale bool `json:"allow_stale"`
 	} `json:"indexer"`
 
 	Contracts struct {
@@ -344,7 +354,7 @@ const ExampleLPConfig = `{
     "stake":       ""
   },
   "epoch":  { "genesis": 0, "len": 28800 },
-  "source": { "kind": "lp" },
+  "source":  { "kind": "lp" },
   "page":   { "max_entries": 12, "max_bytes": 3500 },
   "submit": {
     "rc_limit":      10000,
