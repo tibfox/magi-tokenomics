@@ -517,3 +517,69 @@ func TestCovStake_YieldMinOverEpochRule(t *testing.T) {
 	assert.EqualValues(t, 200*100000/900, c17I64(t, cc.Ret, "claimed"),
 		"carol earns pro-rata once she is staked for a whole epoch")
 }
+
+// A Hive POSTING key must not be able to move someone's stake.
+//
+// Posting keys are routinely delegated to third-party front-ends — that is what they
+// are for — and the VSC runtime derives msg.caller from RequiredPostingAuths[0] when
+// a tx carries no active auth. C1 custody is the ONLY layer that can stop a leaked
+// posting key reaching staked funds: the token contract authorizes transfers on
+// msg.caller alone, so once tokens are liquid they are gone. Before this guard,
+// unstake + claimUnstaked was a complete drain path.
+func TestCovStake_PostingKeyCannotMoveStake(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{c17C1: c17C1Only})
+	call(t, &ct, c17C1, "init",
+		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":""}`, tokenID), c17Owner, 0, true)
+	c17FundAccount(t, &ct, "hive:victim", 1000, 1000, 0)
+
+	// posting-only STAKE is refused, and moves nothing
+	pvCallPosting(t, &ct, c17C1, "stake", `{"amount":"1000"}`, "hive:victim", 1, false)
+	assert.EqualValues(t, 0, c17StakeOf(t, &ct, "hive:victim", 1))
+	assert.EqualValues(t, 1000, c17TokenBal(t, &ct, "hive:victim", 1), "tokens must not have left the account")
+
+	// with an ACTIVE auth the same call works
+	call(t, &ct, c17C1, "stake", `{"amount":"1000"}`, "hive:victim", 2, true)
+	assert.EqualValues(t, 1000, c17StakeOf(t, &ct, "hive:victim", 2))
+
+	// posting-only UNSTAKE is refused, and the position is untouched
+	pvCallPosting(t, &ct, c17C1, "unstake", `{"amount":"1000"}`, "hive:victim", 3, false)
+	assert.EqualValues(t, 1000, c17StakeOf(t, &ct, "hive:victim", 3), "stake must survive a posting-key unstake")
+	assert.EqualValues(t, 1000, c17TotalStaked(t, &ct, 3))
+
+	// posting-only CLAIMUNSTAKED is refused too — the second half of the drain
+	call(t, &ct, c17C1, "unstake", `{"amount":"1000"}`, "hive:victim", 4, true)
+	pvCallPosting(t, &ct, c17C1, "claimUnstaked", `{}`, "hive:victim", 20, false)
+	assert.EqualValues(t, 0, c17TokenBal(t, &ct, "hive:victim", 20),
+		"a posting key must not be able to land unstaked tokens in the liquid balance")
+
+	// the owner, with an active auth, still can
+	call(t, &ct, c17C1, "claimUnstaked", `{}`, "hive:victim", 21, true)
+	assert.EqualValues(t, 1000, c17TokenBal(t, &ct, "hive:victim", 21))
+}
+
+// The guard exempts contract: callers, and it MUST. On a nested call the runtime sets
+// Caller to "contract:<id>" while forwarding the outer tx's required_auths verbatim,
+// so a contract can never appear in that list. An unconditional RequireActive would
+// therefore let a contract stake and then never unstake — its position stranded
+// forever. This test fails the moment someone "simplifies" the helper.
+func TestCovStake_ContractCallerCanStillUnstake(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{c17C1: c17C1Only})
+	call(t, &ct, c17C1, "init",
+		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), c17Owner, 0, true)
+
+	// a contract holds tokens and approves C1, exactly as a hive account would
+	holder := "contract:" + c17C7 // any contract id; it never executes here
+	call(t, &ct, tokenID, "mint", `{"amount":"500"}`, owner, 0, true)
+	call(t, &ct, tokenID, "transfer", fmt.Sprintf(`{"to":"%s","amount":"500"}`, holder), owner, 0, true)
+	call(t, &ct, tokenID, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"500"}`, c17C1), holder, 0, true)
+
+	call(t, &ct, c17C1, "stake", `{"amount":"500"}`, holder, 1, true)
+	assert.EqualValues(t, 500, c17StakeOf(t, &ct, holder, 1))
+
+	// the point of the test: the contract can get its money back out
+	call(t, &ct, c17C1, "unstake", `{"amount":"500"}`, holder, 2, true)
+	assert.EqualValues(t, 0, c17StakeOf(t, &ct, holder, 2), "contract stake must not be strandable")
+	call(t, &ct, c17C1, "claimUnstaked", `{}`, holder, 10, true)
+	assert.EqualValues(t, 500, c17TokenBal(t, &ct, holder, 10))
+}

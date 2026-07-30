@@ -4,13 +4,13 @@
 // Three modes (see plan §20), all verified feasible on VSC:
 //
 //   - Single    — one authorized account. (That account may itself be a Hive
-//                 multisig account at L1; transparent to the contract.)
+//     multisig account at L1; transparent to the contract.)
 //   - Cosigned  — M-of-N in ONE tx: passes if msg.required_auths contains >= M
-//                 of the N authorities. Atomic; needs off-chain co-signing.
+//     of the N authorities. Atomic; needs off-chain co-signing.
 //   - Attest    — M-of-N ASYNC: each authority submits independently from its own
-//                 machine; the action commits only once >= M authorities have
-//                 submitted a BYTE-IDENTICAL payload for the same actionKey.
-//                 M==N gives unanimous. Pure in-contract, no signature coordination.
+//     machine; the action commits only once >= M authorities have
+//     submitted a BYTE-IDENTICAL payload for the same actionKey.
+//     M==N gives unanimous. Pure in-contract, no signature coordination.
 //
 // The package is stateless with respect to configuration — each contract stores
 // its own auth Config and reconstructs it. Only Attest mode touches contract
@@ -195,6 +195,32 @@ func RequireActive(caller string, requiredAuths []string) {
 	if !contains(requiredAuths, caller) {
 		sdk.Abort("auth: active authority required (posting key not accepted)")
 	}
+}
+
+// RequireActiveUnlessContract gates a caller-relative, fund-moving entrypoint on
+// ACTIVE authority, exempting contract callers.
+//
+// The exemption is not a convenience — it is required for correctness. On a nested
+// call the runtime sets Caller to "contract:<id>" while forwarding the OUTER
+// transaction's required_auths verbatim, so a contract caller can never appear in
+// that list and an unconditional RequireActive would abort every nested call. For C1
+// that would strand any stake held by a contract permanently: it could stake but
+// never unstake.
+//
+// It fails CLOSED for every other namespace. An earlier draft whitelisted "hive:"
+// instead, which silently skips the guard for any namespace nobody thought of; did:
+// callers do land in required_auths and pass the strict check.
+//
+// Use this for entrypoints that move the CALLER'S OWN funds. Do not use it where the
+// caller is being checked for membership of an authority set — auth.Authorize already
+// calls the strict RequireActive there, and a relay in that position is a genuine
+// confused deputy.
+func RequireActiveUnlessContract(caller string, requiredAuths []string) {
+	const contractPrefix = "contract:"
+	if len(caller) >= len(contractPrefix) && caller[:len(contractPrefix)] == contractPrefix {
+		return
+	}
+	RequireActive(caller, requiredAuths)
 }
 
 // present reports whether a state key holds a non-empty value. The VSC runtime

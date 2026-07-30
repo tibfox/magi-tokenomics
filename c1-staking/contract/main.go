@@ -20,14 +20,14 @@ func main() {}
 // ---- config / state keys -------------------------------------------------
 
 const (
-	kInit       = "init"
-	kToken      = "cfg_token"
-	kKind       = "cfg_kind"
-	kTokenId    = "cfg_tokenid"
-	kCooldown   = "cfg_cooldown"
-	kTotal      = "total_staked"
-	kCkptN      = "ckpt_n"
-	maxClaim    = 20 // bound RC per claimUnstaked call
+	kInit     = "init"
+	kToken    = "cfg_token"
+	kKind     = "cfg_kind"
+	kTokenId  = "cfg_tokenid"
+	kCooldown = "cfg_cooldown"
+	kTotal    = "total_staked"
+	kCkptN    = "ckpt_n"
+	maxClaim  = 20 // bound RC per claimUnstaked call
 )
 
 func assertInit() {
@@ -110,6 +110,14 @@ func Init(payload *string) *string {
 func Stake(payload *string) *string {
 	assertInit()
 	c := mustCaller()
+	// Fund-moving and caller-relative: require an ACTIVE authority. Without this a
+	// Hive POSTING key — routinely delegated to third-party front-ends — moves the
+	// signer's stake, because the runtime derives msg.caller from
+	// RequiredPostingAuths[0] when no active auth is present. C1 custody is the only
+	// layer that can stop that: the token contract authorizes transfers on msg.caller
+	// alone. Contract callers are exempt (see auth.RequireActiveUnlessContract) or
+	// contract-held stake could never be withdrawn.
+	auth.RequireActiveUnlessContract(c, reqAuths())
 	amt := mustAmount(payload)
 	credit(c, amt) // pulls into custody, then credits + checkpoints
 	return ok()
@@ -122,7 +130,7 @@ func Stake(payload *string) *string {
 func StakeFor(payload *string) *string {
 	assertInit()
 	c := mustCaller()
-	if !present("allow|"+c) {
+	if !present("allow|" + c) {
 		sdk.Abort("caller not in stakeFor allowlist")
 	}
 	auth.RequireActive(c, reqAuths()) // CRIT-2
@@ -143,6 +151,14 @@ func StakeFor(payload *string) *string {
 func Unstake(payload *string) *string {
 	assertInit()
 	c := mustCaller()
+	// Fund-moving and caller-relative: require an ACTIVE authority. Without this a
+	// Hive POSTING key — routinely delegated to third-party front-ends — moves the
+	// signer's stake, because the runtime derives msg.caller from
+	// RequiredPostingAuths[0] when no active auth is present. C1 custody is the only
+	// layer that can stop that: the token contract authorizes transfers on msg.caller
+	// alone. Contract callers are exempt (see auth.RequireActiveUnlessContract) or
+	// contract-held stake could never be withdrawn.
+	auth.RequireActiveUnlessContract(c, reqAuths())
 	amt := mustAmount(payload)
 	cur := getBig("stake|" + c)
 	if cur.Cmp(amt) < 0 {
@@ -169,6 +185,14 @@ func Unstake(payload *string) *string {
 func ClaimUnstaked(_ *string) *string {
 	assertInit()
 	c := mustCaller()
+	// Fund-moving and caller-relative: require an ACTIVE authority. Without this a
+	// Hive POSTING key — routinely delegated to third-party front-ends — moves the
+	// signer's stake, because the runtime derives msg.caller from
+	// RequiredPostingAuths[0] when no active auth is present. C1 custody is the only
+	// layer that can stop that: the token contract authorizes transfers on msg.caller
+	// alone. Contract callers are exempt (see auth.RequireActiveUnlessContract) or
+	// contract-held stake could never be withdrawn.
+	auth.RequireActiveUnlessContract(c, reqAuths())
 	h := blockHeight()
 	head := idx("us_head|" + c)
 	tail := idx("us_tail|" + c)
@@ -405,7 +429,7 @@ func validateAddr(a string) {
 	}
 }
 
-func ok() *string  { return str(`{"success":true}`) }
+func ok() *string          { return str(`{"success":true}`) }
 func str(s string) *string { return &s }
 
 func splitColon(s string) (string, string) {

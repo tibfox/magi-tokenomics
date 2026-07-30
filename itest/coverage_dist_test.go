@@ -539,3 +539,66 @@ func TestCovDist_C6InitRejectsBadCap(t *testing.T) {
 	call(t, &ct, covC6bID, "init", base+`,"maxAirdrop":"1"}`, owner, 0, true)
 	assert.Equal(t, "0", covAirdropTotal(t, &ct, covC6bID))
 }
+
+// The stale-rescue deadline must be anchored to when the funding ACTUALLY ARRIVED,
+// not to the epoch's place in the schedule.
+//
+// This became reachable when C2 stopped latching on exhaustion. Backlog funding is
+// now a designed mode: a starved schedule resumes on refill and pays epoch indices
+// long past their epochEnd. Anchored on epochEnd alone, those epochs arrive with the
+// rescue gate ALREADY OPEN — so a guardian, or an automated "cancel funded but
+// unfinalized" monitor, can cancel them the block the money lands, while the reporter
+// is still submitting in good faith. The funding then goes to the treasury, not the
+// earners.
+//
+// epochLen=1 and genesis=0, so epochEnd(0)=0 and staleBlocks()=1000 (the floor).
+func TestCovDist_StaleRescueAnchorsOnFundedAtNotEpochEnd(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
+
+	// Fund epoch 0 LATE, the way a backlog epoch is funded after a pool refill.
+	// Under the old rule its rescue window opened at block 1000 — 500 blocks BEFORE
+	// the money even arrived.
+	const fundedAt = 1500
+	covFundEpoch(t, ct, covC3ID, "0", fundedAt)
+
+	// Past the old epochEnd+stale deadline (1000) but not past fundedAt+stale (2500):
+	// the guardian must be REFUSED. This is the assertion the old code failed.
+	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2000, false)
+	_, _, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2000)
+	assert.Equal(t, "", status, "the epoch must still be open")
+	assert.NotEqual(t, "0", funded, "the funding must not have been swept away")
+
+	// The reporter has time to do its job inside that window.
+	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60,hive:covb:40", 2100, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 2100, true)
+	_, _, _, status = covShareOf(t, ct, covC3ID, "0", "hive:cova", 2100)
+	assert.Equal(t, "finalized", status)
+}
+
+// The rescue still works — it is only DELAYED, never removed. A genuinely abandoned
+// epoch must remain recoverable once the funding-anchored deadline passes.
+func TestCovDist_StaleRescueStillOpensAfterTheFundedAnchor(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
+	const fundedAt = 1500
+	covFundEpoch(t, ct, covC3ID, "0", fundedAt)
+
+	// still shut just before fundedAt + staleBlocks()
+	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2499, false)
+	// and open just after
+	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2501, true)
+	_, _, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2501)
+	assert.Equal(t, "cancelled", status)
+	assert.Equal(t, "0", funded, "funding rolls into unallocated for the guardian to sweep")
+}
+
+// An epoch holding no money must not be cancellable through the rescue branch at all:
+// the branch exists to recover funds, and letting a bookkeeping key open it would let
+// a cancel lock an epoch out of ever being funded.
+func TestCovDist_StaleRescueRequiresActualFunding(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
+	// never funded — far past any conceivable deadline
+	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 99999, false)
+}

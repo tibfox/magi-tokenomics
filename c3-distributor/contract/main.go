@@ -17,8 +17,9 @@ func main() {}
 const kInit = "init"
 
 // Init: {"token","kind","tokenId","funder"(C2 id),"window",
-//   "reporterMode","reporterAuth","reporterThreshold",
-//   "guardianMode","guardianAuth","guardianThreshold"}
+//
+//	"reporterMode","reporterAuth","reporterThreshold",
+//	"guardianMode","guardianAuth","guardianThreshold"}
 //
 //go:wasmexport init
 func Init(payload *string) *string {
@@ -190,10 +191,21 @@ func FinalizeEpoch(payload *string) *string {
 		sdk.Abort("no shares submitted for epoch")
 	}
 	// Gate on the auth result — in Attest mode this must reach threshold (CRIT-1).
-	// Bind the attestation to WHAT is being frozen (shares + funding), so co-signers
-	// approve a specific state, not merely "finalize epoch N" (MED).
-	finState := getBig("totalShares|"+ep).String() + ":" + getBig("funded|"+ep).String()
-	if !auth.Authorize(reporterCfg(), "rep", "fin:"+ep, finState, mustCaller(), reqAuths()) {
+	// The attested payload is a CONSTANT, not chain state.
+	//
+	// It used to bind totalShares:funded, read at attestation time. But submitShares
+	// stays open until status is set — which finalize itself sets only on commit — so
+	// totalShares provably moves while a finalize vote is pending. Two honest
+	// reporters attesting at different page-completion points therefore produced
+	// DIFFERENT payloads. The tally is per payload hash while the seen-marker is one
+	// per (action, authority) with no payload component and no way to clear it, so
+	// each burned its only vote in a different bucket, the threshold was never
+	// reachable, and the epoch became permanently unfinalizable — recoverable only by
+	// a guardian cancel that pays the treasury rather than the earners.
+	//
+	// Anti-equivocation is untouched: one vote per authority per action still holds.
+	// cancelEpoch already attests over a constant for the same reason.
+	if !auth.Authorize(reporterCfg(), "rep", "fin:"+ep, "fin:"+ep, mustCaller(), reqAuths()) {
 		return str(`{"finalized":false}`) // pending more attestations
 	}
 	set("status|"+ep, "finalized")
@@ -216,10 +228,29 @@ func CancelEpoch(payload *string) *string {
 			sdk.Abort("challenge window elapsed")
 		}
 	} else if st == "" {
-		if !present("fundedAt|" + ep) {
+		// Rescue only an epoch that actually HOLDS money here.
+		if getBig("funded|"+ep).Sign() <= 0 {
 			sdk.Abort("epoch not funded")
 		}
-		if blockHeight() < epochEnd(ep)+staleBlocks() {
+		// Anchor on the LATER of the schedule and the block the funding actually
+		// arrived — the same rule as C7.deadlineOf.
+		//
+		// Anchoring on epochEnd alone broke once C2 stopped latching on exhaustion.
+		// Backlog funding is now a designed mode: a starved schedule resumes when the
+		// pool is refilled and pays epoch indices long past their epochEnd, so their
+		// rescue gate was ALREADY OPEN the block the money landed — and pullFunding is
+		// permissionless, so anyone could start that clock. A guardian, or an
+		// automated stale-cancel monitor, would convert a whole refilled backlog to
+		// unallocated while the reporter was still submitting in good faith.
+		//
+		// max() can only ever REFUSE a cancel the old rule allowed, never permit a new
+		// one, so the HIGH-1 property (a reporter working a live epoch cannot be
+		// front-run) is preserved by construction.
+		anchor := epochEnd(ep)
+		if fa := getU("fundedAt|" + ep); fa > anchor {
+			anchor = fa
+		}
+		if blockHeight() < anchor+staleBlocks() {
 			sdk.Abort("epoch not finalized (and not stale yet)")
 		}
 	} else {
@@ -434,8 +465,8 @@ func getU(k string) uint64 {
 	n, _ := strconv.ParseUint(getStr(k), 10, 64)
 	return n
 }
-func set(k, v string)          { sdk.StateSetObject(k, v) }
-func getBig(k string) *big.Int { return parseBig(getStr(k)) }
+func set(k, v string)             { sdk.StateSetObject(k, v) }
+func getBig(k string) *big.Int    { return parseBig(getStr(k)) }
 func setBig(k string, v *big.Int) { set(k, v.String()) }
 func parseBig(s string) *big.Int {
 	n := new(big.Int)
@@ -461,6 +492,7 @@ func validateAddr(a string) {
 		}
 	}
 }
+
 // validateLedgerAddr requires a known ledger domain. Used only for values that are
 // TRANSFER DESTINATIONS (not contract ids, which are bare vsc1... strings).
 // isLedgerAddr reports whether a has a known ledger domain.
@@ -532,6 +564,7 @@ func indexByte(s string, c byte) int {
 	}
 	return -1
 }
+
 // f extracts a flat JSON field. It only matches "name" in KEY position (followed
 // by ':'), so a value equal to a field name can't be mis-parsed (M4).
 func f(payload *string, name string) string {

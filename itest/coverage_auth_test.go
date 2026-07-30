@@ -459,3 +459,67 @@ func TestCovAuth_C3GuardianAttest2of3(t *testing.T) {
 	b = caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"100000"`)
 }
+
+// Two honest reporters must be able to finalize even if they attest at DIFFERENT
+// points in the report's construction.
+//
+// finalizeEpoch used to attest over `totalShares|<ep> : funded|<ep>`, read from chain
+// state at attestation time. But submitShares stays open until status is set — which
+// finalize itself sets only on commit — so totalShares provably moves under a pending
+// finalize vote. Reporter A finalizing after page 0, and reporter B after pages 0 and
+// 1, therefore attested DIFFERENT payloads. The tally is per payload hash while the
+// seen-marker is one per (action, authority) with no payload component and no way to
+// clear it: both votes were spent in different buckets, the threshold became
+// unreachable, and the epoch was permanently unfinalizable. Recovery was only a
+// guardian cancel, which pays the treasury rather than the earners.
+//
+// Attesting over a constant removes the divergence. Anti-equivocation is unaffected —
+// still one vote per authority per action.
+func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
+	_ = os.RemoveAll("data/badger")
+	ct := caSetupC3(t, "2", "hive:rep1,hive:rep2,hive:rep3", "2")
+
+	// page 0 reaches the threshold and APPLIES, so totalShares becomes 100
+	const page0 = `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
+	caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep1"}, 1, true)
+	r := caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep2"}, 1, true)
+	assert.Contains(t, r.Ret, `"applied":true`)
+	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 1), `"totalShares":"100"`)
+
+	// rep1 finalizes HERE — under the old code it bound totalShares=100
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, true)
+	assert.Contains(t, r.Ret, `"finalized":false`, "one attestation is below the threshold")
+
+	// a second page now applies, MOVING totalShares to 110 while rep1's vote is pending
+	const page1 = `{"epoch":"0","page":"1","entries":"hive:carol:10"}`
+	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep1"}, 2, true)
+	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep2"}, 2, true)
+	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 2), `"totalShares":"110"`)
+
+	// rep2 finalizes against the NEW state. Under the old binding this landed in a
+	// different payload bucket and the epoch could never be finalized by anyone.
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep2"}, 3, true)
+	assert.Contains(t, r.Ret, `"success":true`,
+		"votes cast at different totalShares must still merge to the threshold")
+	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 3), `"status":"finalized"`)
+
+	// and the epoch pays out the FULL report, not the partial one
+	caCall(t, ct, caC3ID, "claim", `{"epoch":"0"}`, []string{"hive:carol"}, 5, true)
+}
+
+// The constant payload must not weaken anti-equivocation: one authority still gets
+// exactly one finalize vote, and cannot spend a second.
+func TestCovAuth_C3FinalizeStillOneVotePerAuthority(t *testing.T) {
+	_ = os.RemoveAll("data/badger")
+	ct := caSetupC3(t, "2", "hive:rep1,hive:rep2,hive:rep3", "2")
+	caCall(t, ct, caC3ID, "submitShares",
+		`{"epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep1"}, 1, true)
+	caCall(t, ct, caC3ID, "submitShares",
+		`{"epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep2"}, 1, true)
+
+	caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, true)
+	r := caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, false)
+	caFailedFor(t, r, "already attested")
+	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":""`,
+		"one authority must not reach the threshold alone")
+}
