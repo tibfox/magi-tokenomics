@@ -118,6 +118,12 @@ type Options struct {
 
 const defaultPageSize = 1000
 
+// maxRows bounds one table's walk. Without it the offset loop only terminates when a
+// short page arrives, so an indexer that keeps returning full pages — buggy, hostile,
+// or simply misinterpreting `offset` — spins forever and grows the process until it
+// is killed. A real pool would need over a million liquidity events to reach this.
+const maxRows = 1_000_000
+
 // event is one liquidity change: +lp_minted or -lp_burned at a height.
 type event struct {
 	Provider string
@@ -195,6 +201,10 @@ func fetchTable(t Transport, query, pool string, h uint64, pageSize, sign int) (
 		}
 		if len(resp.Data.Rows) < pageSize {
 			return out, nil
+		}
+		if len(out) > maxRows {
+			return nil, fmt.Errorf("more than %d rows while paging — the indexer is not honouring "+
+				"limit/offset, or the pool has implausibly many events", maxRows)
 		}
 	}
 }
@@ -290,16 +300,59 @@ func LPShares(t Transport, o Options) (sharecore.Result, error) {
 		// SKIPS anything else. So a bare provider name would not be an odd entry — it
 		// would mean the whole epoch pays nobody while its funding accumulates, with
 		// nothing in the logs. Refuse to build such a report.
-		if !isLedgerAddr(name) {
-			return sharecore.Result{Shares: map[string]*big.Int{}, Total: new(big.Int)},
-				fmt.Errorf("provider %q is not a ledger address (needs a hive:/contract:/did:/system: prefix) — "+
-					"the distributor would skip it and the epoch would pay nobody", name)
+		if err := checkProvider(name); err != nil {
+			return sharecore.Result{Shares: map[string]*big.Int{}, Total: new(big.Int)}, err
 		}
 		c := new(big.Int).Set(credit)
 		res.Shares[name] = c
 		res.Total.Add(res.Total, c)
 	}
 	return res, nil
+}
+
+// checkProvider is the last gate before an untrusted string becomes an irreversible
+// on-chain payload, so it is deliberately strict.
+//
+// The distributor receives shares as "acct:amount" pairs joined by commas, and parses
+// them by splitting on commas and then the LAST colon. A provider name containing a
+// COMMA therefore injects entries. It is not a cosmetic problem — given the provider
+// name `hive:a,hive:attacker:999999999,` the payload becomes
+//
+//	hive:a,hive:attacker:999999999,:<amount>
+//
+// which the contract reads as a 999,999,999-share entry for hive:attacker: the whole
+// epoch, stolen. A trailing colon is milder but still harmful: `hive:alice:` is
+// ledger-prefixed, so it is counted into totalShares and then unclaimable forever,
+// diluting everyone else.
+//
+// Multiple colons are otherwise FINE and must stay allowed — did:key:z6Mk... is a
+// legitimate provider, and last-colon splitting parses it correctly.
+//
+// The DEX validates its own recipient addresses, so this is probably unreachable
+// today. It is enforced anyway because the indexer is a trusted-but-not-trustless
+// component: if it were ever compromised or replaced, this is the only thing standing
+// between it and an arbitrary payout.
+func checkProvider(name string) error {
+	if !isLedgerAddr(name) {
+		return fmt.Errorf("provider %q is not a ledger address (needs a hive:/contract:/did:/system: prefix) — "+
+			"the distributor would skip it and the epoch would pay nobody", name)
+	}
+	if strings.Contains(name, ",") {
+		return fmt.Errorf("provider %q contains a comma, which is the on-chain entry separator — "+
+			"it would inject extra share entries", name)
+	}
+	if strings.HasSuffix(name, ":") {
+		return fmt.Errorf("provider %q ends in a colon — it would be counted into totalShares "+
+			"and then be unclaimable, diluting every other provider", name)
+	}
+	for _, r := range name {
+		// Anything outside this set cannot be a real address on any of the four
+		// domains, and control characters or quotes risk mangling the payload.
+		if r > 0x7e || r <= 0x20 || r == '"' || r == '\\' {
+			return fmt.Errorf("provider %q contains an unsafe character %q", name, r)
+		}
+	}
+	return nil
 }
 
 // isLedgerAddr mirrors the distributor's own check (c5-lp/contract: isLedgerAddr).

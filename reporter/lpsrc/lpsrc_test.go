@@ -270,3 +270,66 @@ func TestLPShares_AcceptsAllLedgerDomains(t *testing.T) {
 		t.Fatalf("want 3 providers, got %v", mustShares(t, res))
 	}
 }
+
+// A provider name is untrusted input that becomes an on-chain payload. The contract
+// splits entries on commas, so a comma in a name injects entries — and with a colon
+// too, an arbitrary share for an arbitrary account. This is theft of a whole epoch.
+func TestLPShares_ProviderCannotInjectEntries(t *testing.T) {
+	for _, tc := range []struct{ name, provider, want string }{
+		{"comma redirects a share", "hive:evil,hive:victim", "comma"},
+		{"comma+colon mints a share", "hive:a,hive:attacker:999999999,", "comma"},
+		{"trailing colon dilutes", "hive:alice:", "colon"},
+		{"space", "hive:al ice", "unsafe character"},
+		{"newline", "hive:alice\n", "unsafe character"},
+		{"quote", "hive:alice\"", "unsafe character"},
+		{"non-ascii", "hive:alicé", "unsafe character"},
+	} {
+		f := &fakeIndexer{adds: []row{{tc.provider, "100", 1}}}
+		_, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+		if err == nil {
+			t.Fatalf("%s: provider %q was accepted — it must be refused", tc.name, tc.provider)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error should mention %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// Multiple colons must stay legal: did:key:... is a real provider and the contract's
+// last-colon split parses it correctly. Over-tightening would break DID providers.
+func TestLPShares_MultiColonDidStillAccepted(t *testing.T) {
+	f := &fakeIndexer{adds: []row{{"did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8", "100", 1}}}
+	res, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+	if err != nil {
+		t.Fatalf("a multi-colon DID provider must be accepted: %v", err)
+	}
+	if len(res.Shares) != 1 {
+		t.Fatalf("want the DID credited, got %v", mustShares(t, res))
+	}
+}
+
+// An indexer that never returns a short page would otherwise spin forever and grow
+// the process until it is killed.
+type floodIndexer struct{ calls int }
+
+func (f *floodIndexer) Query(query string, vars map[string]any, out any) error {
+	f.calls++
+	limit := vars["limit"].(int)
+	rows := make([]string, 0, limit)
+	for i := 0; i < limit; i++ { // always a FULL page
+		rows = append(rows, `{"provider":"hive:a","amount":1,"indexer_block_height":1}`)
+	}
+	return json.Unmarshal([]byte(`{"data":{"rows":[`+strings.Join(rows, ",")+`]}}`), out)
+}
+
+func TestLPShares_UnboundedIndexerIsCutOff(t *testing.T) {
+	f := &floodIndexer{}
+	_, err := LPShares(f, Options{Pool: "p", Start: 1, End: 2, PageSize: 1000})
+	if err == nil {
+		t.Fatal("an indexer that never pages out must be cut off, not followed forever")
+	}
+	if !strings.Contains(err.Error(), "not honouring") {
+		t.Fatalf("error should name the cause, got: %v", err)
+	}
+	t.Logf("cut off after %d calls", f.calls)
+}
