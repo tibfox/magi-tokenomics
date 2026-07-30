@@ -110,6 +110,23 @@ not a *new* one — the reporter was already trusted to submit an honest list, t
 events derive from on-chain transactions, and Hasura is publicly queryable, so anyone
 can recompute independently and a guardian can still veto during the challenge window.
 
+### Verifying against a real indexer
+
+Every other LP test uses a fake server, which cannot catch a renamed column or a
+different table prefix — a fake written alongside the queries always agrees with
+them. One opt-in test closes that, read-only, two SELECTs and no chain writes:
+
+```bash
+LPSRC_LIVE_INDEXER=https://api-testnet.okinoko.io/hasura/v1/graphql \
+LPSRC_LIVE_POOL=vsc1Brm1QpGF8WXvRCvwgbpB6fiHtTBJzyZUC9 \
+go test ./reporter/lpsrc/ -run TestLive -v
+```
+
+Run it whenever the indexer's schema might have moved. It asks for a single instant
+(`Start == End`) rather than a span: over a span, `min()` correctly reports nobody
+held LP at both ends of all history, which looks like a schema failure but is the
+anti-flash rule working.
+
 ## The epoch sequence
 
 An epoch pays out only if all four happen, in this order:
