@@ -91,11 +91,22 @@ func (f *lpFixture) serve(t *testing.T) *httptest.Server {
 		f.mu.Unlock()
 
 		// The reporter refuses to score an epoch the indexer has not provably reached,
-		// so it asks for indexer_health first. Answering it is part of being a
-		// believable stand-in.
-		if strings.Contains(req.Query, "indexer_health") {
+		// and it measures that PER POOL via contract_logs — not from the global
+		// indexer_health max, which says nothing about any particular contract.
+		// Answering both is part of being a believable stand-in.
+		if strings.Contains(req.Query, "contract_logs_aggregate") {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"data":{"indexer_health":[{"latest_block_height":%d}]}}`, health)
+			fmt.Fprintf(w,
+				`{"data":{"contract_logs_aggregate":{"aggregate":{"max":{"block_height":%d},"count":9}}}}`,
+				health)
+			return
+		}
+		if strings.Contains(req.Query, "indexer_health") {
+			// Deliberately far ahead of the pool's own height: if the gate ever
+			// regresses to using this, the freshness assertions here stop meaning
+			// anything and this fixture would hide it.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"indexer_health":[{"latest_block_height":999999999}]}}`)
 			return
 		}
 

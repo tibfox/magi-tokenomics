@@ -250,7 +250,7 @@ func LPShares(t Transport, o Options) (sharecore.Result, error) {
 		pageSize = defaultPageSize
 	}
 	if !o.AllowStale {
-		if err := checkFresh(t, o.End); err != nil {
+		if err := checkFresh(t, o.Pool, o.End); err != nil {
 			return res, err
 		}
 	}
@@ -376,9 +376,17 @@ func isLedgerAddr(a string) bool {
 	return false
 }
 
-// healthQuery reads the indexer's own view of how far it has got. `indexer_health` is
-// MAX(block_height) FROM contract_logs across every contract it tracks.
+// healthQuery reads the indexer's GLOBAL progress: MAX(block_height) across every
+// contract it tracks. Kept only for diagnostics — see checkFresh for why it must not
+// be used as the freshness proof.
 const healthQuery = `query{ indexer_health { latest_block_height } }`
+
+// poolHeightQuery reads how far the indexer has got FOR ONE CONTRACT.
+const poolHeightQuery = `query($pool:String!){
+  contract_logs_aggregate(where:{contract_address:{_eq:$pool}}){
+    aggregate { max { block_height } count }
+  }
+}`
 
 type healthResp struct {
 	Data struct {
@@ -391,7 +399,23 @@ type healthResp struct {
 	} `json:"errors"`
 }
 
-// IndexerHeight returns the highest block the indexer has recorded a log for.
+type poolHeightResp struct {
+	Data struct {
+		Agg struct {
+			Aggregate struct {
+				Max struct {
+					Height *json.Number `json:"block_height"`
+				} `json:"max"`
+				Count int `json:"count"`
+			} `json:"aggregate"`
+		} `json:"contract_logs_aggregate"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+// IndexerHeight returns the highest block the indexer has logged for ANY contract.
 func IndexerHeight(t Transport) (uint64, error) {
 	var resp healthResp
 	if err := t.Query(healthQuery, map[string]any{}, &resp); err != nil {
@@ -410,40 +434,82 @@ func IndexerHeight(t Transport) (uint64, error) {
 	return uint64(h), nil
 }
 
+// PoolIndexedHeight returns the highest block the indexer has logged FOR THIS POOL,
+// and whether it has any logs for it at all.
+func PoolIndexedHeight(t Transport, pool string) (uint64, bool, error) {
+	var resp poolHeightResp
+	if err := t.Query(poolHeightQuery, map[string]any{"pool": pool}, &resp); err != nil {
+		return 0, false, err
+	}
+	if len(resp.Errors) > 0 {
+		return 0, false, fmt.Errorf("contract_logs query failed: %s", resp.Errors[0].Message)
+	}
+	a := resp.Data.Agg.Aggregate
+	if a.Count == 0 || a.Max.Height == nil {
+		return 0, false, nil
+	}
+	h, err := a.Max.Height.Int64()
+	if err != nil || h < 0 {
+		return 0, false, fmt.Errorf("contract_logs max block_height %q is not a height", *a.Max.Height)
+	}
+	return uint64(h), true, nil
+}
+
 // checkFresh refuses to score an epoch the indexer may not have finished indexing.
 //
 // THE FAILURE THIS PREVENTS: a lagging indexer does not error, it returns FEWER ROWS.
 // Balances come out understated, the report is submitted and finalized, and providers
-// are underpaid irreversibly with nothing in any log. That is the single most
-// dangerous property of sourcing rewards from an index.
+// are underpaid irreversibly with nothing in any log.
 //
-// WHAT THE EVIDENCE CAN AND CANNOT PROVE. `indexer_health.latest_block_height` is
-// MAX(block_height) FROM contract_logs — the last log the indexer WROTE, not the
-// position it has SCANNED to. So:
+// IT MUST BE MEASURED PER POOL. `indexer_health` is MAX(block_height) over ALL of
+// contract_logs with no contract filter, but ingestion advances a SEPARATE cursor per
+// contract (fetcher/mongo.go lastProcessed[address]), and DEX pools are discovered at
+// runtime via a pool_init event rather than configured statically — so a pool starts
+// at cursor 0 and backfills while long-tracked contracts already sit at head. On the
+// live testnet indexer the global figure is ~5,023,590 while the pool's own logs stop
+// at ~2,937,340: two million blocks of false confidence. An earlier version of this
+// gate used the global number and would have waved through every epoch in that gap.
 //
-//	height >= epochEnd  =>  it has demonstrably processed past our window. PROOF of
-//	                        sufficiency, and the check passes.
-//	height <  epochEnd  =>  AMBIGUOUS. Either the indexer has stalled, or no tracked
-//	                        contract has emitted anything since — which on a quiet
-//	                        chain is entirely normal and means our data is complete.
+// WHAT THE EVIDENCE CAN AND CANNOT PROVE. Even scoped to the pool this is the height
+// of the last log WRITTEN, not the cursor position. So:
 //
-// Nothing exposed distinguishes those two, so the check is deliberately one-sided:
-// pass only on proof, refuse otherwise. On a low-activity chain that WILL refuse
-// legitimately-complete epochs, which is why AllowStale exists — but it defaults off,
-// because an operator who wants throughput should have to say so rather than discover
-// silent underpayment later.
-func checkFresh(t Transport, end uint64) error {
-	h, err := IndexerHeight(t)
+//	height >= epochEnd  =>  it has demonstrably logged past our window. PROOF, passes.
+//	height <  epochEnd  =>  AMBIGUOUS. Either the indexer is behind on this pool, or
+//	                        the pool simply had no activity since — normal on a quiet
+//	                        pool, and then our data IS complete.
+//
+// Nothing exposed distinguishes those, so the gate is one-sided: pass only on proof.
+// On a quiet pool that WILL refuse complete epochs, which is what AllowStale is for —
+// defaulted off, because an operator wanting throughput should say so rather than
+// discover silent underpayment later.
+//
+// No logs at all for the pool is treated as unproven, not as "nothing happened": an
+// undiscovered or not-yet-backfilled pool looks exactly like an empty one.
+func checkFresh(t Transport, pool string, end uint64) error {
+	h, any, err := PoolIndexedHeight(t, pool)
 	if err != nil {
 		return fmt.Errorf("cannot verify indexer freshness: %w", err)
+	}
+	if !any {
+		return fmt.Errorf("the indexer holds no logs at all for pool %s, so it cannot be shown to "+
+			"have indexed this epoch. A pool that was never discovered looks identical to one "+
+			"with no activity. Check indexer.pool, or set indexer.allow_stale if you are certain",
+			pool)
 	}
 	if h >= end {
 		return nil
 	}
-	return fmt.Errorf("indexer may be behind: its newest indexed log is block %d but this epoch "+
-		"ends at %d, so liquidity events in blocks %d..%d may not be indexed yet. Either the "+
-		"indexer is lagging (scoring now would underpay, irreversibly) or the chain has simply "+
-		"been quiet (the data is complete). That cannot be told apart from what the indexer "+
-		"exposes. Wait for it to catch up, or set indexer.allow_stale if you accept the risk",
-		h, end, h+1, end)
+	global, gerr := IndexerHeight(t)
+	hint := ""
+	if gerr == nil {
+		hint = fmt.Sprintf(" (the indexer is at block %d across all contracts, but that says nothing "+
+			"about this pool: each contract advances its own cursor, and discovered pools backfill "+
+			"from 0)", global)
+	}
+	return fmt.Errorf("indexer may be behind on pool %s: its newest log for that pool is block %d "+
+		"but this epoch ends at %d, so liquidity events in blocks %d..%d may not be indexed yet%s. "+
+		"Either it is lagging (scoring now would underpay, irreversibly) or the pool has simply been "+
+		"idle (the data is complete). That cannot be told apart from what the indexer exposes. Wait "+
+		"for it to catch up, or set indexer.allow_stale if you accept the risk",
+		pool, h, end, h+1, end, hint)
 }

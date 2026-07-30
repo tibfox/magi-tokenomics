@@ -7,6 +7,7 @@ toolchain go1.24.9
 require (
 	github.com/CosmWasm/tinyjson v0.9.0
 	github.com/stretchr/testify v1.11.1
+	github.com/vsc-eco/hivego v0.0.0-20260224180332-508b8c394435
 	vsc-node v0.0.0-00010101000000-000000000000
 )
 
@@ -179,7 +180,6 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.57.0 // indirect
 	github.com/vsc-eco/go-ethereum v0.0.1 // indirect
-	github.com/vsc-eco/hivego v0.0.0-20260224180332-508b8c394435 // indirect
 	github.com/whyrusleeping/cbor-gen v0.1.2 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect

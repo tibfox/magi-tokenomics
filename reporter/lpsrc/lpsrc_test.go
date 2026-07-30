@@ -25,20 +25,31 @@ type fakeIndexer struct {
 	adds, rems []row
 	pageSize   int
 	calls      int
-	health     uint64
+	health     uint64 // per-POOL indexed height
+	noPoolLogs bool   // pool has no logs at all
 }
 
 // health lets a test pretend the indexer is at a given block. Zero means "far ahead",
 // so existing tests are unaffected by the freshness gate.
 func (f *fakeIndexer) Query(query string, vars map[string]any, out any) error {
 	f.calls++
-	if strings.Contains(query, "indexer_health") {
+	if strings.Contains(query, "contract_logs_aggregate") {
 		h := f.health
 		if h == 0 {
 			h = 1 << 62
 		}
+		if f.noPoolLogs {
+			return json.Unmarshal([]byte(
+				`{"data":{"contract_logs_aggregate":{"aggregate":{"max":{"block_height":null},"count":0}}}}`), out)
+		}
 		return json.Unmarshal([]byte(fmt.Sprintf(
-			`{"data":{"indexer_health":[{"latest_block_height":%d}]}}`, h)), out)
+			`{"data":{"contract_logs_aggregate":{"aggregate":{"max":{"block_height":%d},"count":7}}}}`, h)), out)
+	}
+	if strings.Contains(query, "indexer_health") {
+		// GLOBAL height, deliberately far ahead of the pool's — the gate must not
+		// be satisfied by this.
+		return json.Unmarshal([]byte(
+			`{"data":{"indexer_health":[{"latest_block_height":999999999}]}}`), out)
 	}
 	src := f.adds
 	amountKey := "lp_minted"
@@ -325,8 +336,9 @@ type floodIndexer struct{ calls int }
 
 func (f *floodIndexer) Query(query string, vars map[string]any, out any) error {
 	f.calls++
-	if strings.Contains(query, "indexer_health") {
-		return json.Unmarshal([]byte(`{"data":{"indexer_health":[{"latest_block_height":999999}]}}`), out)
+	if strings.Contains(query, "contract_logs_aggregate") {
+		return json.Unmarshal([]byte(
+			`{"data":{"contract_logs_aggregate":{"aggregate":{"max":{"block_height":999999},"count":3}}}}`), out)
 	}
 	limit := vars["limit"].(int)
 	rows := make([]string, 0, limit)
@@ -405,5 +417,40 @@ func TestLPShares_UnreadableHealthIsNotTreatedAsFresh(t *testing.T) {
 	_, err := LPShares(&HTTPTransport{Endpoint: srv.URL}, Options{Pool: "p", Start: 1, End: 2})
 	if err == nil || !strings.Contains(err.Error(), "cannot verify indexer freshness") {
 		t.Fatalf("an unreadable health view must fail closed, got: %v", err)
+	}
+}
+
+// The gate must be measured PER POOL. indexer_health is a global max over every
+// tracked contract, but each contract advances its own cursor and discovered pools
+// backfill from zero — so a pool can be two million blocks behind while the global
+// figure sits at head. An earlier version of this gate used the global number.
+func TestLPShares_FreshnessIsScopedToThePoolNotGlobal(t *testing.T) {
+	f := &fakeIndexer{
+		adds:   []row{{"hive:alice", "1000", 10}},
+		health: 90, // this POOL is only indexed to 90; the fake's global says 999999999
+	}
+	_, err := LPShares(f, Options{Pool: "p", Start: 50, End: 100})
+	if err == nil {
+		t.Fatal("a pool behind the epoch end must be refused even when the global height is ahead")
+	}
+	if !strings.Contains(err.Error(), "behind on pool") {
+		t.Fatalf("error should name the POOL as the thing that is behind, got: %v", err)
+	}
+	// and it should surface the misleading global figure as a diagnostic
+	if !strings.Contains(err.Error(), "999999999") {
+		t.Fatalf("error should cite the global height to explain the discrepancy, got: %v", err)
+	}
+}
+
+// A pool with no logs cannot be distinguished from one never discovered, so it is
+// unproven rather than empty.
+func TestLPShares_PoolWithNoLogsIsUnproven(t *testing.T) {
+	f := &fakeIndexer{adds: []row{{"hive:alice", "1000", 10}}, noPoolLogs: true}
+	_, err := LPShares(f, Options{Pool: "vsc1nope", Start: 50, End: 100})
+	if err == nil || !strings.Contains(err.Error(), "no logs at all") {
+		t.Fatalf("an unknown pool must be refused as unproven, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "vsc1nope") {
+		t.Fatalf("error should name the pool, got: %v", err)
 	}
 }

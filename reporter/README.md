@@ -104,13 +104,23 @@ nothing in any log. Before scoring, the reporter reads
 `indexer_health.latest_block_height` and refuses unless the indexer is provably past
 the epoch's end block.
 
-That proof is **one-sided**, and it matters that you know which side. `indexer_health`
-is `MAX(block_height) FROM contract_logs` — the last log the indexer *wrote*, not the
-position it has *scanned* to. So `height >= epochEnd` proves sufficiency and passes;
-`height < epochEnd` is ambiguous — either the indexer has stalled, or no tracked
-contract has emitted anything since, which on a quiet chain is normal and means the
-data is complete. Nothing exposed distinguishes those, so the gate passes only on
-proof and refuses otherwise.
+**It is measured per pool, and that distinction is load-bearing.** `indexer_health`
+reports `MAX(block_height)` across *every* contract the indexer tracks, but ingestion
+advances a **separate cursor per contract**, and DEX pools are discovered at runtime
+from a `pool_init` event rather than configured statically — so a pool begins at
+cursor 0 and backfills while long-tracked contracts already sit at head. On the live
+testnet indexer the global figure is ~5,023,590 while that pool's own logs stop at
+~2,937,340: two million blocks of false confidence. The gate therefore reads
+`contract_logs` filtered to the pool, and uses the global number only as a diagnostic
+hint in the error message.
+
+That proof is **one-sided**, and it matters that you know which side. Even scoped to
+the pool it is the last log *written*, not the position *scanned*. So
+`height >= epochEnd` proves sufficiency and passes; `height < epochEnd` is ambiguous —
+either the indexer is behind on this pool, or the pool has simply been idle, which
+means the data is complete. Nothing exposed distinguishes those, so the gate passes
+only on proof and refuses otherwise. A pool with no logs at all is treated as
+unproven, not empty: an undiscovered pool looks identical to an idle one.
 
 On a low-traffic chain that will refuse epochs whose data is in fact complete. That is
 what `indexer.allow_stale` is for. It defaults to **false**: an operator who wants

@@ -28,13 +28,24 @@ func TestLive_SchemaMatchesRealIndexer(t *testing.T) {
 
 	tr := &HTTPTransport{Endpoint: endpoint, Secret: os.Getenv("LPSRC_LIVE_SECRET")}
 
-	// indexer_health is part of the schema contract now (the freshness gate reads it),
-	// so verify it independently before relying on it.
-	h, err := IndexerHeight(tr)
+	// Both freshness signals are part of the schema contract now. Read them together
+	// because their DIFFERENCE is the whole point: the global figure is not evidence
+	// about any particular pool.
+	global, err := IndexerHeight(tr)
 	if err != nil {
-		t.Fatalf("indexer_health is unreadable — the freshness gate depends on it: %v", err)
+		t.Fatalf("indexer_health is unreadable: %v", err)
 	}
-	t.Logf("indexer reports latest_block_height = %d", h)
+	h, any, err := PoolIndexedHeight(tr, pool)
+	if err != nil {
+		t.Fatalf("contract_logs is unreadable — the freshness gate depends on it: %v", err)
+	}
+	if !any {
+		t.Fatalf("the indexer holds no logs for pool %s — wrong pool id?", pool)
+	}
+	t.Logf("indexer global height = %d; THIS POOL indexed to = %d (gap %d)", global, h, int64(global)-int64(h))
+	if h > global {
+		t.Fatalf("a pool cannot be indexed past the global max: pool %d > global %d", h, global)
+	}
 
 	// Score AT the indexer's own height, which does two things: the freshness gate
 	// passes on proof rather than being bypassed, and Start == End asks for positions
