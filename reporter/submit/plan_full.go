@@ -54,18 +54,36 @@ func BuildFullPlan(o PlanOpts) Plan {
 			Note:    "keeper poke: mint emission + record bucket owed",
 		})
 	}
+	// SHARES BEFORE FUNDING — deliberately, and the order matters.
+	//
+	// pullFunding stamps `fundedAt|<ep>`, which anchors the guardian's stale-rescue
+	// deadline. Pulling first starts that clock and then spends the whole window
+	// paginating: at ~685 RC per entry against a 4096-byte page cap, a large report
+	// is many transactions. It is worst for a BACKLOG epoch — one refill poke can
+	// fund up to maxCatch epochs at once, so their deadlines all land in the same
+	// window and a guardian (or an automated stale-cancel monitor) can cancel them
+	// out from under a reporter that is submitting in good faith.
+	//
+	// submitShares does not require funding — it gates only on the epoch still being
+	// open (c3-distributor/contract/main.go:126) — so the pages can go first and the
+	// clock starts as late as possible. finalizeEpoch still requires funded>0, so
+	// pullFunding simply has to precede it, which it does.
+	inner := BuildPlan(o.DistributorID, o.Epoch, o.Pages, o.RcLimit, o.Finalize)
+	pages, finalize := inner.Calls, []Call(nil)
+	if n := len(pages); n > 0 && pages[n-1].Action == "finalizeEpoch" {
+		pages, finalize = pages[:n-1], pages[n-1:]
+	}
+	pl.Calls = append(pl.Calls, pages...)
+
 	if o.PullFunding {
 		pl.Calls = append(pl.Calls, Call{
 			ContractID: o.DistributorID,
 			Action:     "pullFunding",
 			Payload:    `{"epoch":"` + o.Epoch + `"}`,
 			RcLimit:    o.RcLimit,
-			Note:       "pull epoch slice from funder",
+			Note:       "pull epoch slice from funder (after the pages, so the stale clock starts late)",
 		})
 	}
-
-	// steps 3 and 4 are exactly the share plan
-	inner := BuildPlan(o.DistributorID, o.Epoch, o.Pages, o.RcLimit, o.Finalize)
-	pl.Calls = append(pl.Calls, inner.Calls...)
+	pl.Calls = append(pl.Calls, finalize...)
 	return pl
 }

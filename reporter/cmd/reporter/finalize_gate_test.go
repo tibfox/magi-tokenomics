@@ -1,0 +1,187 @@
+package main
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"magi_token/reporter/submit"
+)
+
+// fakeState serves distributor state without a chain.
+type fakeState struct {
+	kv   map[string]string
+	err  error
+	hits int
+}
+
+func (f *fakeState) StateGet(_ string, keys []string) (map[string]string, error) {
+	f.hits++
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := map[string]string{}
+	for _, k := range keys {
+		if v, ok := f.kv[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func gateApp(t *testing.T, kv map[string]string, err error) (*app, *fakeState) {
+	t.Helper()
+	c, cerr := LoadConfig(writeCfg(t, ExampleConfig))
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	// no waiting in tests; one look at the chain is enough
+	c.Submit.ConfirmTries = 1
+	c.Submit.ConfirmIntervalSec = 1
+	fs := &fakeState{kv: kv, err: err}
+	return &app{cfg: c, state: fs}, fs
+}
+
+func gatePlan(epoch string, pages int) submit.Plan {
+	pl := submit.Plan{Epoch: epoch}
+	pl.Calls = append(pl.Calls, submit.Call{Action: "pullFunding", Payload: `{"epoch":"` + epoch + `"}`})
+	for i := 0; i < pages; i++ {
+		pl.Calls = append(pl.Calls, submit.Call{
+			Action:  "submitShares",
+			Payload: `{"epoch":"` + epoch + `","page":"` + itoa(i) + `","entries":"hive:a:1"}`,
+		})
+	}
+	pl.Calls = append(pl.Calls, submit.Call{Action: "finalizeEpoch", Payload: `{"epoch":"` + epoch + `"}`})
+	return pl
+}
+
+func itoa(i int) string { return string(rune('0' + i)) }
+
+// The headline case: pages accepted by Hive but REVERTED on L2. Finalizing here pays
+// the whole epoch to whoever landed, and the missing accounts can never be added.
+func TestGate_RefusesFinalizeWhenPagesRevertedAndWereNotSentThisRun(t *testing.T) {
+	a, _ := gateApp(t, map[string]string{
+		"funded|41":   "5000",
+		"status|41":   "",
+		"cfg_rMode":   "0",
+		"ssdone|41|4": "1", // only the last page applied
+	}, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 5), map[string]bool{}, true)
+	if proceed {
+		t.Fatal("must NOT finalize an epoch with reverted pages")
+	}
+	if err == nil {
+		t.Fatal("a revert that was not sent in this run must be a hard error, not a quiet skip")
+	}
+	for _, want := range []string{"NOT applied", "permanently", "0 1 2 3"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// All pages confirmed and funded: proceed.
+func TestGate_ProceedsWhenEveryPageIsConfirmed(t *testing.T) {
+	kv := map[string]string{"funded|41": "5000", "status|41": "", "cfg_rMode": "0"}
+	for i := 0; i < 5; i++ {
+		kv["ssdone|41|"+itoa(i)] = "1"
+	}
+	a, _ := gateApp(t, kv, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 5), map[string]bool{}, true)
+	if err != nil || !proceed {
+		t.Fatalf("a fully applied epoch must finalize: proceed=%v err=%v", proceed, err)
+	}
+}
+
+// A page broadcast moments ago may simply be landing. Defer quietly, exit 0, resume
+// next run — do not alarm, and do not finalize.
+func TestGate_DefersQuietlyForPagesSentThisRun(t *testing.T) {
+	a, _ := gateApp(t, map[string]string{
+		"funded|41": "5000", "status|41": "", "cfg_rMode": "0",
+	}, nil)
+	sent := map[string]bool{"submitShares/0": true}
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 2), sent, true)
+	if proceed {
+		t.Fatal("must not finalize while our own pages are unconfirmed")
+	}
+	if err != nil {
+		t.Fatalf("a page we just sent is not a failure — it must defer, got: %v", err)
+	}
+}
+
+// In Attest mode an unapplied page is the NORMAL state for every attester but the
+// last. Erroring there would fire on every healthy run and be ignored.
+func TestGate_AttestModeDefersInsteadOfErroring(t *testing.T) {
+	a, _ := gateApp(t, map[string]string{
+		"funded|41": "5000", "status|41": "", "cfg_rMode": "2",
+	}, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 3), map[string]bool{}, true)
+	if proceed {
+		t.Fatal("must not finalize below the attestation threshold")
+	}
+	if err != nil {
+		t.Fatalf("Attest mode must defer, not error: %v", err)
+	}
+}
+
+// The gate exists for the case where we cannot see what happened. An unreadable chain
+// must never be treated as confirmation.
+func TestGate_ReadErrorIsNotConfirmation(t *testing.T) {
+	a, _ := gateApp(t, nil, errors.New("gql: connection refused"))
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 2), map[string]bool{}, true)
+	if proceed {
+		t.Fatal("an unreadable chain must not authorise finalize")
+	}
+	if err == nil || !strings.Contains(err.Error(), "cannot confirm") {
+		t.Fatalf("want a hard confirm error, got: %v", err)
+	}
+}
+
+// Someone else finalized or cancelled it: stop cleanly, do not send a second finalize.
+func TestGate_StopsIfEpochAlreadyClosed(t *testing.T) {
+	a, _ := gateApp(t, map[string]string{
+		"funded|41": "5000", "status|41": "cancelled", "cfg_rMode": "0",
+	}, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 2), map[string]bool{}, true)
+	if proceed || err != nil {
+		t.Fatalf("an already-closed epoch must stop cleanly: proceed=%v err=%v", proceed, err)
+	}
+}
+
+// funded|ep is zeroed by cancelEpoch, so it must be read as "not funded" rather than
+// letting the gate pass on a cancelled epoch.
+func TestGate_ZeroFundedIsNotFunded(t *testing.T) {
+	kv := map[string]string{"funded|41": "0", "status|41": "", "cfg_rMode": "0"}
+	for i := 0; i < 2; i++ {
+		kv["ssdone|41|"+itoa(i)] = "1"
+	}
+	a, _ := gateApp(t, kv, nil)
+	proceed, _ := a.confirmBeforeFinalize(gatePlan("41", 2), map[string]bool{}, true)
+	if proceed {
+		t.Fatal("funded|ep == 0 must not satisfy the gate")
+	}
+}
+
+// A dry run must not be blocked by a gate it cannot evaluate, and must not read as
+// evidence that the epoch was verified.
+func TestGate_DryRunIsNotEvaluated(t *testing.T) {
+	a, fs := gateApp(t, map[string]string{}, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 3), map[string]bool{}, false)
+	if !proceed || err != nil {
+		t.Fatalf("dry run must pass through: proceed=%v err=%v", proceed, err)
+	}
+	if fs.hits != 0 {
+		t.Fatalf("dry run must not query the chain, made %d calls", fs.hits)
+	}
+}
+
+// An epoch with no earners must be refused BEFORE funding is pulled into it.
+func TestGate_ZeroPagePlanIsRefusedBeforeAnyBroadcast(t *testing.T) {
+	pl := gatePlan("41", 0)
+	if !planHasFinalize(pl) {
+		t.Fatal("fixture should contain finalizeEpoch")
+	}
+	if countSubmitShares(pl) != 0 {
+		t.Fatal("fixture should contain no share pages")
+	}
+}

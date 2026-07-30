@@ -155,9 +155,46 @@ Run it whenever the indexer's schema might have moved. It asks for a single inst
 held LP at both ends of all history, which looks like a schema failure but is the
 anti-flash rule working.
 
+## Finalize is gated on confirmed pages
+
+`finalizeEpoch` is irreversible: once an epoch closes, `submitShares` aborts, so any
+account missing from the report can never be added and the accounts that did land
+split the whole epoch between them.
+
+Broadcasting is not executing. `Send` returns a Hive L1 txid, and there is no L2
+tx-receipt query anywhere in this codebase — only state reads — so a share page can be
+accepted by Hive and still revert inside the contract (RC exhaustion, a rejected
+payload, an Attest threshold not yet met). Before sending finalize, the reporter
+therefore re-reads `ssdone|<ep>|<page>` — which the contract writes only on the
+committed path, making it a true receipt — and refuses unless every page is applied
+and the epoch is funded.
+
+What it does when pages are missing depends on why, because the same symptom is a
+fault in one mode and routine in another:
+
+| situation | behaviour |
+|---|---|
+| pages broadcast in this run | defer to the next run, exit 0 — they may still be landing |
+| Attest mode, quorum not yet reached | defer, exit 0 — normal for every attester but the last |
+| pages missing that were NOT sent this run | **hard error** — they reverted |
+| chain unreadable | **hard error** — never treated as confirmation |
+| epoch already finalized/cancelled | stop cleanly, no second finalize |
+
+`submit.confirm_tries` × `submit.confirm_interval_sec` bound the wait (default 6 × 15s).
+
+An epoch with **no** earners is refused before anything is broadcast: funding it would
+move C2's slice into a distributor that can never finalize, recoverable only by a
+guardian cancel that pays the treasury rather than any earner.
+
 ## The epoch sequence
 
 An epoch pays out only if all four happen, in this order:
+
+> **Call order.** Pages are submitted BEFORE `pullFunding`. `pullFunding` stamps the
+> anchor for the guardian's stale-rescue deadline, so pulling first spends that whole
+> window paginating — worst for a backlog epoch, where one refill can fund many epochs
+> whose deadlines then coincide. `submitShares` needs no funding, so the clock starts
+> as late as possible. `finalizeEpoch` still requires `funded>0` and stays last.
 
 1. `C2.distributeEpoch` — keeper poke; DRAWS the epoch's emission from the approved
    pool (`token.transferFrom`; C2 does not mint) and records bucket `owed`.

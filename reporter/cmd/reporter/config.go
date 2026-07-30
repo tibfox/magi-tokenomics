@@ -107,6 +107,13 @@ type Config struct {
 		Keeper       bool   `json:"keeper"`       // also poke C2.distributeEpoch
 		PullFunding  bool   `json:"pull_funding"` // also call C3.pullFunding
 		Finalize     bool   `json:"finalize"`     // also call C3.finalizeEpoch
+		// Before sending the irreversible finalizeEpoch, the reporter re-reads the
+		// chain and refuses unless every share page is confirmed APPLIED. These bound
+		// that wait. Broadcasting is not executing: a page can be accepted by Hive and
+		// still revert on L2, and finalizing over the gap pays the whole epoch to
+		// whoever happened to land.
+		ConfirmTries       int `json:"confirm_tries"`
+		ConfirmIntervalSec int `json:"confirm_interval_sec"`
 	} `json:"submit"`
 }
 
@@ -327,7 +334,9 @@ const ExampleConfig = `{
     "progress_file": "reporter-progress.json",
     "keeper":        true,
     "pull_funding":  true,
-    "finalize":      true
+    "finalize":      true,
+    "confirm_tries": 6,
+    "confirm_interval_sec": 15
   }
 }
 `
@@ -361,6 +370,8 @@ const ExampleLPConfig = `{
     "keeper":        false,
     "pull_funding":  true,
     "finalize":      true,
+    "confirm_tries": 6,
+    "confirm_interval_sec": 15,
     "progress_file": "reporter-progress.json"
   }
 }

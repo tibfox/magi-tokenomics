@@ -117,10 +117,26 @@ func run(args []string) error {
 
 // ---- app -----------------------------------------------------------------
 
+// stateReader is the slice of vscapi.Client this command actually needs. Kept as an
+// interface so the finalize gate — the one piece here that decides whether an
+// irreversible call goes out — is testable without a chain.
+type stateReader interface {
+	StateGet(contractID string, keys []string) (map[string]string, error)
+}
+
 type app struct {
 	cfg  *Config
 	hive hivesrc.Transport
 	vsc  *vscapi.Client
+	// state defaults to vsc; tests substitute it.
+	state stateReader
+}
+
+func (a *app) reader() stateReader {
+	if a.state != nil {
+		return a.state
+	}
+	return a.vsc
 }
 
 func newApp(cfg *Config) (*app, error) {
@@ -532,7 +548,7 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	// and every one is safe to repeat, so the chain is both the safer and the more
 	// accurate source. The progress file remains an audit trail and is reported when
 	// it disagrees.
-	applied, err := a.chainApplied(pl)
+	applied, _, err := a.chainApplied(pl)
 	if err != nil {
 		return fmt.Errorf("could not read epoch state from chain: %w", err)
 	}
@@ -557,6 +573,18 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 		return nil
 	}
 
+	// An epoch with no earners must never reach the chain. distributeEpoch and
+	// pullFunding would move C2's slice into a distributor that can then never
+	// finalize (finalizeEpoch requires totalShares>0), leaving the funding
+	// recoverable only by a guardian stale-cancel that pays the treasury rather than
+	// any earner. Refuse before the first broadcast, not at the finalize step.
+	if planHasFinalize(pl) && countSubmitShares(pl) == 0 {
+		return fmt.Errorf("epoch %s has no share entries, so it can never be finalized "+
+			"(finalizeEpoch requires totalShares>0). Refusing to fund it: pulling funding into an "+
+			"epoch with no earners strands it until a guardian cancels the epoch after "+
+			"epochEnd+staleBlocks, which pays the treasury and not the earners", pl.Epoch)
+	}
+
 	var b broadcast.Broadcaster
 	if doBroadcast {
 		hb, herr := broadcast.NewHiveBroadcaster(
@@ -571,7 +599,23 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 		fmt.Printf("DRY RUN (pass -broadcast to send)\n\n")
 	}
 
+	sentThisRun := map[string]bool{}
 	for _, call := range remaining {
+		// FINALIZE IS IRREVERSIBLE. A share page can be broadcast successfully and
+		// still revert on L2 — the broadcaster returns the L1 txid and nothing about
+		// execution — so reaching this point is NOT evidence the pages applied. If we
+		// finalize anyway, the accounts on the surviving pages split the whole epoch
+		// and the missing ones can never be added: submitShares aborts once status is
+		// set. Re-read the chain and refuse unless every page is confirmed applied.
+		if call.Action == "finalizeEpoch" {
+			proceed, ferr := a.confirmBeforeFinalize(pl, sentThisRun, doBroadcast)
+			if ferr != nil {
+				return ferr
+			}
+			if !proceed {
+				return nil
+			}
+		}
 		fmt.Printf("-> %s %s\n", call.Action, call.Payload)
 		txid, serr := b.Send(call)
 		if serr != nil {
@@ -584,12 +628,16 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 			continue // never record progress for a call that was not sent
 		}
 		fmt.Printf("   tx %s\n", txid)
+		sentThisRun[call.Action+"/"+strconv.Itoa(submit.PageOf(call))] = true
 		if merr := prog.MarkDone(pl.Epoch, call.Action, submit.PageOf(call)); merr != nil {
 			return fmt.Errorf("call %s landed as %s but progress could not be saved: %w",
 				call.Action, txid, merr)
 		}
 	}
 	if doBroadcast {
+		// Deliberately "submitted", never "finalized": finalizeEpoch returns
+		// {"finalized":false} below an Attest threshold, and the broadcaster cannot
+		// see that. Claiming finalization here would be a fresh false all-clear.
 		fmt.Printf("\nepoch %d submitted\n", c.Epoch)
 	} else {
 		fmt.Printf("\ndry run complete — nothing was sent and no progress was recorded\n")
@@ -609,8 +657,10 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 // distributeEpoch has no per-epoch marker on the distributor — it is a keeper poke
 // on C2 — so it is treated as done once this epoch is funded, which is the only
 // thing the poke is needed for.
-func (a *app) chainApplied(pl submit.Plan) (map[string]bool, error) {
-	keys := []string{"funded|" + pl.Epoch, "status|" + pl.Epoch}
+func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, error) {
+	// cfg_rMode rides along: the finalize gate needs to know whether unapplied pages
+	// are a fault or the normal state of an Attest quorum that has not converged yet.
+	keys := []string{"funded|" + pl.Epoch, "status|" + pl.Epoch, "cfg_rMode"}
 	for _, c := range pl.Calls {
 		if c.Action == "submitShares" {
 			keys = append(keys, fmt.Sprintf("ssdone|%s|%d", pl.Epoch, submit.PageOf(c)))
@@ -621,9 +671,9 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, error) {
 	// getStateByKeys accepts at most 100 keys per call
 	for i := 0; i < len(keys); i += 100 {
 		end := min(i+100, len(keys))
-		chunk, err := a.vsc.StateGet(a.cfg.Contracts.Distributor, keys[i:end])
+		chunk, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys[i:end])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for k, v := range chunk {
 			state[k] = v
@@ -652,5 +702,144 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, error) {
 			out[k] = true
 		}
 	}
-	return out, nil
+	return out, state, nil
+}
+
+const (
+	// The finalize gate's default patience. Six tries at 15s covers ~90s, which is
+	// several VSC blocks — enough for a page broadcast moments earlier to land,
+	// without stalling an unattended keeper for long when something is actually wrong.
+	defaultConfirmTries    = 6
+	defaultConfirmInterval = 15 * time.Second
+
+	// auth.ModeAttest as it appears in contract state (cfg_rMode).
+	authModeAttest = "2"
+)
+
+func planHasFinalize(pl submit.Plan) bool {
+	for _, c := range pl.Calls {
+		if c.Action == "finalizeEpoch" {
+			return true
+		}
+	}
+	return false
+}
+
+func countSubmitShares(pl submit.Plan) int {
+	n := 0
+	for _, c := range pl.Calls {
+		if c.Action == "submitShares" {
+			n++
+		}
+	}
+	return n
+}
+
+// confirmBeforeFinalize decides whether it is safe to send finalizeEpoch.
+//
+// WHY THIS EXISTS. Broadcasting is not executing. `b.Send` returns the Hive L1 txid
+// and there is no tx-receipt query on L2 anywhere in this codebase — vscapi exposes
+// state reads only — so a share page can be accepted by Hive and still revert inside
+// the contract (out of RC, a payload the contract rejects, an Attest threshold not
+// yet met). finalizeEpoch does not care: it requires only status=="", funded>0 and
+// totalShares>0. So a run in which four of five pages reverted finalizes happily, the
+// accounts on the surviving page split 100% of the epoch, and the other four pages
+// can never be added because submitShares aborts once status is set. The money is
+// then recoverable only by a guardian cancelling inside the challenge window.
+//
+// `ssdone|<ep>|<page>` is the receipt we need: the contract writes it only on the
+// committed path, so its presence is proof of application rather than of submission.
+// chainApplied already reads exactly those keys — the entire bug was that it ran once
+// before the send loop and never again.
+//
+// Returns (true, nil) to proceed, (false, nil) to stop cleanly without finalizing,
+// or an error. A read failure is an ERROR, never treated as confirmation: this gate
+// exists precisely for the case where we cannot see what happened.
+func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool, doBroadcast bool) (bool, error) {
+	if !doBroadcast {
+		fmt.Println("   (dry run) finalize gate not evaluated — nothing was sent")
+		return true, nil
+	}
+	tries := a.cfg.Submit.ConfirmTries
+	if tries <= 0 {
+		tries = defaultConfirmTries
+	}
+	interval := time.Duration(a.cfg.Submit.ConfirmIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = defaultConfirmInterval
+	}
+
+	var missing []int
+	lastMode := ""
+	for attempt := 0; attempt < tries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(interval)
+		}
+		applied, state, err := a.chainApplied(pl)
+		if err != nil {
+			return false, fmt.Errorf("cannot confirm share pages before finalizing epoch %s: %w "+
+				"(refusing to finalize on an unverified report)", pl.Epoch, err)
+		}
+		lastMode = state["cfg_rMode"]
+		// Someone else finalized or cancelled it while we were working.
+		if st := state["status|"+pl.Epoch]; st != "" {
+			fmt.Printf("   epoch %s is already %s on chain — not finalizing again\n", pl.Epoch, st)
+			return false, nil
+		}
+		missing = missing[:0]
+		for _, c := range pl.Calls {
+			if c.Action != "submitShares" {
+				continue
+			}
+			if !applied[c.Action+"/"+strconv.Itoa(submit.PageOf(c))] {
+				missing = append(missing, submit.PageOf(c))
+			}
+		}
+		fundedOK := state["funded|"+pl.Epoch] != "" && state["funded|"+pl.Epoch] != "0"
+		if len(missing) == 0 && fundedOK {
+			return true, nil
+		}
+		if !fundedOK {
+			fmt.Printf("   waiting: epoch %s is not funded yet\n", pl.Epoch)
+			continue
+		}
+		fmt.Printf("   waiting: %d/%d share pages applied on chain (missing %v)\n",
+			countSubmitShares(pl)-len(missing), countSubmitShares(pl), missing)
+	}
+
+	// Still unconfirmed. Do NOT finalize and do NOT record progress — this run simply
+	// stops, and the next one resumes from chain state.
+	//
+	// Whether that is alarming depends on WHO is missing. A page this run broadcast
+	// may just be slow, and in Attest mode a page can be legitimately unapplied
+	// because the other attesters have not signed it yet — that is the normal state
+	// for every attester but the last, so treating it as an error would make the
+	// alarm fire on every healthy run and be ignored.
+	ours := false
+	for _, p := range missing {
+		if sentThisRun["submitShares/"+strconv.Itoa(p)] {
+			ours = true
+			break
+		}
+	}
+	attesting := lastMode == authModeAttest
+	switch {
+	case ours:
+		fmt.Printf("\nfinalize deferred to the next run: %d of %d pages are not applied on chain yet "+
+			"(missing %v). They were broadcast in this run and may still be landing.\n",
+			len(missing), countSubmitShares(pl), missing)
+		return false, nil
+	case attesting:
+		fmt.Printf("\nfinalize deferred: %d of %d pages have not reached the attestation threshold "+
+			"(missing %v). This is expected until enough reporters have signed them.\n",
+			len(missing), countSubmitShares(pl), missing)
+		return false, nil
+	default:
+		return false, fmt.Errorf("refusing to finalize epoch %s: %d of %d share pages are NOT applied "+
+			"on chain (missing %v) and were not sent in this run, so they reverted rather than being "+
+			"slow. Finalizing now would permanently pay the whole epoch to the accounts on the pages "+
+			"that did land — submitShares aborts once the epoch is finalized. Investigate (RC limit, "+
+			"page size) and re-run",
+			pl.Epoch, len(missing), countSubmitShares(pl), missing)
+	}
 }
