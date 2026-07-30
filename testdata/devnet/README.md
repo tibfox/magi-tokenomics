@@ -33,7 +33,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The seven suites
+## The eight suites
 
 | test | covers | ~time |
 |---|---|---|
@@ -44,6 +44,7 @@ to your own paths.
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
+| `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode against a faked indexer | 24 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -120,6 +121,7 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
 | `magi_c5c6c7_devnet_test.go` | yes | 1106s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1415s |
 | `magi_reporter_devnet_test.go` | yes | 721s |
 
 **Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
@@ -143,6 +145,33 @@ Do not mark a suite verified from reasoning about its source. Run it.
 
 Keep this table honest as the code moves on: "patched and compiles" is not
 "verified", and this table is the only place that distinction is recorded.
+
+### `magi_lp_multiepoch_devnet_test.go`
+
+Three epochs of LP rewards driven by the real `reporter` binary in `source.kind: "lp"`.
+The indexer is faked with an httptest GraphQL server, exactly as the content reporter
+suite fakes Hive; everything else — C2, C5, submission, claims — is the live chain.
+
+The fixture gives each epoch a **different** correct answer, so a pass means the
+`min(LP(start), LP(end))` rule actually discriminates rather than one assertion
+passing three times:
+
+| provider | e0 | e1 | e2 | why |
+|---|---:|---:|---:|---|
+| steady | 1000 | 1000 | 1000 | in before the run, never moves |
+| grower | 1000 | 1000 | 4000 | tops up mid-epoch-1 → counts from e2 only |
+| exiter | 1000 | 0 | 0 | exits mid-epoch-1 → forfeits that epoch |
+| flash | 0 | 0 | 0 | in and out inside e1 |
+| **total** | 3000 | 2000 | 5000 | |
+
+Event heights are positioned relative to the real `cfg_genesis` read off-chain.
+`page_size: 2` forces the indexer paging walk (26 queries in the passing run). Claims
+are asserted as deltas because the deployer also holds the undrawn pool.
+
+**What it cannot catch:** a mismatch between the reporter's queries and the REAL
+Hasura schema. A fake server written alongside the queries will always agree with
+them. That needs one read-only `reporter compute -epoch N -json` against a live
+indexer.
 
 ## Writing a multi-epoch test
 

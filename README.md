@@ -41,7 +41,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 
 ```bash
 GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 65 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 85 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 89 reporter tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -182,6 +182,7 @@ checkout to run; `testdata/` keeps them versioned here without breaking the buil
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: catch-up, flat emission, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained, refilled, backlog paid in full | 17 min |
+| `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode | 24 min |
 
 They need `reporter/bin/reporter` built first, and take `MAGI_FRAMEWORK_DIR` /
 `MAGI_TOKEN_WASM` to locate the artifacts. Each run builds a ~766MB docker image that
