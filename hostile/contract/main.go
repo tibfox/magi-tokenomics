@@ -41,6 +41,42 @@ func Reenter(payload *string) *string {
 	return str(`{"reentered":true}`)
 }
 
+// compose calls TWO DIFFERENT contracts in ONE transaction, so every call observes
+// the same block.height:
+//
+//	{"t1","m1","p1","t2","m2","p2"[,"t3","m3","p3"]}
+//
+// This is the primitive the adversary was missing. `relay` reaches one contract and
+// `reenter` reaches the same one twice, so nothing could compose across contracts —
+// yet that is exactly where this framework's time-based invariants meet. C7 credits
+// min(stakeAt(hStart), stakeAt(hEnd)) by reading C1 live, and C1 checkpoints at
+// blockHeight(); both are reachable in a single tx, and within one tx the height
+// cannot advance between them. Any sequence that only works because two contracts
+// disagree about "now" would show up here.
+//
+// A failing inner call aborts the whole tx, which is itself informative: it means the
+// composition is not reachable atomically.
+//
+//go:wasmexport compose
+func Compose(payload *string) *string {
+	n := 0
+	for _, leg := range [][3]string{
+		{f(payload, "t1"), f(payload, "m1"), f(payload, "p1")},
+		{f(payload, "t2"), f(payload, "m2"), f(payload, "p2")},
+		{f(payload, "t3"), f(payload, "m3"), f(payload, "p3")},
+	} {
+		if leg[0] == "" || leg[1] == "" {
+			continue
+		}
+		sdk.ContractCall(leg[0], leg[1], leg[2], nil)
+		n++
+	}
+	if n == 0 {
+		sdk.Abort("compose: no legs")
+	}
+	return str(`{"composed":true}`)
+}
+
 func str(s string) *string { return &s }
 
 func f(payload *string, name string) string {

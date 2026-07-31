@@ -2,6 +2,7 @@ package itest_test
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"testing"
 
@@ -100,4 +101,108 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	// token still owned by C2
 	own := call(t, &ct, hosTok, "getOwner", ``, "hive:anyone", 13, true)
 	assert.Contains(t, own.Ret, "contract:"+hosC2, "token owner unchanged")
+}
+
+// CROSS-CONTRACT COMPOSITION IN ONE TRANSACTION.
+//
+// The adversary previously had `relay` (one contract) and `reenter` (the same
+// contract twice), so nothing could compose across two DIFFERENT framework contracts
+// atomically — which is precisely where this system's time-based invariants meet. C7
+// credits min(stakeAt(hStart), stakeAt(hEnd)) by reading C1 live, and C1 checkpoints
+// at blockHeight(). Both are reachable in one tx, and within a tx the height cannot
+// advance, so any sequence that works only because two contracts disagree about "now"
+// would surface here.
+//
+// No exploit is expected. The point is that the tooling to look for one now exists.
+func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(hosTok, owner, read(tokenWasmPath))
+	ct.RegisterContract(hosC1, owner, read("../c1-staking/artifacts/main.wasm"))
+	ct.RegisterContract(hosC2, owner, read("../c2-emission/artifacts/main.wasm"))
+	ct.RegisterContract(hosC7, owner, read("../c7-yield/artifacts/main.wasm"))
+	ct.RegisterContract(hosEvil, hosMal, read("../hostile/artifacts/main.wasm"))
+
+	call(t, &ct, hosTok, "init", `{"name":"H","symbol":"H","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
+	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, hosTok, hosC7), owner, 0, true)
+	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
+	call(t, &ct, hosC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2, hosC1), owner, 0, true)
+
+	// give the attacker's CONTRACT real tokens and a real approval, so the composed
+	// legs are individually legitimate — the question is whether the SEQUENCE is.
+	evil := "contract:" + hosEvil
+	call(t, &ct, hosTok, "mint", `{"amount":"5000"}`, owner, 0, true)
+	call(t, &ct, hosTok, "transfer", fmt.Sprintf(`{"to":"%s","amount":"5000"}`, evil), owner, 0, true)
+	call(t, &ct, hosTok, "approve", fmt.Sprintf(`{"spender":"contract:%s","amount":"5000"}`, hosC1), evil, 0, true)
+
+	// fund epoch 0's yield bucket
+	call(t, &ct, hosC2, "distributeEpoch", ``, "hive:hoskeeper", 10, true)
+	call(t, &ct, hosC7, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
+
+	esc := func(s string) string {
+		out := ""
+		for _, r := range s {
+			if r == '"' {
+				out += `\"`
+			} else {
+				out += string(r)
+			}
+		}
+		return out
+	}
+	compose := func(h uint64, expectOK bool, legs ...[3]string) {
+		p := "{"
+		for i, l := range legs {
+			if i > 0 {
+				p += ","
+			}
+			p += fmt.Sprintf(`"t%d":"%s","m%d":"%s","p%d":"%s"`, i+1, l[0], i+1, l[1], i+1, esc(l[2]))
+		}
+		p += "}"
+		call(t, &ct, hosEvil, "compose", p, hosMal, h, expectOK)
+	}
+
+	// 1. stake and claim the SAME epoch's yield in one tx. Both legs see the same
+	//    height, so if C7 credited the end boundary alone this would mint yield from
+	//    stake that existed for zero blocks. min(start,end) must make it worthless.
+	// The attacker starts holding the 5000 it was given; a reverted composition must
+	// leave exactly that, and a successful exploit would leave MORE.
+	before := covBalanceOf(t, &ct, hosTok, evil, 11)
+	assert.Equal(t, "5000", before.String(), "fixture: the attacker contract holds its float")
+	compose(12, false,
+		[3]string{hosC1, "stake", `{"amount":"5000"}`},
+		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+	)
+	assert.Equal(t, "5000", covBalanceOf(t, &ct, hosTok, evil, 12).String(),
+		"a stake and a claim in one tx must not pay the attacker, and the revert must "+
+			"leave the float untouched")
+
+	// 2. stake in one tx (legitimately), then in a LATER single tx claim and unstake
+	//    together — an attempt to be paid for an epoch and exit within it.
+	call(t, &ct, hosC1, "stake", `{"amount":"5000"}`, evil, 11, true)
+	compose(13, false,
+		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+		[3]string{hosC1, "unstake", `{"amount":"5000"}`},
+	)
+
+	// 3. the reverse order — exit first, then claim, in one atomic tx.
+	compose(14, false,
+		[3]string{hosC1, "unstake", `{"amount":"5000"}`},
+		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+	)
+
+	// The stake moved the float into C1, so the liquid balance is now zero and must
+	// STAY zero: any yield paid by a composition would show up right here.
+	assert.Equal(t, "0", covBalanceOf(t, &ct, hosTok, evil, 15).String(),
+		"no composition may pay the attacker's contract any yield")
+	r := call(t, &ct, hosC1, "stakeOf", fmt.Sprintf(`{"account":"%s"}`, evil), "hive:reader", 15, true)
+	assert.Contains(t, r.Ret, `"stake":"5000"`, "a reverted composition must not have moved the stake")
+}
+
+// covBalanceOf reads a token balance for an arbitrary account against a given token.
+func covBalanceOf(t *testing.T, ct *test_utils.ContractTest, token, acct string, h uint64) *big.Int {
+	r := call(t, ct, token, "balanceOf", `{"account":"`+acct+`"}`, "hive:reader", h, true)
+	return cvBig(cvField(r.Ret, "balance"))
 }
