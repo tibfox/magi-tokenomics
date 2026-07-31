@@ -2,7 +2,9 @@ package itest_test
 
 import (
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"os"
+	"strconv"
 	"testing"
 
 	"vsc-node/lib/test_utils"
@@ -56,6 +58,19 @@ func TestRC_DistributeEpochCatchUpCost(t *testing.T) {
 
 		// epochLen=1, genesis=0 → poking at height N catches up N epochs (capped by maxCatch)
 		res := call(t, &ct, rcC2, "distributeEpoch", ``, "hive:keeper", c.epochs, true)
+		// ASSERT what was measured. Without this the table is not a measurement, it
+		// is a printout: this test previously recorded 271 RC for a starved no-op for
+		// weeks because nothing checked that any epoch was actually distributed. A
+		// number nobody asserts is a number nobody can trust.
+		want := c.epochs
+		if want > 50 {
+			want = 50 // maxCatch default
+		}
+		assert.Equal(t, strconv.FormatUint(want, 10), cvField(res.Ret, "distributed"),
+			"RC figures are meaningless unless the poke actually distributed: %s", res.Ret)
+		assert.NotContains(t, res.Ret, "starved",
+			"a starved poke measures nothing — fund the pool in this fixture")
+
 		fits := "YES"
 		if res.RcUsed > 10000 {
 			fits = "NO  <-- exceeds free tier"

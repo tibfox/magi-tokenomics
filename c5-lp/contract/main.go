@@ -80,6 +80,27 @@ func Init(payload *string) *string {
 	}
 	set("cfg_genesis", sg)
 	set("cfg_epochLen", se)
+	// UPPER bound on the challenge window, now that the schedule is known.
+	//
+	// The window is immutable after init and gates two things: when claims open, and
+	// when the guardian's veto expires. A fat-fingered value (an extra zero, or blocks
+	// confused with seconds) is unrecoverable — claims would never open and the veto
+	// would never expire, with the funding stuck and no way to correct it. Ten epochs
+	// is already a generous challenge period; anything beyond it is a typo.
+	if w, el := getU("cfg_window"), getU("cfg_epochLen"); el > 0 && w > 10*el {
+		sdk.Abort("window must be <= 10 * epochLen (an immutable window that long is a typo)")
+	}
+	// OPTIONAL self-label. C3 and C5 are the same code deployed twice, so nothing on
+	// chain distinguishes a content distributor from an LP one: a swapped id in a
+	// reporter config passes every existing cross-check and scores an epoch from the
+	// wrong data source. Setting this lets the reporter refuse that. Empty stays legal
+	// so existing deployments and payloads are unaffected.
+	if role := f(payload, "role"); role != "" {
+		if role != "content" && role != "lp" {
+			sdk.Abort("role must be \"content\" or \"lp\" if set")
+		}
+		set("cfg_role", role)
+	}
 	auth.Validate(reporterCfg())
 	auth.Validate(guardianCfg())
 	// reporter and guardian authority sets MUST be disjoint, else one coalition can

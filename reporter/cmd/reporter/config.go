@@ -166,7 +166,7 @@ func (c *Config) applyDefaults() {
 	}
 	// Page limits default to what the contract and RC budget actually allow:
 	// submitShares payloads are capped at 4096 bytes by the auth module and each
-	// entry costs roughly 685 RC to apply.
+	// entry costs roughly 80-95 RC to apply (docs/rc-costs.md).
 	if c.Page.MaxBytes == 0 {
 		c.Page.MaxBytes = 3800
 	}

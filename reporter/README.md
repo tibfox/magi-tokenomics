@@ -309,7 +309,7 @@ infrastructure — not assumptions.
   `vscapi.StakeSource` is a deliberate bug-for-bug copy of C1's `searchVal`, and
   `stake_test.go` proves the two agree by differential test.
 - **Page sizing.** `submitShares` payloads are capped at 4096 bytes by the `auth`
-  module and each entry costs roughly 685 RC to apply. Defaults are 60 entries /
+  module and each entry costs roughly 80-95 RC to apply. Defaults are 60 entries /
   3800 bytes; `page.max_bytes` above 4096 is rejected at config load.
 
 ## Vote weight modes

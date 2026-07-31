@@ -42,9 +42,9 @@ func Canonicalize(r Result) string {
 // Paginate splits a canonical entry list into pages that respect BOTH limits the
 // chain imposes:
 //
-//	maxEntries — RC budget. Measured cost is ~685 RC per entry (a ~36-byte state
-//	             write at 19 RC/byte), so an account's RC (ledger HBD + 10k free)
-//	             divided by that is the real ceiling.
+//	maxEntries — RC budget. Measured cost is ~80-95 RC per entry over a ~200 fixed
+//	             base (docs/rc-costs.md), so 60 entries is ~4,900 RC — inside the
+//	             10,000 free tier, but only just.
 //	maxBytes   — MAX_CONTRACT_PAYLOAD_SIZE is 8 KiB for the whole tx payload, so
 //	             the entries string must stay comfortably under it.
 //

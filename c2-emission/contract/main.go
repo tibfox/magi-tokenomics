@@ -1,9 +1,17 @@
-// C2 — Emission Controller (plan §19.2, §21/F1 pull model). Becomes the value
-// asset's owner and mints a flat per-epoch emission into named buckets. distributeEpoch
-// only mints-to-self + records per-epoch bucket allocations (NO external calls to
-// bucket targets) so a hostile/paused target cannot freeze emission (H-1). Each
-// target PULLS its slice via claimBucket. Guardian passthrough (pauseToken/
-// changeTokenOwner) is auth-gated (all modes) + timelocked (R6/D6).
+// C2 — Emission Controller (plan §19.2, §21/F1 pull model).
+//
+// DRAWS a flat per-epoch emission from an approved pool (token.transferFrom against
+// cfg_source) and records it against named buckets. It does NOT mint, and it does NOT
+// need to own the token — it is only an approved spender, so token ownership can be
+// renounced or handed to a DAO independently.
+//
+// distributeEpoch only pulls-to-self + records per-epoch bucket allocations (NO
+// external calls to bucket targets) so a hostile/paused target cannot freeze emission
+// (H-1). Each target PULLS its slice via claimBucket. Exhaustion PAUSES rather than
+// ends the schedule: a poke that cannot fund the next epoch writes no state, and a
+// refill resumes and pays the backlog. The guardian passthrough (pauseToken/
+// changeTokenOwner) is auth-gated (all modes) + timelocked (R6/D6) and applies only
+// if the token was in fact handed to C2.
 package main
 
 import (
@@ -170,7 +178,10 @@ func Init(payload *string) *string {
 	}
 	setU("bucket_n", n)
 
-	// read + store the token's immutable maxSupply (getInfo → {"maxSupply":"..."} )
+	// Read the token's maxSupply. Under the pool model this NO LONGER BOUNDS EMISSION
+	// — the approved pool does — so it is kept only as an init-time sanity check that
+	// the configured token is a real, initialised token, and as an audit record of
+	// what it was at deploy time. Nothing reads it afterwards.
 	info := sdk.ContractCall(tok, "getInfo", "", nil)
 	// SOURCE of the emission pool. C2 no longer mints: it pulls each epoch's
 	// emission from an account that has approved it (token.transferFrom, the same
@@ -231,6 +242,14 @@ func DistributeEpoch(_ *string) *string {
 	// state; a later top-up (mint + increaseAllowance) resumes from exactly here
 	// and pays the backlog that accrued meanwhile.
 	source := getStr("cfg_source")
+	// An instance initialised BEFORE the allowance model has no cfg_source, and init
+	// can never be re-run. Without this the pull would silently target the empty
+	// address and emission would simply stop, with every poke still reporting
+	// success — the failure mode this codebase keeps producing. Fail loudly instead,
+	// naming the cause, so it is diagnosable rather than mysterious.
+	if source == "" {
+		sdk.Abort("cfg_source is unset: this C2 predates the allowance model and cannot draw a pool — redeploy")
+	}
 	tok := getStr("cfg_token")
 	allowed := parseBig(pickField(sdk.ContractCall(tok, "allowance",
 		`{"owner":"`+source+`","spender":"`+self()+`"}`, nil), "allowance"))

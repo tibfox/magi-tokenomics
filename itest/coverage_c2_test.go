@@ -187,7 +187,7 @@ func cvPoke(t *testing.T, ct *test_utils.ContractTest, h uint64) string {
 
 // cvDrain pokes repeatedly until the backlog is empty. distributeEpoch is bounded
 // to maxCatch epochs per tx so one poke always fits the RC free tier (measured
-// ~840 RC/epoch with 1 bucket, ~1280 with 3); a keeper therefore pokes until
+// ~995 RC/epoch with 1 bucket, ~1437 with 3); a keeper therefore pokes until
 // caught up. Returns the LAST response.
 func cvDrain(t *testing.T, ct *test_utils.ContractTest, h uint64) string {
 	last := ""

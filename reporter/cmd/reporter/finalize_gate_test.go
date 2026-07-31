@@ -185,3 +185,51 @@ func TestGate_ZeroPagePlanIsRefusedBeforeAnyBroadcast(t *testing.T) {
 		t.Fatal("fixture should contain no share pages")
 	}
 }
+
+// C3 and C5 are the same code deployed twice, so every other cross-check passes for
+// either. Without the role label a swapped distributor id reports Hive posts into the
+// LP contract (or liquidity into the content one) and then finalizes it.
+func TestVerifyChainConfig_RoleMismatchIsReported(t *testing.T) {
+	base := map[string]string{
+		"cfg_genesis": "0", "cfg_epochLen": "28800", "cfg_funder": "vsc1...C2",
+	}
+	withRole := func(role string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		if role != "" {
+			m["cfg_role"] = role
+		}
+		return m
+	}
+	newApp := func(kind string, kv map[string]string) *app {
+		c, err := LoadConfig(writeCfg(t, ExampleConfig))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Source.Kind = kind
+		c.Epoch.Genesis, c.Epoch.Len = 0, 28800
+		c.Contracts.Funder = "vsc1...C2"
+		return &app{cfg: c, state: &fakeState{kv: kv}}
+	}
+
+	// the mistake this exists to catch
+	probs := newApp(SourceLP, withRole("content")).verifyChainConfig()
+	if len(probs) == 0 || !strings.Contains(strings.Join(probs, " "), "ROLE MISMATCH") {
+		t.Fatalf("an lp reporter pointed at a content distributor must be flagged, got %v", probs)
+	}
+
+	// agreement is silent
+	if probs := newApp(SourceLP, withRole("lp")).verifyChainConfig(); len(probs) != 0 {
+		t.Fatalf("a matching role must not be reported: %v", probs)
+	}
+	if probs := newApp(SourceContent, withRole("content")).verifyChainConfig(); len(probs) != 0 {
+		t.Fatalf("a matching role must not be reported: %v", probs)
+	}
+
+	// unset stays legal — the label is optional and existing deployments have none
+	if probs := newApp(SourceContent, withRole("")).verifyChainConfig(); len(probs) != 0 {
+		t.Fatalf("an unset role is not a problem: %v", probs)
+	}
+}

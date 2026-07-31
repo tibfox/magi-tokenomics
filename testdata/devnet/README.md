@@ -221,6 +221,22 @@ Two knock-on effects when writing assertions:
   deployer holds the pool and also stakes), which is why its conservation check
   measures a claim *delta* rather than an absolute balance.
 
+## Cleaning up between runs
+
+Remove containers **and networks and volumes**, not just containers:
+
+```bash
+docker rm -f $(docker ps -aq --filter "name=devnet-test-")
+docker network ls --format '{{.Name}}' | grep devnet-test- | xargs -r docker network rm
+docker volume ls --format '{{.Name}}' | grep devnet-test- | xargs -r docker volume rm -f
+docker images --format '{{.Repository}}:{{.Tag}}' | grep '^devnet-test-' | xargs -r docker rmi -f
+rm -rf <go-vsc-node>/.devnet
+```
+
+Removing only containers leaves a network holding the published ports, and the next
+run dies during setup with `Bind for 127.0.0.1:18057 failed: port is already
+allocated` — which looks like a code failure and is not one.
+
 ## Operational notes
 
 These cost real resources and have sharp edges. All of these were learned the hard

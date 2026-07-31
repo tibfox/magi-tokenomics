@@ -602,3 +602,60 @@ func TestCovDist_StaleRescueRequiresActualFunding(t *testing.T) {
 	// never funded — far past any conceivable deadline
 	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 99999, false)
 }
+
+// covBootRaw brings up the token + C2 only, so a test can drive several distributor
+// inits against one chain and observe which are accepted.
+func covBootRaw(t *testing.T) *test_utils.ContractTest {
+	t.Helper()
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(covTokenID, owner, read(tokenWasmPath))
+	ct.RegisterContract(covC2ID, owner, read(covC2Wasm))
+	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
+	call(t, &ct, covC2ID, "init", covC2Init(covC3ID), owner, 0, true)
+	return &ct
+}
+
+// The challenge window is immutable after init and gates BOTH when claims open and
+// when the guardian's veto expires. A fat-fingered value — an extra zero, or blocks
+// confused with seconds — is unrecoverable: claims never open, the veto never
+// expires, and the funding is stuck with no correction path. covC2Init uses
+// epochLen=1, so the bound is 10 blocks.
+func TestCovDist_InitRejectsAnAbsurdChallengeWindow(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBootRaw(t)
+
+	ct.RegisterContract(covC3ID, owner, read(covC3Wasm))
+	call(t, ct, covC3ID, "init", covDistInit("11", covReporter), owner, 0, false)
+
+	// exactly at the bound is still legal — the guard must reject typos, not tighten
+	// the contract's stated policy
+	ct.RegisterContract(covC3bID, owner, read(covC3Wasm))
+	call(t, ct, covC3bID, "init", covDistInit("10", covReporter), owner, 0, true)
+}
+
+// The role label lets a reporter tell a content distributor from an LP one. Nothing
+// else can: C3 and C5 are the same code deployed twice, so a swapped id in a reporter
+// config passes every other cross-check and would score an epoch from the wrong data
+// source. It is optional, so existing deployments and payloads are unaffected.
+func TestCovDist_RoleLabelIsOptionalAndValidated(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBootRaw(t)
+
+	withRole := func(role string) string {
+		base := covDistInit("5", covReporter)
+		return base[:len(base)-1] + fmt.Sprintf(`,"role":"%s"}`, role)
+	}
+
+	// a value that is neither "content" nor "lp" is rejected outright
+	ct.RegisterContract(covC3ID, owner, read(covC3Wasm))
+	call(t, ct, covC3ID, "init", withRole("distributor"), owner, 0, false)
+
+	// a legal one is accepted and readable back
+	ct.RegisterContract(covC3bID, owner, read(covC3Wasm))
+	call(t, ct, covC3bID, "init", withRole("lp"), owner, 0, true)
+
+	// and omitting it entirely stays legal
+	ct.RegisterContract(covC5ID, owner, read(covC5Wasm))
+	call(t, ct, covC5ID, "init", covDistInit("5", covReporter), owner, 0, true)
+}

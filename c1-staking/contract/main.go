@@ -91,6 +91,15 @@ func Init(payload *string) *string {
 		sdk.Abort("cooldown must be > epochLen (R15)")
 	}
 	sdk.StateSetObject(kCooldown, cd)
+	// STORE the epochLen the R15 check was made against.
+	//
+	// C1 has no funder and cannot verify this against C2's real schedule, so the
+	// guarantee "cooldown exceeds an epoch" rests entirely on the operator passing
+	// C2's actual epochLen here. Previously the value was parsed, used once and
+	// discarded, so nobody could later tell WHICH epochLen had been promised — the
+	// invariant was unfalsifiable after deploy. Recording it makes the claim
+	// auditable off-chain against the funder's cfg_epochLen.
+	sdk.StateSetObject("cfg_epochLen", field(payload, "epochLen"))
 	// stakeFor allowlist (immutable)
 	for _, a := range splitComma(field(payload, "allow")) {
 		if a != "" {

@@ -230,9 +230,22 @@ func (a *app) verifyChainConfig() []string {
 		"cfg_genesis":  a.cfg.Epoch.Genesis,
 		"cfg_epochLen": a.cfg.Epoch.Len,
 	}
-	got, err := a.vsc.StateGet(a.cfg.Contracts.Distributor, []string{"cfg_genesis", "cfg_epochLen", "cfg_funder"})
+	got, err := a.reader().StateGet(a.cfg.Contracts.Distributor,
+		[]string{"cfg_genesis", "cfg_epochLen", "cfg_funder", "cfg_role"})
 	if err != nil {
 		return []string{fmt.Sprintf("could not read distributor state: %v", err)}
+	}
+	// A content distributor and an LP one are the SAME CODE deployed twice, so every
+	// other cross-check here passes for either. Without this, a swapped distributor id
+	// scores an epoch from the wrong data source — Hive posts written into the LP
+	// contract, or liquidity into the content one — and then finalizes it. The label
+	// is optional, so an unset one is not a problem, only a disagreement is.
+	if role := got["cfg_role"]; role != "" && role != a.cfg.Kind() {
+		problems = append(problems, fmt.Sprintf(
+			"ROLE MISMATCH: this reporter is configured as source.kind=%q but the distributor "+
+				"at %s declares cfg_role=%q — check contracts.distributor, you are about to "+
+				"report the wrong kind of data into it",
+			a.cfg.Kind(), a.cfg.Contracts.Distributor, role))
 	}
 	for k, w := range want {
 		raw, ok := got[k]

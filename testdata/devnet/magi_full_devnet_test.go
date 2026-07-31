@@ -141,7 +141,9 @@ func TestDevnetMagiFull(t *testing.T) {
 			t.Fatalf("node %d could not deposit anything — it would run on the 10k free tier alone", node)
 		}
 	}
-	for _, node := range []int{1, 2, 3} {
+	// Node 5 is the C2 guardian and drives the token-op passthrough in PHASE 9. An
+	// unfunded guardian would abort on RC rather than on policy, which proves nothing.
+	for _, node := range []int{1, 2, 3, 5} {
 		fundNode(node)
 	}
 	// Deposits are L1 transfers to the gateway and take a while to credit the L2
@@ -652,7 +654,10 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c2ID, "claimBucket", `{"epoch":"0"}`, "C2 claimBucket impersonating a bucket target"},
 		{c2ID, "claimBucket", `{"epoch":"00"}`, "C2 claimBucket with a non-canonical epoch alias"},
 		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 queue a token takeover"},
-		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 execute a never-queued takeover"},
+		// NB: this aborts on the "not queued" guard, BEFORE the authority check, so it
+		// proves only that an unqueued op cannot execute. PHASE 9 covers the real
+		// authority and timelock path with an op that genuinely exists.
+		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 execute a never-queued takeover (aborts early — see PHASE 9)"},
 		{c2ID, "cancelTokenOp", `{"op":"pause","nonce":"1"}`, "C2 cancel a token op"},
 
 		// --- C3 content distributor ---
@@ -728,6 +733,52 @@ func TestDevnetMagiFull(t *testing.T) {
 		t.Fatalf("outsider queued a token op (%s = %s)", tlKey, v)
 	}
 	t.Logf("adversarial sweep clean: no state moved, outsider holds nothing")
+
+	// ---------------- PHASE 9: the guardian token-op passthrough ----------
+	//
+	// Until now this path had NEVER been exercised successfully anywhere. Both devnet
+	// suites only ever attempted executeTokenOp for an op that was never queued, so
+	// they aborted on the "not queued" guard — an earlier check — and proved nothing
+	// about the timelock or the authority. C2 holds the token here, so the passthrough
+	// is the only route to pause/changeOwner, and it is the framework's single largest
+	// retained power. Drive it end to end.
+	//
+	// timelock is 5 blocks (C2 init above); a devnet block is ~3s.
+	const pauseOp = `{"op":"pause","nonce":"9"}`
+	callN(5, c2ID, "queueTokenOp", pauseOp, "guardian queues pause")
+	if v := stateOf(c2ID, "tl|pause:9"); v == "" {
+		t.Fatal("guardian's queueTokenOp did not record tl|pause:9 — the passthrough is unreachable")
+	}
+	t.Logf("queued: tl|pause:9 = %s", stateOf(c2ID, "tl|pause:9"))
+
+	// EARLY execution must be refused. This is the assertion the old negative could
+	// not make: the op genuinely exists, so reaching the timelock check is guaranteed.
+	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes BEFORE the timelock")
+	if v := stateOf(tokenID, "paused"); v == "1" {
+		t.Fatal("TIMELOCK BYPASSED: the token paused before the delay elapsed")
+	}
+	t.Logf("early execute correctly did not pause the token (paused=%q)", stateOf(tokenID, "paused"))
+
+	// and a non-guardian must not be able to execute a legitimately queued op
+	if _, err := d.CallContract(ctx, 3, c2ID, "executeTokenOp", pauseOp); err == nil {
+		time.Sleep(9 * time.Second)
+	}
+	if v := stateOf(tokenID, "paused"); v == "1" {
+		t.Fatal("an outsider executed the guardian's queued op")
+	}
+
+	time.Sleep(30 * time.Second) // let the 5-block timelock elapse
+	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes AFTER the timelock")
+	waitValue(tokenID, "paused", "1", "token paused via the C2 passthrough")
+	t.Logf("PASSTHROUGH OK: guardian paused the token through C2 after the timelock")
+
+	// Restore, proving the round trip both ways rather than leaving the token wedged.
+	const unpauseOp = `{"op":"unpause","nonce":"10"}`
+	callN(5, c2ID, "queueTokenOp", unpauseOp, "guardian queues unpause")
+	time.Sleep(30 * time.Second)
+	callN(5, c2ID, "executeTokenOp", unpauseOp, "guardian executes unpause")
+	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")
+	t.Logf("PASSTHROUGH OK: and unpaused again — the retained power works in both directions")
 
 	t.Logf("FULL SYSTEM DEVNET PASSED — 7 contracts + reporter, one emission split 3 ways")
 	t.Logf("hive fixture calls: %v", fixture.hits)

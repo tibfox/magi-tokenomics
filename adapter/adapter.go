@@ -102,19 +102,6 @@ func RequireNoTokenId(tokenId string) {
 
 // ---- reads ---------------------------------------------------------------
 
-// BalanceOf returns an account's token balance. NFT mode aborts (see package doc).
-func BalanceOf(a Asset, acct string) *big.Int {
-	switch a.Kind {
-	case Fungible:
-		res := sdk.ContractCall(a.Contract, "balanceOf", `{"account":"`+safe(acct)+`"}`, nil)
-		return parseAmountField(res, "balance")
-	case EditionedNFT:
-		unsupported()
-	}
-	sdk.Abort("adapter: unknown kind")
-	return nil
-}
-
 // ---- movement ------------------------------------------------------------
 
 // Transfer sends `amount` from THIS contract to `to`.
@@ -144,24 +131,6 @@ func PullFrom(a Asset, acct string, amount *big.Int) {
 		// token.transferFrom: caller (this contract) is the spender; `to` = self.
 		sdk.ContractCall(a.Contract, "transferFrom",
 			`{"from":"`+safe(acct)+`","to":"`+self()+`","amount":"`+amount.String()+`"}`, nil)
-	case EditionedNFT:
-		unsupported()
-	default:
-		sdk.Abort("adapter: unknown kind")
-	}
-}
-
-// Mint creates `amount` of the value asset. Requires this contract to be the
-// asset's owner/authorized minter.
-//   - Fungible: token.mint credits the OWNER (this contract). `to` is ignored here;
-//     caller mints to self then Transfers (matches the token's owner-only mint).
-func Mint(a Asset, to string, amount *big.Int) {
-	if amount.Sign() <= 0 {
-		return
-	}
-	switch a.Kind {
-	case Fungible:
-		sdk.ContractCall(a.Contract, "mint", `{"amount":"`+amount.String()+`"}`, nil)
 	case EditionedNFT:
 		unsupported()
 	default:
@@ -239,3 +208,9 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// NOTE: Mint and BalanceOf were removed when C2 stopped minting. Emission now draws
+// from an approved pool via PullFrom, so nothing in the framework mints, and no
+// caller needed a balance read. They were left behind as exported-but-unreachable
+// API — which reads as "this is supported" to the next person. Reinstate them only
+// with a caller.

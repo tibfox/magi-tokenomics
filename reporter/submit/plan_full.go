@@ -58,7 +58,7 @@ func BuildFullPlan(o PlanOpts) Plan {
 	//
 	// pullFunding stamps `fundedAt|<ep>`, which anchors the guardian's stale-rescue
 	// deadline. Pulling first starts that clock and then spends the whole window
-	// paginating: at ~685 RC per entry against a 4096-byte page cap, a large report
+	// paginating: at ~80-95 RC per entry against a 4096-byte page cap, a large report
 	// is many transactions. It is worst for a BACKLOG epoch — one refill poke can
 	// fund up to maxCatch epochs at once, so their deadlines all land in the same
 	// window and a guardian (or an automated stale-cancel monitor) can cancel them

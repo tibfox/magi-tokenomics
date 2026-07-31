@@ -295,14 +295,33 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 		t.Fatalf("total supply %s, want %s — nothing should mint after setup", supply, wantSupply)
 	}
 
-	// The pool holder's balance must have fallen by exactly the emitted total.
+	// The pool holder's balance must have fallen by EXACTLY the emitted total.
+	//
+	// This used to assert only `poolLeft.Sign() < 0`, which can never fire: a token
+	// balance is read from state and is never negative. So the "pool drawn N over M
+	// epochs" line was logged, quoted as evidence, and verified by nothing. Compare
+	// the actual number.
+	//
+	// The owner holds the 1000000 pool and also the 3000 bootstrap float minus what
+	// it seeded to holderB, so the expected residue is derived from the same setup
+	// constants rather than hardcoded.
 	drawn := new(big.Int).Mul(big.NewInt(30000), big.NewInt(int64(lastEpoch+1)))
 	poolLeft := bal(owner)
-	t.Logf("FLAT EMISSION OK: supply constant at %s; pool drawn %s over %d epochs "+
-		"(every epoch drew the same amount)", supply, drawn, lastEpoch+1)
-	if poolLeft.Sign() < 0 {
-		t.Fatalf("pool went negative: %s", poolLeft)
+	ownerStart := big.NewInt(1000000 + 3000 - 1200) // pool + float - holderB seed
+	wantLeft := new(big.Int).Sub(ownerStart, drawn)
+	// The owner also staked 600 into C1. It unstaked 100 earlier, but unstaking only
+	// QUEUES — the tokens do not come back until claimUnstaked after the cooldown,
+	// which this test does further down. So all 600 is still in C1 custody here.
+	// (Adding the 100 back was wrong by exactly that amount, and this assertion is
+	// what caught it.)
+	wantLeft.Sub(wantLeft, big.NewInt(600))
+	if poolLeft.Cmp(wantLeft) != 0 {
+		t.Fatalf("pool holder has %s, want %s — the pool must fall by exactly %s "+
+			"(%d epochs x 30000). A mismatch means emission was not flat, or something "+
+			"else moved the pool.", poolLeft, wantLeft, drawn, lastEpoch+1)
 	}
+	t.Logf("FLAT EMISSION OK: supply constant at %s; pool drawn EXACTLY %s over %d epochs "+
+		"(holder left with %s, asserted)", supply, drawn, lastEpoch+1, poolLeft)
 	if lastEpoch < 4 {
 		t.Fatalf("only %d epochs elapsed — this test needs at least 5 to compare a "+
 			"post-top-up epoch against epoch 0", lastEpoch+1)
