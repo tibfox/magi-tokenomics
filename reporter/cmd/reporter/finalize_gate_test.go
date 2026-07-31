@@ -233,3 +233,66 @@ func TestVerifyChainConfig_RoleMismatchIsReported(t *testing.T) {
 		t.Fatalf("an unset role is not a problem: %v", probs)
 	}
 }
+
+// An exhausted pool is a DIFFERENT diagnosis from missing pages, and conflating them
+// sends the operator hunting for a page problem that does not exist. With the pool
+// empty, distributeEpoch SUCCEEDS while distributing nothing, pullFunding has nothing
+// to claim, and the pages still apply — so everything looks fine except that no money
+// arrived.
+func TestGate_UnfundedIsReportedAsFundingNotPages(t *testing.T) {
+	kv := map[string]string{"funded|41": "0", "status|41": "", "cfg_rMode": "0"}
+	for i := 0; i < 3; i++ {
+		kv["ssdone|41|"+itoa(i)] = "1" // every page applied
+	}
+	a, _ := gateApp(t, kv, nil)
+	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 3), map[string]bool{}, true)
+	if proceed {
+		t.Fatal("an unfunded epoch must not be finalized")
+	}
+	if err == nil {
+		t.Fatal("want a diagnosis, got a silent skip")
+	}
+	if !strings.Contains(err.Error(), "NOT FUNDED") {
+		t.Fatalf("the error must name FUNDING as the problem, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "share pages are NOT applied") {
+		t.Fatalf("must not blame the pages when every page applied: %v", err)
+	}
+}
+
+// A run handles one epoch, so an epoch that falls below the lookback window is never
+// selected again and nothing else ever mentions it — its funding just sits there.
+func TestStrandedBelowWindow_FindsAbandonedEpochs(t *testing.T) {
+	kv := map[string]string{
+		"status|0": "finalized",
+		"status|1": "", // stranded
+		"status|2": "cancelled",
+		"status|3": "", // stranded
+	}
+	a, _ := gateApp(t, kv, nil)
+	got := a.strandedBelowWindow(4)
+	if len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Fatalf("want epochs [1 3] reported as stranded, got %v", got)
+	}
+	// nothing below epoch 0 to strand
+	if s := a.strandedBelowWindow(0); len(s) != 0 {
+		t.Fatalf("window floor 0 cannot strand anything, got %v", s)
+	}
+}
+
+// The window must be configurable: a hardcoded one makes a backlog longer than the
+// window permanently unworkable, since a run only ever handles one epoch.
+func TestWindowFloor_IsConfigurable(t *testing.T) {
+	a, _ := gateApp(t, nil, nil)
+	if f := a.windowFloor(100); f != 81 { // default 20
+		t.Fatalf("default floor = %d, want 81", f)
+	}
+	a.cfg.Epoch.Lookback = 50
+	if f := a.windowFloor(100); f != 51 {
+		t.Fatalf("floor with lookback 50 = %d, want 51", f)
+	}
+	// and it must never underflow
+	if f := a.windowFloor(3); f != 0 {
+		t.Fatalf("floor below the window start = %d, want 0", f)
+	}
+}

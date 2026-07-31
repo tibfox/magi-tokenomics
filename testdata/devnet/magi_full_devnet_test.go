@@ -744,30 +744,34 @@ func TestDevnetMagiFull(t *testing.T) {
 	// retained power. Drive it end to end.
 	//
 	// timelock is 5 blocks (C2 init above); a devnet block is ~3s.
+	// NB: every read here goes through waitKey/waitValue. A bare read straight after
+	// callN's 9s sleep is not enough for the state to be visible, and reading too
+	// early is the single most common way to write a devnet assertion that reports a
+	// contract bug that does not exist.
 	const pauseOp = `{"op":"pause","nonce":"9"}`
 	callN(5, c2ID, "queueTokenOp", pauseOp, "guardian queues pause")
-	if v := stateOf(c2ID, "tl|pause:9"); v == "" {
-		t.Fatal("guardian's queueTokenOp did not record tl|pause:9 — the passthrough is unreachable")
-	}
-	t.Logf("queued: tl|pause:9 = %s", stateOf(c2ID, "tl|pause:9"))
+	t.Logf("queued: tl|pause:9 = %s", waitKey(c2ID, "tl|pause:9", "queued pause op"))
 
 	// EARLY execution must be refused. This is the assertion the old negative could
 	// not make: the op genuinely exists, so reaching the timelock check is guaranteed.
 	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes BEFORE the timelock")
-	if v := stateOf(tokenID, "paused"); v == "1" {
-		t.Fatal("TIMELOCK BYPASSED: the token paused before the delay elapsed")
-	}
-	t.Logf("early execute correctly did not pause the token (paused=%q)", stateOf(tokenID, "paused"))
 
 	// and a non-guardian must not be able to execute a legitimately queued op
 	if _, err := d.CallContract(ctx, 3, c2ID, "executeTokenOp", pauseOp); err == nil {
 		time.Sleep(9 * time.Second)
 	}
-	if v := stateOf(tokenID, "paused"); v == "1" {
-		t.Fatal("an outsider executed the guardian's queued op")
-	}
 
-	time.Sleep(30 * time.Second) // let the 5-block timelock elapse
+	// Give both of those ample time to land before concluding they did nothing —
+	// asserting an absence that merely outran block production proves nothing.
+	notPausedUntil := time.Now().Add(45 * time.Second)
+	for time.Now().Before(notPausedUntil) {
+		if v := stateOf(tokenID, "paused"); v == "1" {
+			t.Fatal("TIMELOCK BYPASSED: the token paused before the delay elapsed, " +
+				"or an outsider executed the guardian's queued op")
+		}
+		time.Sleep(6 * time.Second)
+	}
+	t.Logf("early execute and outsider execute both correctly left the token unpaused")
 	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes AFTER the timelock")
 	waitValue(tokenID, "paused", "1", "token paused via the C2 passthrough")
 	t.Logf("PASSTHROUGH OK: guardian paused the token through C2 after the timelock")
@@ -775,6 +779,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// Restore, proving the round trip both ways rather than leaving the token wedged.
 	const unpauseOp = `{"op":"unpause","nonce":"10"}`
 	callN(5, c2ID, "queueTokenOp", unpauseOp, "guardian queues unpause")
+	waitKey(c2ID, "tl|unpause:10", "queued unpause op")
 	time.Sleep(30 * time.Second)
 	callN(5, c2ID, "executeTokenOp", unpauseOp, "guardian executes unpause")
 	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")

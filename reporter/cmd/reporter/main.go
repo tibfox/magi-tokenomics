@@ -197,12 +197,14 @@ func (a *app) resolveEpoch(flagVal string) (uint64, uint64, error) {
 //	  skipped forever — which also matches the contracts, where C2 accrues bucket
 //	  owed per epoch and C3 pulls per epoch.
 func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
-	const lookback = 20 // one batched state read; see Epoch.Lookback note in config
-
-	first := uint64(0)
-	if latest >= lookback {
-		first = latest - lookback + 1
-	}
+	// The window bounds a single batched state read. It is CONFIGURABLE because a
+	// hardcoded one silently strands work: resolveEpoch returns ONE epoch per run, so
+	// with daily epochs and a daily cron a backlog clears exactly as fast as it
+	// accrues and never shrinks. The moment an outstanding epoch falls below `first`
+	// it is never selected again — its funding just sits there until a guardian
+	// notices. (The old comment pointed at an `Epoch.Lookback` config field that did
+	// not exist.)
+	first := a.windowFloor(latest)
 	keys := make([]string, 0, latest-first+1)
 	for ep := first; ep <= latest; ep++ {
 		keys = append(keys, "status|"+strconv.FormatUint(ep, 10))
@@ -219,6 +221,52 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	// Everything in the window is finalized/cancelled. Return the latest closed
 	// epoch so the caller reports "already fully submitted" rather than an error.
 	return latest, nil
+}
+
+// windowFloor is the oldest epoch the lookback window will consider.
+func (a *app) windowFloor(latest uint64) uint64 {
+	lookback := a.cfg.Epoch.Lookback
+	if lookback <= 0 {
+		lookback = defaultLookback
+	}
+	if latest < lookback {
+		return 0
+	}
+	return latest - lookback + 1
+}
+
+// strandedBelowWindow reports epochs that fell out of the lookback window while still
+// unfinalized. They will never be selected again, so nothing else will ever mention
+// them: their funding sits on the distributor until a guardian runs the stale rescue,
+// which pays the treasury and not the earners. Bounded so the diagnostic cannot
+// itself become an unbounded scan.
+func (a *app) strandedBelowWindow(first uint64) []uint64 {
+	if first == 0 {
+		return nil
+	}
+	const probe = 20
+	lo := uint64(0)
+	if first > probe {
+		lo = first - probe
+	}
+	keys := make([]string, 0, first-lo)
+	for ep := lo; ep < first; ep++ {
+		keys = append(keys, "status|"+strconv.FormatUint(ep, 10))
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
+	if err != nil {
+		return nil // diagnostics must never break the run
+	}
+	var out []uint64
+	for ep := lo; ep < first; ep++ {
+		if state["status|"+strconv.FormatUint(ep, 10)] == "" {
+			out = append(out, ep)
+		}
+	}
+	return out
 }
 
 // verifyChainConfig compares the local epoch schedule against the distributor's
@@ -295,6 +343,11 @@ func (a *app) cmdEpoch(asJSON bool) error {
 			if t, terr := a.oldestUnfinalized(closed); terr == nil {
 				out["target_epoch"] = t
 			}
+			// Epochs that fell out of the window while still unfinalized will never
+			// be selected again, so this is the only place they are ever mentioned.
+			if st := a.strandedBelowWindow(a.windowFloor(closed)); len(st) > 0 {
+				out["stranded_epochs"] = st
+			}
 		}
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
@@ -319,6 +372,15 @@ func (a *app) cmdEpoch(asJSON bool) error {
 			}
 			fmt.Printf("default target      epoch %d  (blocks %d..%d)%s\n",
 				target, g+target*el, g+(target+1)*el-1, note)
+		}
+		// A run handles ONE epoch, so anything below the window is never selected
+		// again and nothing else will ever mention it. Its funding sits on the
+		// distributor until a guardian runs the stale rescue — which pays the
+		// treasury, not the earners.
+		if st := a.strandedBelowWindow(a.windowFloor(closed)); len(st) > 0 {
+			fmt.Printf("\nSTRANDED            epochs %v are unfinalized and BELOW the lookback window\n", st)
+			fmt.Printf("                    they will never be targeted again. Raise epoch.lookback\n")
+			fmt.Printf("                    (currently %d) and re-run to work them off.\n", a.cfg.Epoch.Lookback)
 		}
 	}
 
@@ -736,6 +798,9 @@ const (
 
 	// auth.ModeAttest as it appears in contract state (cfg_rMode).
 	authModeAttest = "2"
+
+	// defaultLookback bounds the oldest-unfinalized scan to one batched state read.
+	defaultLookback = 20
 )
 
 func planHasFinalize(pl submit.Plan) bool {
@@ -793,6 +858,7 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 
 	var missing []int
 	lastMode := ""
+	lastFunded := false
 	for attempt := 0; attempt < tries; attempt++ {
 		if attempt > 0 {
 			time.Sleep(interval)
@@ -818,6 +884,7 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 			}
 		}
 		fundedOK := state["funded|"+pl.Epoch] != "" && state["funded|"+pl.Epoch] != "0"
+		lastFunded = fundedOK
 		if len(missing) == 0 && fundedOK {
 			return true, nil
 		}
@@ -837,6 +904,20 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 	// because the other attesters have not signed it yet — that is the normal state
 	// for every attester but the last, so treating it as an error would make the
 	// alarm fire on every healthy run and be ignored.
+	// UNFUNDED is a different diagnosis from MISSING PAGES, and conflating them sends
+	// the operator hunting for a page problem that does not exist. The common cause is
+	// an exhausted emission pool: distributeEpoch then SUCCEEDS while distributing
+	// nothing ({"distributed":"0","starved":true}), pullFunding aborts because C2 owes
+	// this epoch nothing, and the pages still apply — so everything looks fine except
+	// that no money ever arrived.
+	if !lastFunded {
+		return false, fmt.Errorf("refusing to finalize epoch %s: it is NOT FUNDED. The share pages "+
+			"may be fine; what is missing is the money. Most often the emission pool is exhausted or "+
+			"its allowance was revoked, in which case distributeEpoch succeeds while distributing "+
+			"nothing and pullFunding has nothing to claim. Check the pool holder's balance and its "+
+			"allowance to the funder contract, then re-run", pl.Epoch)
+	}
+
 	ours := false
 	for _, p := range missing {
 		if sentThisRun["submitShares/"+strconv.Itoa(p)] {

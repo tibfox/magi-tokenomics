@@ -765,3 +765,27 @@ func cvEmissionOf(t *testing.T, ct *test_utils.ContractTest, id, epoch string, h
 	r := call(t, ct, id, "emissionForEpochQ", `{"epoch":"`+epoch+`"}`, "hive:cvreader", h, true)
 	return cvBig(cvField(r.Ret, "emission"))
 }
+
+// C2 must not be its own emission pool.
+//
+// The token refuses to approve self and refuses a transferFrom where from == to, so
+// the allowance would read 0 forever and every poke would return
+// {"distributed":"0","starved":true} — indistinguishable from a legitimately empty
+// pool. Init is one-shot and the economic config immutable, so such a deployment is
+// permanently dead with no diagnosis available. Every other address in the framework
+// already gets a self-reference check; this was the one field that did not.
+func TestCovEmit_SourceCannotBeC2Itself(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(cvToken, owner, read(tokenWasmPath))
+	call(t, &ct, cvToken, "init",
+		`{"name":"CV","symbol":"CV","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
+
+	ct.RegisterContract(cvBad0, owner, read(cvC2Wasm))
+	call(t, &ct, cvBad0, "init", cvCfg(map[string]string{"source": "contract:" + cvBad0}), owner, 0, false)
+
+	// a different contract as the pool holder stays legal — a DAO or vault may hold it
+	ct.RegisterContract(cvBad1, owner, read(cvC2Wasm))
+	call(t, &ct, cvBad1, "init", cvCfg(map[string]string{"source": "contract:" + cvBad2}), owner, 0, true)
+}

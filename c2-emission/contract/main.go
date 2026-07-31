@@ -197,6 +197,17 @@ func Init(payload *string) *string {
 		src = *owner
 	}
 	validateLedgerAddr(src)
+	// C2 cannot be its own pool. The token refuses to approve self ("Cannot approve
+	// self") and refuses a transferFrom where from == to, so the allowance would read
+	// 0 forever and EVERY poke would return {"distributed":"0","starved":true} —
+	// indistinguishable from a legitimately empty pool. Init is one-shot and the
+	// economic config is immutable, so the deployment would be permanently dead with
+	// no diagnosis. Every other address in this framework already gets a
+	// self-reference check (bucket targets here, treasuries in C3/C5/C7); this was
+	// the one field that did not.
+	if src == selfId {
+		sdk.Abort("source cannot be C2 itself: the token cannot approve self, so the pool would never fund")
+	}
 	set("cfg_source", src)
 	set("cfg_maxSupply", pickField(info, "maxSupply"))
 	if parseBig(getStr("cfg_maxSupply")).Sign() <= 0 {

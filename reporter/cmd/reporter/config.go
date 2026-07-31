@@ -79,6 +79,13 @@ type Config struct {
 		// then finalize it — unrecoverable.
 		Genesis uint64 `json:"genesis"`
 		Len     uint64 `json:"len"`
+		// Lookback is how many closed epochs back the reporter will look for the
+		// oldest unfinalized one. 0 uses the default (20).
+		//
+		// Raise it after extended downtime. Because a run handles ONE epoch, a
+		// backlog longer than this window can never be worked off: the oldest
+		// outstanding epoch drops below the window and is never selected again.
+		Lookback uint64 `json:"lookback"`
 	} `json:"epoch"`
 
 	Source struct {
