@@ -80,3 +80,50 @@ func TestRC_DistributeEpochCatchUpCost(t *testing.T) {
 	}
 	fmt.Println()
 }
+
+// The leaking bump allocator (runtime/gc_leaking_exported.go never frees) meets
+// distributeEpoch's maxCatch, which init allows up to 1000. Nobody had bounded the
+// worst case, and the failure mode under -panic=trap would be a MESSAGE-LESS wasm
+// trap — indistinguishable from any other failure.
+//
+// This does not prove a bound; it establishes empirically that the extreme
+// configuration fails (if it fails) by exhausting GAS with a diagnosable result,
+// rather than by trapping. Printed, not asserted, except for the one thing that
+// matters: no crash without a result.
+func TestRC_MaxCatchWorstCaseDoesNotTrap(t *testing.T) {
+	const (
+		rcTok = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
+		rcC2  = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
+		rcB1  = "vsc1BmLNMQep1RaaUdYTPfEhqn1inESqNz4Ekt"
+		rcB2  = "vsc1Bnuikc8sJii5baG5gmxno4V2xTW7joi2vu"
+		rcB3  = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSXMPPj"
+	)
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(rcTok, owner, read(tokenWasmPath))
+	ct.RegisterContract(rcC2, owner, read("../c2-emission/artifacts/main.wasm"))
+
+	buckets := fmt.Sprintf("author:contract:%s:5000,yield:contract:%s:3000,lp:contract:%s:2000",
+		rcB1, rcB2, rcB3)
+	call(t, &ct, rcTok, "init", `{"name":"R","symbol":"R","decimals":0,"maxSupply":"100000000000"}`, owner, 0, true)
+	call(t, &ct, rcTok, "mint", `{"amount":"100000000"}`, owner, 0, true)
+	call(t, &ct, rcTok, "approve",
+		fmt.Sprintf(`{"spender":"contract:%s","amount":"100000000"}`, rcC2), owner, 0, true)
+	call(t, &ct, rcC2, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000",`+
+			`"blocksPerYear":"1000","dustBucket":"author","timelock":"5","maxCatch":"1000",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
+			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1","buckets":"%s"}`,
+		rcTok, buckets), owner, 0, true)
+
+	// 1000 epochs x 3 buckets in ONE call — the worst case the config permits.
+	res := call(t, &ct, rcC2, "distributeEpoch", ``, "hive:keeper", 1000, false)
+	fmt.Printf("\n=== maxCatch worst case: 1000 epochs x 3 buckets ===\n")
+	fmt.Printf("ok=%v rc=%d gas=%d ret=%q err=%q\n", res.Success, res.RcUsed, res.GasUsed, res.Ret, res.ErrMsg)
+
+	// Whatever happened, the engine must have returned a RESULT rather than dying:
+	// a bare trap would surface as an empty error with no gas accounting.
+	assert.True(t, res.GasUsed > 0, "the call must have consumed gas and returned a result, "+
+		"not vanished into a message-less trap")
+}

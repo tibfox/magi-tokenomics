@@ -61,7 +61,7 @@ func Init(payload *string) *string {
 	validateLedgerAddr(tre) // MED: typo-proof the immutable payout destination
 	// HIGH-4: a guardian-controlled treasury turns cancel+sweep into a drain, and a
 	// self-pointing treasury bricks the sweep (token forbids transfer-to-self).
-	if tre == "contract:"+*sdk.GetEnvKey("contract.id") {
+	if tre == selfAddr() {
 		sdk.Abort("treasury cannot be this contract")
 	}
 	for _, g := range splitComma(f(payload, "guardianAuth")) {
@@ -649,4 +649,18 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// selfAddr returns this contract's ledger identity.
+//
+// The nil check is not defensive noise. Contracts are built with -panic=trap, so a
+// nil dereference produces a bare wasm trap with NO reason string — the operator sees
+// a failed transaction and nothing else. An sdk.Abort at least names the cause. The
+// adapter already does this; the contracts were dereferencing directly.
+func selfAddr() string {
+	id := sdk.GetEnvKey("contract.id")
+	if id == nil {
+		sdk.Abort("no contract.id in env")
+	}
+	return "contract:" + *id
 }

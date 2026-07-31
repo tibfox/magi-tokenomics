@@ -136,7 +136,7 @@ func Init(payload *string) *string {
 	}
 
 	// buckets
-	selfId := "contract:" + *sdk.GetEnvKey("contract.id") // ledger identity (MED-2)
+	selfId := selfAddr() // ledger identity (MED-2)
 	buckets := splitComma(f(payload, "buckets"))
 	total := 0
 	n := uint64(0)
@@ -606,7 +606,7 @@ func lastEpoch() (uint64, bool) {
 
 func present(k string) bool { v := sdk.StateGetObject(k); return v != nil && *v != "" }
 
-func self() string { return "contract:" + *sdk.GetEnvKey("contract.id") }
+func self() string { return selfAddr() }
 
 func mustCaller() string {
 	c := sdk.GetEnvKey("msg.caller")
@@ -801,4 +801,18 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// selfAddr returns this contract's ledger identity.
+//
+// The nil check is not defensive noise. Contracts are built with -panic=trap, so a
+// nil dereference produces a bare wasm trap with NO reason string — the operator sees
+// a failed transaction and nothing else. An sdk.Abort at least names the cause. The
+// adapter already does this; the contracts were dereferencing directly.
+func selfAddr() string {
+	id := sdk.GetEnvKey("contract.id")
+	if id == nil {
+		sdk.Abort("no contract.id in env")
+	}
+	return "contract:" + *id
 }

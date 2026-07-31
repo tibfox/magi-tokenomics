@@ -305,7 +305,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// One emission, split three ways: content 50%, LP 30%, yield 20%.
 	initAs(c2ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
-			`"blocksPerYear":"1000","dustBucket":"content","timelock":"40",`+
+			`"blocksPerYear":"1000","dustBucket":"content","timelock":"60",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
 			`"buckets":"content:contract:%s:5000,lp:contract:%s:3000,yield:contract:%s:2000"}`,
@@ -743,13 +743,20 @@ func TestDevnetMagiFull(t *testing.T) {
 	// is the only route to pause/changeOwner, and it is the framework's single largest
 	// retained power. Drive it end to end.
 	//
-	// The timelock is 40 blocks (~120s) rather than a handful, and that is a TEST
-	// REQUIREMENT, not a policy preference. Each devnet call sleeps 9s and broadcast
-	// adds more, so with a 5-block (15s) timelock the "execute early" call landed 19s
-	// after the queue — i.e. already matured. The guardian then legitimately executed
-	// it and the assertion fired, reporting a bypass that had not happened. The window
-	// has to be comfortably longer than the test's own cadence for "early" to mean
-	// anything.
+	// The timelock is 60 blocks (~180s), and that is a TEST REQUIREMENT rather than a
+	// policy preference. It has to satisfy BOTH ends of a narrow target:
+	//
+	//   too short and "execute early" is not early. Each devnet call sleeps 9s and
+	//     broadcast adds more, so against a 5-block (15s) timelock the early call
+	//     landed 19s after the queue, already matured — the guardian legitimately
+	//     executed it and the assertion reported a bypass that never happened.
+	//   too long a WAIT and the op expires. executeTokenOp accepts only
+	//     [ready, ready+timelock] (c2 HIGH-2: a stale approval must not fire years
+	//     later), so a 40-block timelock gave a 120s window that ~222s of test
+	//     sequence overshot.
+	//
+	// 60 blocks puts maturity at ~180s and expiry at ~360s, so a ~210-265s execute
+	// sits mid-window with margin at both ends.
 	// NB: every read here goes through waitKey/waitValue. A bare read straight after
 	// callN's 9s sleep is not enough for the state to be visible, and reading too
 	// early is the single most common way to write a devnet assertion that reports a
@@ -786,7 +793,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	const unpauseOp = `{"op":"unpause","nonce":"10"}`
 	callN(5, c2ID, "queueTokenOp", unpauseOp, "guardian queues unpause")
 	waitKey(c2ID, "tl|unpause:10", "queued unpause op")
-	time.Sleep(150 * time.Second)
+	time.Sleep(200 * time.Second)
 	callN(5, c2ID, "executeTokenOp", unpauseOp, "guardian executes unpause")
 	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")
 	t.Logf("PASSTHROUGH OK: and unpaused again — the retained power works in both directions")

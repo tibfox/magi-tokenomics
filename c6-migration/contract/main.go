@@ -59,7 +59,7 @@ func Init(payload *string) *string {
 	// excess. sweepResidual can never touch tokens a pending airdrop could still need.
 	if tre := f(payload, "treasury"); tre != "" {
 		validateLedgerAddr(tre)
-		if tre == "contract:"+*sdk.GetEnvKey("contract.id") {
+		if tre == selfAddr() {
 			sdk.Abort("treasury cannot be C6 itself")
 		}
 		set("cfg_treasury", tre)
@@ -152,8 +152,8 @@ func mustCaller() string {
 	}
 	return *c
 }
-func set(k, v string)          { sdk.StateSetObject(k, v) }
-func getBig(k string) *big.Int { return parseBig(getStr(k)) }
+func set(k, v string)             { sdk.StateSetObject(k, v) }
+func getBig(k string) *big.Int    { return parseBig(getStr(k)) }
 func setBig(k string, v *big.Int) { set(k, v.String()) }
 func parseBig(s string) *big.Int {
 	n := new(big.Int)
@@ -327,4 +327,18 @@ func SweepResidual(_ *string) *string {
 	}
 	adapter.Transfer(asset(), tre, residual)
 	return str(`{"swept":"` + residual.String() + `","to":"` + tre + `"}`)
+}
+
+// selfAddr returns this contract's ledger identity.
+//
+// The nil check is not defensive noise. Contracts are built with -panic=trap, so a
+// nil dereference produces a bare wasm trap with NO reason string — the operator sees
+// a failed transaction and nothing else. An sdk.Abort at least names the cause. The
+// adapter already does this; the contracts were dereferencing directly.
+func selfAddr() string {
+	id := sdk.GetEnvKey("contract.id")
+	if id == nil {
+		sdk.Abort("no contract.id in env")
+	}
+	return "contract:" + *id
 }
