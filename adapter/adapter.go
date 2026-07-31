@@ -105,6 +105,14 @@ func RequireNoTokenId(tokenId string) {
 // ---- movement ------------------------------------------------------------
 
 // Transfer sends `amount` from THIS contract to `to`.
+// NOTE ON THE ZERO CASE — deliberately different from PullFrom, which aborts.
+//
+// Transfer is the PAYOUT direction and its callers legitimately compute zero: a claim
+// pays funded*share/totalShares, which truncates to 0 for a small enough share, and
+// that rounding is documented as favouring the pot. Aborting there would make a claim
+// fail rather than pay dust, and would leave the claimant unable to mark the epoch
+// claimed. PullFrom is the FUNDING direction, where a zero pull always means a
+// miscalculation upstream and should be loud.
 func Transfer(a Asset, to string, amount *big.Int) {
 	if amount.Sign() <= 0 {
 		return
@@ -163,35 +171,6 @@ func safe(s string) string {
 	return s
 }
 
-// parseAmountField extracts a decimal-string field value from a JSON response like
-// {"balance":"123"} without a full JSON parser. Returns 0 if absent/unparetable.
-func parseAmountField(res *string, field string) *big.Int {
-	out := new(big.Int)
-	if res == nil {
-		return out
-	}
-	s := *res
-	needle := `"` + field + `"`
-	i := indexOf(s, needle)
-	if i < 0 {
-		return out
-	}
-	i += len(needle)
-	// skip past ':' and optional whitespace/quote
-	for i < len(s) && (s[i] == ':' || s[i] == ' ' || s[i] == '"') {
-		i++
-	}
-	j := i
-	for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-		j++
-	}
-	if j == i {
-		return out
-	}
-	out.SetString(s[i:j], 10)
-	return out
-}
-
 func indexOf(s, sub string) int {
 	n, m := len(s), len(sub)
 	if m == 0 {
@@ -209,8 +188,12 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
-// NOTE: Mint and BalanceOf were removed when C2 stopped minting. Emission now draws
+// NOTE: Mint, BalanceOf and parseAmountField were removed when C2 stopped minting. Emission now draws
 // from an approved pool via PullFrom, so nothing in the framework mints, and no
 // caller needed a balance read. They were left behind as exported-but-unreachable
-// API — which reads as "this is supported" to the next person. Reinstate them only
-// with a caller.
+// API — which reads as "this is supported" to the next person. parseAmountField went
+// with them: it was BalanceOf's parser, it returned 0 for an absent or unparseable
+// field (a silent zero on the value path), and it matched keys by bare substring
+// rather than requiring KEY position as the contracts' own f()/pickField do. Two
+// parsers with two safety levels on one wire format is a trap; there is now one.
+// Reinstate any of them only with a caller, and with the strict parser.
