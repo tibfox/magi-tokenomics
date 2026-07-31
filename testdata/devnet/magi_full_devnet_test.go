@@ -785,6 +785,10 @@ func TestDevnetMagiFull(t *testing.T) {
 		time.Sleep(6 * time.Second)
 	}
 	t.Logf("early execute and outsider execute both correctly left the token unpaused")
+
+	// Wait past maturity (~180s at timelock 60) while staying well inside expiry
+	// (~360s). The window is [ready, ready+timelock] and ONE parameter sets both ends.
+	time.Sleep(200 * time.Second)
 	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes AFTER the timelock")
 	waitValue(tokenID, "paused", "1", "token paused via the C2 passthrough")
 	t.Logf("PASSTHROUGH OK: guardian paused the token through C2 after the timelock")

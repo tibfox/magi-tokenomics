@@ -314,8 +314,21 @@ func SweepResidual(_ *string) *string {
 	}
 	// Fund-moving, so an ACTIVE authority is required — a posting key must not be
 	// able to move the bootstrap balance (CRIT-2), exactly as airdropBatch requires.
+	//
+	// STRICT RequireActive here, not the contract-exempting variant C1 uses. That
+	// difference is deliberate: C1 guards a CALLER-RELATIVE position that a contract
+	// can legitimately hold (a DAO or vault can stake), and an unconditional check
+	// would strand its stake forever. cfg_owner is a DEPLOYER, and a deploy is an L1
+	// transaction — owners are hive: or did:pkh: identities, both of which appear in
+	// required_auths and satisfy the strict check. A contract cannot be an owner, so
+	// there is nothing to strand.
 	auth.RequireActive(c, reqAuths())
 
+	// airdrop_total counts only entries that were actually PAID: airdropBatch
+	// increments it after the transfer, so entries skipped by the ledger-address
+	// filter never inflate it. That is what makes `reserved` the true remaining
+	// capacity rather than an overstatement — if skipped entries counted, reserved
+	// would shrink and this would sweep tokens a later batch still needs.
 	bal := adapter.BalanceOfSelf(asset())
 	reserved := new(big.Int).Sub(parseBig(getStr("cfg_maxAirdrop")), getBig("airdrop_total"))
 	if reserved.Sign() < 0 {
