@@ -116,6 +116,13 @@ bucket and ~6 with three** — so either keep the keeper running, fund it, or se
 `maxCatch` low enough that a poke always fits your keeper's RC and simply poke
 repeatedly until caught up.
 
+**`submit.rc_limit` must cover a FULL page**, and the reporter now refuses a config
+where it does not. The two settings validate fine in isolation and are incoherent
+together: pagination emits a short page only at the very end, so if a full page
+exceeds the limit then every page but the last reverts — every time — while the
+cheap calls (poke, pull, finalize) all succeed. At 60 entries that is ~7,140 RC with
+headroom.
+
 ### `airdropBatch` — scales with recipients
 
 | recipients | RC | free tier |

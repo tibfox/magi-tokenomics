@@ -299,3 +299,44 @@ func TestExampleConfig_PullsFunding(t *testing.T) {
 		t.Fatal("content example must set submit.pull_funding")
 	}
 }
+
+// rc_limit and page.max_entries validate perfectly in isolation and can be incoherent
+// together — the worst shape a config can have. Pagination only emits a short page at
+// the very end, so a full page that exceeds rc_limit means EVERY page but the last
+// reverts, every time, while the cheap calls (poke, pull, finalize) all succeed.
+func TestValidate_PageMustFitTheRcLimit(t *testing.T) {
+	base := func() *Config {
+		c, err := LoadConfig(writeCfg(t, ExampleConfig))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	// 60 entries needs ~7,140 RC with headroom; 2,000 cannot carry it
+	c := base()
+	c.Page.MaxEntries = 60
+	c.Submit.RcLimit = 2000
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("a page that cannot fit the rc limit must be rejected at config load")
+	}
+	for _, want := range []string{"cannot fit a full page", "60 entries", "rc_limit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	// the shipped defaults must be coherent — otherwise every operator hits this
+	if err := base().Validate(); err != nil {
+		t.Fatalf("the example config must be internally coherent: %v", err)
+	}
+
+	// and lowering max_entries is a valid fix, not just raising rc_limit
+	c = base()
+	c.Page.MaxEntries = 5
+	c.Submit.RcLimit = 2000
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a small page inside a small rc limit must be accepted: %v", err)
+	}
+}

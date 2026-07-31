@@ -213,6 +213,25 @@ func (c *Config) Validate() error {
 	if c.Submit.RcLimit <= 0 {
 		return fmt.Errorf("submit.rc_limit must be > 0")
 	}
+	// A FULL page must fit inside the RC limit, or it fails DETERMINISTICALLY.
+	//
+	// These two validate perfectly in isolation and are incoherent together, which is
+	// the worst shape a config can have. Pagination only emits a short page at the
+	// very end, so if a full page exceeds rc_limit then EVERY page except the last
+	// reverts, every time — while the cheap calls (poke, pull, finalize) all succeed.
+	// Before the finalize gate that produced a finalized epoch paying everything to
+	// whoever happened to be on the last page; now it produces a loud refusal, but
+	// only after burning RC on every failed page. Catch it at config load instead.
+	//
+	// Measured cost is ~95 RC per entry over a ~200 fixed base (docs/rc-costs.md). The
+	// 20% headroom covers metering variance between pages of different byte lengths.
+	const perEntryRC, baseRC = 95, 200
+	if want := (baseRC + perEntryRC*c.Page.MaxEntries) * 12 / 10; c.Submit.RcLimit < want {
+		return fmt.Errorf("submit.rc_limit %d cannot fit a full page of %d entries (needs ~%d: "+
+			"~%d RC/entry over a ~%d base, plus headroom). Every full page would revert while the "+
+			"cheap calls succeeded — raise rc_limit or lower page.max_entries",
+			c.Submit.RcLimit, c.Page.MaxEntries, want, perEntryRC, baseRC)
+	}
 	if c.Submit.Keeper && c.Contracts.Funder == "" {
 		return fmt.Errorf("submit.keeper requires contracts.funder (the C2 contract id)")
 	}
