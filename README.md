@@ -40,8 +40,8 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 65 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 89 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 89 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 117 reporter tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -136,12 +136,23 @@ cross-checked, and a mismatch aborts.
 ### C6 — migration / airdrop
 
 ```json
-{"token":"vsc1...", "kind":"0", "tokenId":"", "maxAirdrop":"1000000"}
+{"token":"vsc1...", "kind":"0", "tokenId":"", "maxAirdrop":"1000000",
+ "treasury":"hive:treasury"}
 ```
 
 `maxAirdrop` caps the total this contract can ever distribute. Batches are
 idempotent per `batchId`, so a retried batch cannot double-pay. **C6 must hold the
 tokens it airdrops** — transfer them in before ownership moves to C2.
+
+`treasury` is **optional** and pins the destination for `sweepResidual`, which moves
+only `balance - (maxAirdrop - airdropped)`: the excess that no remaining airdrop
+capacity could ever pay. It can never touch tokens a pending batch needs.
+
+Decide deliberately. Omitting it means any excess — tokens above the cap, tokens the
+snapshot did not need, and entries the ledger-address filter skipped — is **locked in
+the contract permanently**. Setting it gives the owner an exit, which is also a
+clawback capability; a launch that wants the stronger "nothing can ever be reclaimed"
+promise should leave it unset.
 
 ### C7 — staking yield (trustless)
 
@@ -255,12 +266,27 @@ can never reach its authority check. Its guardian gate is proven in-process inst
 
 ## Status
 
-All 6 contracts + reporter are complete, audited (crit/high/med resolved), and green:
-65 contract tests, 75 reporter tests, and all five devnet suites — including the
-full-system run and the adversarial suites below.
+All 6 contracts + reporter are complete, audited, and green: **89 contract tests, 117
+reporter tests, and eight devnet suites** — the full-system run, the adversarial
+suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
+passthrough.
 
-Not done: first real deployment, per-tenant config values, and the governance DAO
-(developed separately).
+**Not done, stated plainly:**
+
+- No real deployment yet. Everything here is devnet-verified only.
+- **Cosigned auth (mode 1) has never run on devnet.** It needs M signatures in ONE
+  transaction and the devnet harness signs with a single account, so it is covered by
+  unit tests only. Single and Attest both run on devnet.
+- **The reporter's real signing path is never executed on devnet.** The suites take
+  the reporter's computed payloads and broadcast them through the harness, so
+  `broadcast.HiveBroadcaster` (the code that signs with an active key) is exercised by
+  unit tests alone.
+- **Scale is untested.** The largest devnet report is a handful of entries;
+  `docs/rc-costs.md` has the measured per-entry curve, but no run has submitted a
+  realistically sized epoch.
+- `vsc.update_contract` (the in-place upgrade path) is untested, and C2 now aborts
+  loudly if upgraded from a pre-allowance deployment rather than silently starving.
+- Per-tenant config values and the governance DAO are out of scope here.
 
 **RC budgeting:** [`docs/rc-costs.md`](docs/rc-costs.md) — measured RC cost of every
 function, the scaling curves for `submitShares` / `distributeEpoch` / `airdropBatch`,
