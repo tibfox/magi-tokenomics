@@ -17,7 +17,7 @@ whole system in plain language. This file is the build-and-deploy reference.
 | C3 | `c3-distributor` | content/author rewards — accepts share lists, pays claims |
 | C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance. Fed by the reporter in `source.kind: "lp"` mode, which replays the indexer's liquidity events. |
 | C6 | `c6-migration` | one-off snapshot import / airdrop |
-| C7 | `c7-yield` | staking yield — **trustless**, reads C1 directly, needs no reporter |
+| C7 | `c7-yield` | staking yield — **trustless**, reads C1 directly, needs no reporter. Claims **expire** at `max(epochLen×10, 1000)` blocks past funding; C3/C5 claims never do. |
 | — | `reporter/` | off-chain service that turns Hive activity (or DEX liquidity history) into share lists ([README](reporter/README.md)) |
 | — | `auth/`, `adapter/` | shared modules: multi-party authorisation, value-asset abstraction |
 

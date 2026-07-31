@@ -86,6 +86,26 @@ Each round (an "epoch", usually a day):
 Staking yield skips steps 4 and 5 entirely: it reads the staking history itself, so
 there's nothing to report and nothing to challenge.
 
+### One deadline you should know about
+
+**Staking yield has a claim window. Content and LP rewards do not.**
+
+- **Content (C3) and LP (C5):** claim whenever you like. There is no expiry.
+- **Staking yield (C7): claim within roughly ten days.** After that the epoch's
+  leftover can be swept and your share of it is gone.
+
+The reason is mechanical rather than punitive. Content and LP funding is only ever
+swept from an epoch a guardian *cancelled*, so a live epoch's money is never at risk
+and no deadline is needed. Staking yield instead pays out of a pool that nobody
+submits a list for, so the contract cannot know when everyone entitled has collected —
+it can only wait a generous interval and then let the remainder be swept. Closing
+claims at exactly that moment is what makes swept funds genuinely unclaimable rather
+than stolen from someone who was slow.
+
+The exact window is `max(epochLength × 10, 1000 blocks)` after the later of the
+epoch's end and the block its funding arrived — about ten days on a daily schedule. If
+you stake, claim your yield periodically; a monthly habit is not enough.
+
 ## Who can do what
 
 The system assumes the person who deploys it is trustworthy. The protection is
@@ -244,7 +264,10 @@ You don't need all of it.
   [`rc-costs.md`](rc-costs.md).
 - **Rounding always favours the pot.** Division truncates, so tiny remainders stay
   in the contract rather than being over-paid. Splitting your holdings across many
-  accounts loses you money rather than gaining it.
+  accounts loses you money rather than gaining it. A share small enough that its
+  payout truncates to zero cannot be claimed at all — the dust stays behind.
+- **Staking yield expires; content and LP rewards do not.** See the deadline note
+  above. This catches people out precisely because the other two never expire.
 - **NFT-backed tokens are not supported.** The setting exists but is deliberately
   blocked rather than half-working.
 - **LP rewards depend on an indexer.** Content rewards can be checked by anyone
