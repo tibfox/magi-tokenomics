@@ -279,8 +279,18 @@ passthrough.
   unit tests only. Single and Attest both run on devnet.
 - **The reporter's real signing path is never executed on devnet.** The suites take
   the reporter's computed payloads and broadcast them through the harness, so
-  `broadcast.HiveBroadcaster` (the code that signs with an active key) is exercised by
-  unit tests alone.
+  `broadcast.HiveBroadcaster` — the code that builds the `vsc.call` envelope, signs it
+  with an active key and submits it — is exercised by unit tests alone. A mismatch in
+  the envelope, the auth arrays or the payload shape would not show up.
+
+  This is awkward to close, and the reason is structural: the devnet suites are
+  `package devnet` compiled inside the **go-vsc-node module**, which does not depend on
+  `magi_token`, so they cannot import the broadcaster at all. Two ways round it, both
+  with costs — add a `replace` to go-vsc-node's `go.mod` (an external repo this project
+  does not modify), or run the reporter BINARY with `run -broadcast` and have the
+  fake-Hive fixture proxy broadcast methods through to the devnet's Hive node while
+  still serving fixture data for reads. The second is the right shape; it just needs
+  the fixture server to become a partial proxy.
 - **Scale is untested.** The largest devnet report is a handful of entries;
   `docs/rc-costs.md` has the measured per-entry curve, but no run has submitted a
   realistically sized epoch.
