@@ -44,6 +44,26 @@ func Init(payload *string) *string {
 	}
 	set("cfg_maxAirdrop", cap)
 	setBig("airdrop_total", new(big.Int))
+	// OPTIONAL residual treasury, pinned here and immutable.
+	//
+	// C6 is funded by transferring a bootstrap balance to it, and value can otherwise
+	// leave ONLY through airdropBatch, bounded by maxAirdrop. So every token above the
+	// cap, every token under it that the snapshot turns out not to need, and every
+	// entry the ledger-address filter skips is LOCKED IN THIS CONTRACT FOREVER. C3/C5
+	// have sweepUnallocated and C7 has sweepResidual; C6, which holds the largest
+	// single balance at launch, had no exit at all.
+	//
+	// Left optional on purpose. A sweep is also a clawback capability, and a launch
+	// may deliberately want the stronger promise that nothing can ever be reclaimed —
+	// omitting treasury keeps exactly that guarantee, at the cost of locking any
+	// excess. sweepResidual can never touch tokens a pending airdrop could still need.
+	if tre := f(payload, "treasury"); tre != "" {
+		validateLedgerAddr(tre)
+		if tre == "contract:"+*sdk.GetEnvKey("contract.id") {
+			sdk.Abort("treasury cannot be C6 itself")
+		}
+		set("cfg_treasury", tre)
+	}
 	set(kInit, "1")
 	return ok()
 }
@@ -271,4 +291,40 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// sweepResidual — owner-only, moves ONLY the provably un-airdroppable excess to the
+// treasury pinned at init.
+//
+// The amount is balance - (maxAirdrop - airdropped), i.e. what remains after
+// reserving every token the remaining airdrop capacity could still pay out. It can
+// therefore never take funds a pending batch needs, which is what separates this from
+// a clawback. Without it, that excess is locked in the contract permanently.
+//
+//go:wasmexport sweepResidual
+func SweepResidual(_ *string) *string {
+	assertInit()
+	tre := getStr("cfg_treasury")
+	if tre == "" {
+		sdk.Abort("no treasury was pinned at init — this deployment has no residual exit by design")
+	}
+	c := mustCaller()
+	if c != getStr("cfg_owner") {
+		sdk.Abort("only owner may sweep the residual")
+	}
+	// Fund-moving, so an ACTIVE authority is required — a posting key must not be
+	// able to move the bootstrap balance (CRIT-2), exactly as airdropBatch requires.
+	auth.RequireActive(c, reqAuths())
+
+	bal := adapter.BalanceOfSelf(asset())
+	reserved := new(big.Int).Sub(parseBig(getStr("cfg_maxAirdrop")), getBig("airdrop_total"))
+	if reserved.Sign() < 0 {
+		reserved = new(big.Int)
+	}
+	residual := new(big.Int).Sub(bal, reserved)
+	if residual.Sign() <= 0 {
+		sdk.Abort("no residual: the balance is still reserved for the remaining airdrop capacity")
+	}
+	adapter.Transfer(asset(), tre, residual)
+	return str(`{"swept":"` + residual.String() + `","to":"` + tre + `"}`)
 }

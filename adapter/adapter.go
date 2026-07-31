@@ -197,3 +197,78 @@ func indexOf(s, sub string) int {
 // rather than requiring KEY position as the contracts' own f()/pickField do. Two
 // parsers with two safety levels on one wire format is a trap; there is now one.
 // Reinstate any of them only with a caller, and with the strict parser.
+
+// BalanceOfSelf reads this contract's own balance of the asset.
+//
+// Reinstated deliberately and under the conditions the removal note set out: it has a
+// caller (C6.sweepResidual needs to know what is actually held before deciding what
+// is residual), and it parses STRICTLY.
+//
+// "Strictly" is the whole point. The deleted parser returned 0 for an absent or
+// unparseable field — a silent zero on the value path, which here would compute a
+// residual of 0 and make a legitimate sweep abort as "nothing to sweep". Worse, it
+// matched keys by bare substring, so `"balance"` occurring inside a VALUE could be
+// read as the field. This one requires the match to be in key position and ABORTS
+// when the field is missing or malformed, because a balance we could not read is not
+// a balance of zero.
+func BalanceOfSelf(a Asset) *big.Int {
+	if a.Kind != Fungible {
+		unsupported()
+	}
+	res := sdk.ContractCall(a.Contract, "balanceOf", `{"account":"`+self()+`"}`, nil)
+	if res == nil {
+		sdk.Abort("adapter: balanceOf returned nothing")
+	}
+	raw := keyField(*res, "balance")
+	if raw == "" {
+		sdk.Abort("adapter: balanceOf response has no `balance` field")
+	}
+	n, ok := new(big.Int).SetString(raw, 10)
+	if !ok {
+		sdk.Abort("adapter: balanceOf `balance` is not an integer")
+	}
+	if n.Sign() < 0 {
+		sdk.Abort("adapter: balanceOf returned a negative balance")
+	}
+	return n
+}
+
+// keyField extracts a flat JSON field, matching `name` ONLY in key position — the
+// match must be followed by `"` then `:`. This is the same rule the contracts' own
+// f() uses (M4); the adapter previously used a weaker bare-substring match.
+func keyField(res, name string) string {
+	needle := `"` + name + `"`
+	for i := 0; i+len(needle) <= len(res); i++ {
+		if res[i:i+len(needle)] != needle {
+			continue
+		}
+		j := i + len(needle)
+		for j < len(res) && (res[j] == ' ' || res[j] == '\t') {
+			j++
+		}
+		if j >= len(res) || res[j] != ':' {
+			continue // this was a VALUE that happens to equal the name
+		}
+		j++
+		for j < len(res) && (res[j] == ' ' || res[j] == '\t') {
+			j++
+		}
+		quoted := j < len(res) && res[j] == '"'
+		if quoted {
+			j++
+		}
+		k := j
+		for k < len(res) {
+			c := res[k]
+			if quoted && c == '"' {
+				break
+			}
+			if !quoted && (c == ',' || c == '}') {
+				break
+			}
+			k++
+		}
+		return res[j:k]
+	}
+	return ""
+}

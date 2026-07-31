@@ -443,6 +443,23 @@ func TestCovDist_C5PagesRoundingAndVetoParity(t *testing.T) {
 
 // covBootC6 registers + initializes the token and C6, then funds C6 with a
 // bootstrap balance held by the contract itself.
+// covBootC6WithTreasury is covBootC6 plus a pinned residual treasury, so the sweep
+// path is reachable.
+func covBootC6WithTreasury(t *testing.T, c6, maxAirdrop, bootstrap, treasury string) *test_utils.ContractTest {
+	t.Helper()
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(covTokenID, owner, read(tokenWasmPath))
+	ct.RegisterContract(c6, owner, read(covC6Wasm))
+	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
+	call(t, &ct, c6, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","maxAirdrop":"%s","treasury":"%s"}`, covTokenID, maxAirdrop, treasury),
+		owner, 0, true)
+	call(t, &ct, covTokenID, "mint", fmt.Sprintf(`{"amount":"%s"}`, bootstrap), owner, 0, true)
+	call(t, &ct, covTokenID, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"%s"}`, c6, bootstrap), owner, 0, true)
+	return &ct
+}
+
 func covBootC6(t *testing.T, c6 string, maxAirdrop string, bootstrap string) *test_utils.ContractTest {
 	t.Helper()
 	ct := test_utils.NewContractTest()
@@ -658,4 +675,49 @@ func TestCovDist_RoleLabelIsOptionalAndValidated(t *testing.T) {
 	// and omitting it entirely stays legal
 	ct.RegisterContract(covC5ID, owner, read(covC5Wasm))
 	call(t, ct, covC5ID, "init", covDistInit("5", covReporter), owner, 0, true)
+}
+
+// C6 holds the largest single balance at launch and, until now, had NO exit for it.
+// Value could leave only through airdropBatch, bounded by maxAirdrop, so every token
+// above the cap — and every one under it the snapshot did not need, and every entry
+// the ledger-address filter skipped — was locked in the contract forever. C3/C5 have
+// sweepUnallocated and C7 has sweepResidual; C6 had nothing.
+func TestCovDist_C6ResidualSweepOnlyTakesTheExcess(t *testing.T) {
+	os.RemoveAll("data/badger")
+	// bootstrap 1000, cap 600 -> 400 can never be airdropped
+	ct := covBootC6WithTreasury(t, covC6ID, "600", "1000", covTreasury)
+
+	// while the full capacity is unspent, NOTHING is residual beyond the excess
+	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, true)
+	assert.Equal(t, "400", covBalance(t, ct, covTreasury, 1).String(),
+		"only the un-airdroppable excess may move")
+	assert.Equal(t, "600", covBalance(t, ct, "contract:"+covC6ID, 1).String(),
+		"every token the remaining capacity could still pay must stay put")
+
+	// a second sweep has nothing left to take
+	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 2, false)
+
+	// after airdropping part of the capacity, the freed reservation becomes sweepable
+	call(t, ct, covC6ID, "airdropBatch",
+		`{"batchId":"b1","entries":"hive:cova:200"}`, owner, 3, true)
+	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 4, false) // still fully reserved
+	assert.Equal(t, "400", covBalance(t, ct, "contract:"+covC6ID, 4).String())
+}
+
+// The sweep is owner-only and must not be reachable with a posting key: it moves the
+// bootstrap balance, which is exactly what CRIT-2 exists to prevent.
+func TestCovDist_C6SweepIsOwnerAndActiveOnly(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBootC6WithTreasury(t, covC6ID, "600", "1000", covTreasury)
+	call(t, ct, covC6ID, "sweepResidual", `{}`, "hive:coveve", 1, false)
+	pvCallPosting(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, false)
+	assert.Equal(t, "0", covBalance(t, ct, covTreasury, 1).String())
+}
+
+// Omitting the treasury is a deliberate choice — it keeps the stronger promise that
+// nothing can ever be reclaimed — and must fail closed rather than sweep somewhere.
+func TestCovDist_C6WithoutTreasuryCannotSweep(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBootC6(t, covC6ID, "600", "1000")
+	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, false)
 }
