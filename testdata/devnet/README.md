@@ -40,7 +40,7 @@ to your own paths.
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
 | `magi_c5c6c7_devnet_test.go` | C1 + C2 + C5 + C6 + C7, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks** | 30 min |
+| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
@@ -115,7 +115,7 @@ fails several minutes later with a misleading message. Where each one stands:
 
 | suite | run against the pool model | runtime |
 |---|---|---|
-| `magi_full_devnet_test.go` | yes | 1869s |
+| `magi_full_devnet_test.go` | yes | 1869s, re-run 2433s with PHASE 9 |
 | `magi_multiepoch_devnet_test.go` | yes | 1903s, re-run 1928s after the refill change |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
