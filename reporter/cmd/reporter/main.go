@@ -258,7 +258,11 @@ func (a *app) strandedBelowWindow(first uint64) []uint64 {
 	}
 	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
 	if err != nil {
-		return nil // diagnostics must never break the run
+		// A diagnostic must not break the run — but it must not go quiet either.
+		// Returning nil here would print "nothing stranded" when the truth is "could
+		// not tell", which is the same silent-zero shape this whole audit kept finding.
+		fmt.Printf("note: could not check for stranded epochs below the lookback window: %v\n", err)
+		return nil
 	}
 	var out []uint64
 	for ep := lo; ep < first; ep++ {
