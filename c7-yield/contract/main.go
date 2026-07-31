@@ -87,6 +87,26 @@ func Init(payload *string) *string {
 	}
 	set("cfg_genesis", sg)
 	set("cfg_epochLen", se)
+
+	// CROSS-CHECK C1's R15 basis against the real emission schedule.
+	//
+	// R15 ("cooldown must exceed epochLen, so a one-block stake cannot capture a full
+	// epoch of yield") is enforced inside C1 against an epochLen the OPERATOR supplies,
+	// and C1 cannot verify it: the deploy order puts C1 before C2, because stake has to
+	// exist before C2's genesis or epoch 0's yield is funded-but-unclaimable. So C1 has
+	// nothing to ask when it runs.
+	//
+	// C7 is the first contract that knows both schedules, and it is the contract R15
+	// exists to protect. A C1 carrying a typo'd or stale epochLen otherwise enforces a
+	// cooldown that silently fails to cover an epoch.
+	//
+	// An older C1 without scheduleInfo reports nothing and is tolerated, so this cannot
+	// block a new C7 against an existing deployment.
+	if si := sdk.ContractCall(f(payload, "stakeSource"), "scheduleInfo", "", nil); si != nil {
+		if c1El := pickField(si, "epochLen"); c1El != "" && c1El != se {
+			sdk.Abort("stakeSource epochLen disagrees with the funder — C1's R15 cooldown check was made against the wrong epoch length")
+		}
+	}
 	set(kInit, "1")
 	return ok()
 }

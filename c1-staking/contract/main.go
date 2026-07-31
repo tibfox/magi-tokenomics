@@ -250,6 +250,22 @@ func ClaimUnstaked(_ *string) *string {
 
 // ---- queries -------------------------------------------------------------
 
+// scheduleInfo reports the epochLen this instance's R15 cooldown check was made
+// against, so a contract that inits LATER can verify it. C1 cannot do that check
+// itself in the normal deploy order: stake must exist before C2's genesis (or epoch
+// 0's yield is unclaimable), so C1 is initialised BEFORE C2 and has nothing to ask.
+//
+//go:wasmexport scheduleInfo
+func ScheduleInfo(_ *string) *string {
+	// Deliberately NOT assertInit. This is a read-only query whose CALLER is another
+	// contract's init, and an abort inside a nested call reverts the caller's whole
+	// transaction — so aborting here would turn "C1 is not initialised yet" into "C7
+	// cannot be deployed", inventing a deploy-order requirement rather than reporting
+	// a fact. Empty fields say "nothing to check", which is what an uninitialised
+	// instance actually means.
+	return str(`{"epochLen":"` + getStr("cfg_epochLen") + `","cooldown":"` + getStr(kCooldown) + `"}`)
+}
+
 //go:wasmexport stakeOf
 func StakeOf(payload *string) *string {
 	assertInit()

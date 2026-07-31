@@ -622,3 +622,60 @@ func TestCovStake_FunderIsOptional(t *testing.T) {
 		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":""}`, tokenID),
 		c17Owner, 0, true)
 }
+
+// R15's cooldown check happens inside C1 against an epochLen the OPERATOR supplies,
+// and C1 cannot verify it: the deploy order puts C1 before C2, because stake must
+// exist before C2's genesis or epoch 0's yield is funded-but-unclaimable. C7 is the
+// first contract that knows both schedules — and the one R15 protects — so it does
+// the check.
+func TestCovStake_C7RejectsAStakeSourceOnTheWrongSchedule(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{
+		c17C1: c17C1Only,
+		c17C2: "../c2-emission/artifacts/main.wasm",
+		c17C7: "../c7-yield/artifacts/main.wasm",
+	})
+	fundC2Pool(t, &ct, tokenID, c17C2, "1000000", 0)
+	call(t, &ct, c17C2, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
+			`"blocksPerYear":"100","dustBucket":"y","timelock":"5",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
+			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
+			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C7), c17Owner, 0, true)
+
+	// C1 deployed against a DIFFERENT epoch length than the emission schedule. Its own
+	// R15 check passed (cooldown 7 > epochLen 5), but against a fiction.
+	call(t, &ct, c17C1, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"7","epochLen":"5","allow":""}`, tokenID),
+		c17Owner, 0, true)
+
+	// C7 must refuse to adopt it: cooldown 7 does NOT exceed the real epoch of 10, so
+	// a staker could capture a full epoch of yield and exit.
+	call(t, &ct, c17C7, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
+		tokenID, c17C2, c17C1), c17Owner, 0, false)
+}
+
+// An uninitialised C1 must not block C7's deploy. scheduleInfo is read-only and a
+// nested abort would revert the CALLER's transaction, turning "C1 is not ready" into
+// "C7 cannot be deployed" — a deploy-order requirement invented by a diagnostic.
+func TestCovStake_UninitialisedStakeSourceDoesNotBlockC7(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{
+		c17C1: c17C1Only,
+		c17C2: "../c2-emission/artifacts/main.wasm",
+		c17C7: "../c7-yield/artifacts/main.wasm",
+	})
+	fundC2Pool(t, &ct, tokenID, c17C2, "1000000", 0)
+	call(t, &ct, c17C2, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
+			`"blocksPerYear":"100","dustBucket":"y","timelock":"5",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
+			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
+			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C7), c17Owner, 0, true)
+
+	// C1 registered but NEVER initialised — C7 must still deploy
+	call(t, &ct, c17C7, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
+		tokenID, c17C2, c17C1), c17Owner, 0, true)
+}
