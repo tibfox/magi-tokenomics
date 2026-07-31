@@ -482,6 +482,12 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 		return nil, err
 	}
 	res := sharecore.ComputeShares(posts, a.cfg.ShareConfig())
+	// Last gate before untrusted names become an irreversible payload. lpsrc checks
+	// its providers at the source; this covers the Hive path, whose names come from
+	// whatever API endpoint the operator configured.
+	if err := sharecore.ValidateAccounts(res); err != nil {
+		return nil, fmt.Errorf("refusing to build a report: %w", err)
+	}
 	canon := sharecore.Canonicalize(res)
 	return &computed{
 		Epoch:  ep,
@@ -518,6 +524,9 @@ func (a *app) computeLP(ep uint64) (*computed, error) {
 		})
 	if err != nil {
 		return nil, err
+	}
+	if err := sharecore.ValidateAccounts(res); err != nil {
+		return nil, fmt.Errorf("refusing to build a report: %w", err)
 	}
 	canon := sharecore.Canonicalize(res)
 	return &computed{

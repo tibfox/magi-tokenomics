@@ -1,6 +1,7 @@
 package sharecore
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -86,4 +87,50 @@ func Paginate(canonical string, maxEntries, maxBytes int) []Page {
 	}
 	flush()
 	return pages
+}
+
+// ValidateAccounts rejects any account name that would corrupt the on-chain payload.
+//
+// Entries reach the contract as comma-joined "acct:amount" pairs, parsed by splitting
+// on commas and then the LAST colon. So a comma in a name injects entries — given
+// `hive:a,hive:attacker:999999999,` the contract reads a 999,999,999-share entry for
+// hive:attacker: the whole epoch, redirected. A trailing colon is milder but still
+// harmful: it yields a ledger-prefixed address that is counted into totalShares and
+// then unclaimable forever, diluting everyone else.
+//
+// lpsrc validates its own providers at the source because an indexer is
+// trusted-but-not-trustless. This is the same gate for the CONTENT path and for any
+// future source: Hive constrains account names to a safe charset, but the reporter
+// takes them from whatever API endpoint it is pointed at, and that endpoint is exactly
+// the kind of thing that gets compromised or misconfigured. The reporter is the one
+// trusted role in the system; it should not be the one that forwards a malformed name
+// into an irreversible payload.
+//
+// Multiple colons stay legal: did:key:z6Mk... is a real account and last-colon
+// splitting parses it correctly.
+func ValidateAccounts(r Result) error {
+	names := make([]string, 0, len(r.Shares))
+	for k := range r.Shares {
+		names = append(names, k)
+	}
+	sort.Strings(names) // deterministic error on multiple offenders
+	for _, name := range names {
+		if name == "" {
+			return fmt.Errorf("empty account name in the share set")
+		}
+		if strings.Contains(name, ",") {
+			return fmt.Errorf("account %q contains a comma, the on-chain entry separator — "+
+				"it would inject extra share entries", name)
+		}
+		if strings.HasSuffix(name, ":") {
+			return fmt.Errorf("account %q ends in a colon — it would be counted into totalShares "+
+				"and then be unclaimable, diluting every other earner", name)
+		}
+		for _, c := range name {
+			if c > 0x7e || c <= 0x20 || c == '"' || c == '\\' {
+				return fmt.Errorf("account %q contains an unsafe character %q", name, c)
+			}
+		}
+	}
+	return nil
 }

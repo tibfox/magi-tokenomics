@@ -3,6 +3,7 @@ package sharecore
 import (
 	"math/big"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -268,5 +269,46 @@ func TestPaginate_LosslessRoundTrip(t *testing.T) {
 	}
 	if joined != canon {
 		t.Fatalf("pagination lost data:\n canon  %s\n joined %s", canon, joined)
+	}
+}
+
+// Account names become an on-chain payload parsed by splitting on commas and then the
+// last colon, so a name carrying either character corrupts it. lpsrc checks its own
+// providers; this is the shared gate that also covers the Hive path, whose names come
+// from whatever API endpoint the operator points at.
+func TestValidateAccounts_RejectsNamesThatCorruptThePayload(t *testing.T) {
+	bad := []struct{ name, want string }{
+		{"hive:evil,hive:victim", "comma"},
+		{"hive:a,hive:attacker:999999999,", "comma"},
+		{"hive:alice:", "colon"},
+		{"hive:al ice", "unsafe character"},
+		{"hive:alice\n", "unsafe character"},
+		{"hive:alice\"", "unsafe character"},
+		{"hive:alicé", "unsafe character"},
+		{"", "empty"},
+	}
+	for _, tc := range bad {
+		r := Result{Shares: map[string]*big.Int{tc.name: big.NewInt(1)}, Total: big.NewInt(1)}
+		err := ValidateAccounts(r)
+		if err == nil {
+			t.Fatalf("account %q must be refused", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("account %q: error should mention %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// Ordinary Hive names and multi-colon DIDs must stay legal — last-colon splitting
+// parses the latter correctly, so over-tightening would exclude real accounts.
+func TestValidateAccounts_AcceptsRealAccounts(t *testing.T) {
+	r := Result{Shares: map[string]*big.Int{
+		"hive:alice":                         big.NewInt(1),
+		"hive:bob.smith-1":                   big.NewInt(2),
+		"did:key:z6MkpTHR8VNsBxYAAWHut2Gead": big.NewInt(3),
+		"contract:vsc1BdxvBvpwKko8XfgN35iWw": big.NewInt(4),
+	}, Total: big.NewInt(10)}
+	if err := ValidateAccounts(r); err != nil {
+		t.Fatalf("legitimate accounts must be accepted: %v", err)
 	}
 }
