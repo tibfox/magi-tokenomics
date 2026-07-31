@@ -45,8 +45,13 @@ func Init(payload *string) *string {
 		sdk.Abort("treasury required (residual sweep destination)")
 	}
 	validateAddr(tre)
-	if !hasPrefix(tre, "hive:") && !hasPrefix(tre, "contract:") && !hasPrefix(tre, "did:") {
-		sdk.Abort("treasury must start with hive:/contract:/did:")
+	// Same ledger-address rule as C3/C5's treasury (their validateLedgerAddr). This
+	// previously omitted system:, so the two sweep destinations in one framework had
+	// two different validation rules with no stated reason — the kind of drift that
+	// makes a reviewer assume the stricter one is deliberate when it is an accident.
+	if !hasPrefix(tre, "hive:") && !hasPrefix(tre, "contract:") &&
+		!hasPrefix(tre, "did:") && !hasPrefix(tre, "system:") {
+		sdk.Abort("treasury must start with hive:/contract:/did:/system:")
 	}
 	// HIGH-4: a guardian-controlled treasury turns cancel+sweep into a drain, and a
 	// self-pointing treasury bricks the sweep (token forbids transfer-to-self).
@@ -192,7 +197,7 @@ func SweepResidual(payload *string) *string {
 	if !auth.Authorize(guardianCfg(), "grd", ak, ak, mustCaller(), reqAuths()) {
 		return str(`{"swept":false}`)
 	}
-	set("swept|"+ep, "1")     // CEI: close the epoch before transferring
+	set("swept|"+ep, "1") // CEI: close the epoch before transferring
 	setBig("paid|"+ep, funded)
 	adapter.Transfer(asset(), getStr("cfg_treasury"), residual)
 	return str(`{"swept":"` + residual.String() + `"}`)
@@ -260,6 +265,7 @@ func asset() adapter.Asset {
 	}
 	return adapter.Asset{Kind: k, Contract: getStr("cfg_token"), TokenId: getStr("cfg_tokenId")}
 }
+
 // deadlineOf: claims close (and the sweep opens) at
 // max(epoch end, funding arrival) + grace — so keeper lag never strands an epoch.
 func deadlineOf(ep string, hEnd uint64) uint64 {
@@ -339,10 +345,10 @@ func mustEpoch(payload *string) string {
 	}
 	return e
 }
-func pu(s string) uint64 { n, _ := strconv.ParseUint(s, 10, 64); return n }
-func getU(k string) uint64 { return pu(getStr(k)) }
-func set(k, v string)          { sdk.StateSetObject(k, v) }
-func getBig(k string) *big.Int { return parseBig(getStr(k)) }
+func pu(s string) uint64          { n, _ := strconv.ParseUint(s, 10, 64); return n }
+func getU(k string) uint64        { return pu(getStr(k)) }
+func set(k, v string)             { sdk.StateSetObject(k, v) }
+func getBig(k string) *big.Int    { return parseBig(getStr(k)) }
 func setBig(k string, v *big.Int) { set(k, v.String()) }
 func parseBig(s string) *big.Int {
 	n := new(big.Int)

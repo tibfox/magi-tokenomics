@@ -91,14 +91,31 @@ func Init(payload *string) *string {
 		sdk.Abort("cooldown must be > epochLen (R15)")
 	}
 	sdk.StateSetObject(kCooldown, cd)
-	// STORE the epochLen the R15 check was made against.
+	// CROSS-CHECK the epochLen against the emission schedule when a funder is given.
 	//
-	// C1 has no funder and cannot verify this against C2's real schedule, so the
-	// guarantee "cooldown exceeds an epoch" rests entirely on the operator passing
-	// C2's actual epochLen here. Previously the value was parsed, used once and
-	// discarded, so nobody could later tell WHICH epochLen had been promised — the
-	// invariant was unfalsifiable after deploy. Recording it makes the claim
-	// auditable off-chain against the funder's cfg_epochLen.
+	// R15 ("cooldown must exceed an epoch, so a one-block stake cannot capture a full
+	// epoch of C7 yield") is only as good as the epochLen it was checked against, and
+	// that value is supplied by the caller. C7 already solves exactly this: it pulls
+	// scheduleInfo from its funder and rejects a mismatch. C1 had no such check, so a
+	// typo'd epochLen silently produced a WEAKER cooldown guarantee than the operator
+	// believed — R15 would pass against a fictional epoch length.
+	//
+	// `funder` is optional so a standalone C1 (no emission contract, e.g. staking
+	// before C2 exists) still deploys. When present the check is exact.
+	if fu := field(payload, "funder"); fu != "" {
+		validateAddr(fu)
+		sch := sdk.ContractCall(fu, "scheduleInfo", "", nil)
+		se := pickField(sch, "epochLen")
+		if se == "" {
+			sdk.Abort("funder scheduleInfo unavailable — init the emission contract (C2) first")
+		}
+		if se != field(payload, "epochLen") {
+			sdk.Abort("epochLen mismatch with funder — R15's cooldown check would be made against the wrong epoch")
+		}
+		sdk.StateSetObject("cfg_funder", fu)
+	}
+	// Store it either way, so the value R15 was checked against is auditable after
+	// deploy rather than parsed once and discarded.
 	sdk.StateSetObject("cfg_epochLen", field(payload, "epochLen"))
 	// stakeFor allowlist (immutable)
 	for _, a := range splitComma(field(payload, "allow")) {
@@ -450,12 +467,18 @@ func splitColon(s string) (string, string) {
 	return s, ""
 }
 
+// splitComma drops empty segments, matching C2/C3/C5/C6/C7. C1's version used to
+// keep them, which was harmless only because its single caller happened to guard with
+// `if a != ""`. Five identical-looking helpers with one behaving differently is a trap
+// for whoever adds the second caller.
 func splitComma(s string) []string {
 	out := []string{}
 	start := 0
 	for i := 0; i <= len(s); i++ {
 		if i == len(s) || s[i] == ',' {
-			out = append(out, s[start:i])
+			if i > start {
+				out = append(out, s[start:i])
+			}
 			start = i + 1
 		}
 	}
@@ -464,6 +487,16 @@ func splitComma(s string) []string {
 
 // field extracts a flat JSON value by key. Matches "name" only in KEY position
 // (followed by ':') so a value equal to a field name can't be mis-parsed (M4).
+// pickField reads a flat field from a contract-call result, nil-safe. Same shape as
+// C2/C3/C7's helper of the same name, and it goes through field(), which matches only
+// in KEY position.
+func pickField(res *string, name string) string {
+	if res == nil {
+		return ""
+	}
+	return field(res, name)
+}
+
 func field(payload *string, name string) string {
 	if payload == nil {
 		return ""

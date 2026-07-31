@@ -583,3 +583,42 @@ func TestCovStake_ContractCallerCanStillUnstake(t *testing.T) {
 	call(t, &ct, c17C1, "claimUnstaked", `{}`, holder, 10, true)
 	assert.EqualValues(t, 500, c17TokenBal(t, &ct, holder, 10))
 }
+
+// R15 ("cooldown must exceed an epoch") is only as strong as the epochLen it was
+// checked against, and that value is supplied by the caller. C7 already pulls
+// scheduleInfo from its funder and rejects a mismatch; C1 had no such check, so a
+// typo'd epochLen silently produced a WEAKER cooldown guarantee than the operator
+// believed — R15 passing against a fictional epoch length.
+func TestCovStake_EpochLenIsCrossCheckedAgainstTheFunder(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{
+		c17C1: c17C1Only,
+		c17C2: "../c2-emission/artifacts/main.wasm",
+	})
+	fundC2Pool(t, &ct, tokenID, c17C2, "1000000", 0)
+	call(t, &ct, c17C2, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
+			`"blocksPerYear":"100","dustBucket":"y","timelock":"5",`+
+			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
+			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
+			`"buckets":"y:hive:ybucket:10000"}`, tokenID), c17Owner, 0, true)
+
+	// epochLen 5 does not match the funder's 10 — reject, even though cooldown > 5
+	// would satisfy R15 arithmetically against the wrong number
+	call(t, &ct, c17C1, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"7","epochLen":"5","funder":"%s","allow":""}`,
+		tokenID, c17C2), c17Owner, 0, false)
+
+	// the truthful epochLen is accepted, and R15 is then judged against it
+	call(t, &ct, c17C1, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","funder":"%s","allow":""}`,
+		tokenID, c17C2), c17Owner, 0, true)
+}
+
+// A standalone C1 — staking deployed before any emission contract exists — must still
+// init. The cross-check is opt-in precisely so that stays possible.
+func TestCovStake_FunderIsOptional(t *testing.T) {
+	ct := c17NewTest(t, map[string]string{c17C1: c17C1Only})
+	call(t, &ct, c17C1, "init",
+		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":""}`, tokenID),
+		c17Owner, 0, true)
+}
