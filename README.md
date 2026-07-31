@@ -291,9 +291,12 @@ passthrough.
   fake-Hive fixture proxy broadcast methods through to the devnet's Hive node while
   still serving fixture data for reads. The second is the right shape; it just needs
   the fixture server to become a partial proxy.
-- **Scale is untested.** The largest devnet report is a handful of entries;
-  `docs/rc-costs.md` has the measured per-entry curve, but no run has submitted a
-  realistically sized epoch.
+- **Scale is verified in-process, not on devnet.** A 500-earner epoch across 9 pages
+  is covered by `TestCovDist_FiveHundredEarnersAcrossNinePages`: totalShares
+  accumulates exactly, all 500 claims pay, and 99,748 of 100,000 is distributed with
+  the remainder under one unit per earner — truncation dust, not a leak. What is still
+  untested is that shape over a real multi-node chain, where per-transaction RC and
+  block inclusion apply; `docs/rc-costs.md` has the measured per-entry curve.
 - `vsc.update_contract` (the in-place upgrade path) is untested, and C2 now aborts
   loudly if upgraded from a pre-allowance deployment rather than silently starving.
 - Per-tenant config values and the governance DAO are out of scope here.

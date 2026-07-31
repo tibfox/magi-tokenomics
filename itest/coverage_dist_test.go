@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"strconv"
 )
 
 // Coverage tests for the previously untested surface of the C3 author/curation
@@ -720,4 +721,91 @@ func TestCovDist_C6WithoutTreasuryCannotSweep(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := covBootC6(t, covC6ID, "600", "1000")
 	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, false)
+}
+
+// SCALE. Every other test in this repo reports a handful of accounts; a real tribe
+// epoch has hundreds. This drives 500 earners across 9 pages and checks the things
+// that only break at size: cumulative rounding, totalShares accumulation across many
+// submitShares calls, and whether the sum of what everyone can actually claim still
+// equals what was funded.
+//
+// 500 x 60-per-page is also the RC shape an operator will really run — see
+// docs/rc-costs.md — so a failure here is a deployment blocker rather than a
+// curiosity.
+func TestCovDist_FiveHundredEarnersAcrossNinePages(t *testing.T) {
+	os.RemoveAll("data/badger")
+	ct := covBoot(t, covC3Wasm, covC3ID, "1", covReporter)
+	covFundEpoch(t, ct, covC3ID, "0", 1)
+
+	const total, perPage = 500, 60
+	type earner struct {
+		acct  string
+		share int
+	}
+	earners := make([]earner, 0, total)
+	for i := 0; i < total; i++ {
+		// deliberately uneven shares, including many that will round down
+		earners = append(earners, earner{fmt.Sprintf("hive:s%03d", i), 1 + i%37})
+	}
+
+	wantTotal := 0
+	page := 0
+	for i := 0; i < len(earners); i += perPage {
+		end := i + perPage
+		if end > len(earners) {
+			end = len(earners)
+		}
+		entries := ""
+		for j := i; j < end; j++ {
+			if j > i {
+				entries += ","
+			}
+			entries += fmt.Sprintf("%s:%d", earners[j].acct, earners[j].share)
+			wantTotal += earners[j].share
+		}
+		covSubmit(t, ct, covC3ID, covReporter, "0", strconv.Itoa(page), entries, 1, true)
+		page++
+	}
+	t.Logf("submitted %d earners across %d pages, totalShares should be %d", total, page, wantTotal)
+
+	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	_, ts, funded, status := covShareOf(t, ct, covC3ID, "0", earners[0].acct, 2)
+	assert.Equal(t, "finalized", status)
+	assert.Equal(t, strconv.Itoa(wantTotal), ts,
+		"totalShares must accumulate exactly across every page")
+
+	// Everyone claims. The invariant that matters at scale is CONSERVATION: the sum
+	// actually paid must never exceed what was funded, and the shortfall must be pure
+	// truncation dust rather than a systematic leak.
+	fundedN, _ := strconv.Atoi(funded)
+	paid := 0
+	claimed := 0
+	for _, e := range earners {
+		before := covBalance(t, ct, e.acct, 3).String()
+		if before != "0" {
+			t.Fatalf("%s started with a balance of %s", e.acct, before)
+		}
+		expect := fundedN * e.share / wantTotal
+		r := call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, e.acct, 3, expect > 0)
+		_ = r
+		got := covBalance(t, ct, e.acct, 3)
+		if got.String() != strconv.Itoa(expect) {
+			t.Fatalf("%s got %s, want %d (share %d of %d, funded %d)",
+				e.acct, got, expect, e.share, wantTotal, fundedN)
+		}
+		paid += expect
+		if expect > 0 {
+			claimed++
+		}
+	}
+	t.Logf("scale OK: %d/%d earners paid %d of %d funded; %d retained as truncation dust",
+		claimed, total, paid, fundedN, fundedN-paid)
+	if paid > fundedN {
+		t.Fatalf("CONSERVATION BROKEN: paid %d exceeds funded %d", paid, fundedN)
+	}
+	// dust must be a rounding remainder, not a systematic loss
+	if fundedN-paid > total {
+		t.Fatalf("retained %d for %d earners — more than one unit each, so this is not "+
+			"truncation dust but a systematic shortfall", fundedN-paid, total)
+	}
 }
