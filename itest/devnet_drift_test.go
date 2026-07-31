@@ -154,3 +154,74 @@ func uniqStrings(in []string) []string {
 	}
 	return out
 }
+
+// A wasm artifact older than its source means every test — unit AND devnet — is
+// exercising code that no longer exists. Nothing else catches it: the suites load the
+// .wasm file happily, assertions pass or fail against the old behaviour, and a devnet
+// run costs 20-60 minutes before the confusion surfaces.
+//
+// The shared packages count too: adapter/ and auth/ are compiled INTO every contract,
+// so editing one of them staleness-invalidates all six artifacts even though no
+// contract/main.go changed.
+func TestDevnetDrift_ArtifactsAreNewerThanSources(t *testing.T) {
+	shared := []string{"../adapter/adapter.go", "../auth/auth.go"}
+	newestShared := int64(0)
+	for _, f := range shared {
+		st, err := os.Stat(f)
+		if err != nil {
+			t.Fatalf("stat %s: %v", f, err)
+		}
+		if m := st.ModTime().Unix(); m > newestShared {
+			newestShared = m
+		}
+	}
+
+	for _, c := range []string{
+		"c1-staking", "c2-emission", "c3-distributor", "c5-lp", "c6-migration", "c7-yield",
+	} {
+		srcPath := filepath.Join("..", c, "contract", "main.go")
+		artPath := filepath.Join("..", c, "artifacts", "main.wasm")
+		src, err := os.Stat(srcPath)
+		if err != nil {
+			t.Fatalf("stat %s: %v", srcPath, err)
+		}
+		art, err := os.Stat(artPath)
+		if err != nil {
+			t.Fatalf("stat %s: %v — build it before testing", artPath, err)
+		}
+		newest := src.ModTime().Unix()
+		if newestShared > newest {
+			newest = newestShared
+		}
+		if art.ModTime().Unix() < newest {
+			t.Errorf("%s: artifacts/main.wasm is OLDER than its sources — every test using it is "+
+				"exercising code that no longer exists. Rebuild with:\n"+
+				"  GOTOOLCHAIN=go1.25.3 tinygo build -gc=custom -scheduler=none -panic=trap "+
+				"-no-debug -target=wasm-unknown -o %s/artifacts/main.wasm ./%s/contract", c, c, c)
+		}
+	}
+}
+
+// C3 and C5 are the same contract deployed twice and MUST stay byte-identical apart
+// from the package line. A change applied to one and not the other diverges them
+// silently: both compile, both deploy, and only the untouched instance misbehaves.
+func TestDevnetDrift_C3AndC5StayIdentical(t *testing.T) {
+	read := func(p string) []string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		return strings.Split(string(b), "\n")
+	}
+	c3 := read("../c3-distributor/contract/main.go")
+	c5 := read("../c5-lp/contract/main.go")
+	if len(c3) != len(c5) {
+		t.Fatalf("C3 has %d lines, C5 has %d — the twins have diverged", len(c3), len(c5))
+	}
+	for i := 1; i < len(c3); i++ { // line 0 is the package clause
+		if c3[i] != c5[i] {
+			t.Fatalf("C3 and C5 diverge at line %d:\n  C3: %s\n  C5: %s\n"+
+				"a change to one twin must always be mirrored to the other", i+1, c3[i], c5[i])
+		}
+	}
+}
