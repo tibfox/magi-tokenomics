@@ -267,16 +267,23 @@ can never reach its authority check. Its guardian gate is proven in-process inst
 ## Status
 
 All 6 contracts + reporter are complete, audited, and green: **92 contract tests, 120
-reporter tests, and nine devnet suites** — the full-system run, the adversarial
+reporter tests, and ten devnet suites** — the full-system run, the adversarial
 suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
 passthrough.
 
 **Not done, stated plainly:**
 
 - No real deployment yet. Everything here is devnet-verified only.
-- **Cosigned auth (mode 1) has never run on devnet.** It needs M signatures in ONE
-  transaction and the devnet harness signs with a single account, so it is covered by
-  unit tests only. Single and Attest both run on devnet.
+- ~~Cosigned auth (mode 1) has never run on devnet.~~ **Closed** by
+  `magi_cosigned_devnet_test.go`: a 2-of-2 C3 rejects a single authority and applies
+  the page when both sign one transaction. All three auth modes now run on a live
+  chain.
+
+  Caveat worth keeping: the devnet's accounts share an active authority, so ONE
+  signature satisfies a two-account `required_auths` list. That proves the CONTRACT's
+  threshold logic — which is what mode 1 implements — but not Hive's aggregation of
+  signatures from genuinely distinct keys.
+
 - ~~The reporter's real signing path is never executed on devnet.~~ **Closed** by
   `magi_realbroadcast_devnet_test.go`, which runs `reporter run -broadcast` against a
   live devnet so the reporter builds the envelope, signs with an active key and
