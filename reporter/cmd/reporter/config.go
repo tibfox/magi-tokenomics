@@ -21,6 +21,13 @@ type Config struct {
 		// API endpoints. The first is used for reads; all are given to the
 		// broadcaster so a single node being down does not stall an epoch.
 		API []string `json:"api"`
+		// ChainID selects which HIVE chain signatures are made over. Empty means
+		// mainnet, which is correct for production. This is NOT vsc.net_id: a VSC
+		// network can run on a Hive chain that is not mainnet, and signing against
+		// the wrong one makes the signature recover to a different key — the node
+		// then reports "missing required active authority", which reads as a
+		// permissions problem rather than a chain mismatch.
+		ChainID string `json:"chain_id"`
 	} `json:"hive"`
 
 	VSC struct {

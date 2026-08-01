@@ -64,6 +64,19 @@ with inverted incentives:
 
 ## The four on-chain steps
 
+## Signing
+
+`submit.account` and `submit.wif_env` name the reporter's Hive account and the
+environment variable holding its ACTIVE key. The key is never read from the config
+file — a file holding a live active key tends to end up in a backup or a git repo.
+
+**`hive.chain_id` selects which HIVE chain signatures are made over.** Leave it empty
+for mainnet. It is NOT `vsc.net_id`: that selects the VSC network, while the chain id
+selects the Hive chain underneath it, and a VSC network can run on a Hive chain that
+is not mainnet. Getting this wrong does not fail as a chain mismatch — the signature
+recovers to a different key and the node reports `missing required active authority`,
+which reads as a permissions problem and sends you looking in the wrong place.
+
 ## Two source kinds
 
 `source.kind` selects where shares come from. The rest of the pipeline —

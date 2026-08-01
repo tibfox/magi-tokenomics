@@ -685,7 +685,8 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	var b broadcast.Broadcaster
 	if doBroadcast {
 		hb, herr := broadcast.NewHiveBroadcaster(
-			a.cfg.Hive.API, a.cfg.VSC.NetID, a.cfg.Submit.Account, a.cfg.Submit.WifEnv)
+			a.cfg.Hive.API, a.cfg.VSC.NetID, a.cfg.Submit.Account, a.cfg.Submit.WifEnv,
+			a.cfg.Hive.ChainID)
 		if herr != nil {
 			return herr
 		}

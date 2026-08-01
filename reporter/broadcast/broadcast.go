@@ -73,7 +73,14 @@ type HiveBroadcaster struct {
 // config field — a config file holding a live active key tends to end up in a
 // backup or a git repo. The env var name is configurable so an operator can wire
 // it to whatever secret manager they already run.
-func NewHiveBroadcaster(apiAddrs []string, netID, account, wifEnv string) (*HiveBroadcaster, error) {
+// NewHiveBroadcaster builds the signer. chainID selects the HIVE chain to sign
+// against and is separate from netID, which selects the VSC network — a VSC network
+// can run on top of a Hive chain that is not mainnet. Empty means Hive mainnet, which
+// is hivego's default and the right value for a production deployment; a Hive testnet
+// or devnet has its own id and every signature must be made over it, or the signature
+// recovers to the wrong key and the node reports a MISSING ACTIVE AUTHORITY that looks
+// like a permissions problem rather than a chain mismatch.
+func NewHiveBroadcaster(apiAddrs []string, netID, account, wifEnv, chainID string) (*HiveBroadcaster, error) {
 	if len(apiAddrs) == 0 {
 		return nil, fmt.Errorf("broadcast: no hive api endpoint configured")
 	}
@@ -91,8 +98,12 @@ func NewHiveBroadcaster(apiAddrs []string, netID, account, wifEnv string) (*Hive
 	if wif == "" {
 		return nil, fmt.Errorf("broadcast: %s is empty — export the reporter's ACTIVE key there", wifEnv)
 	}
+	node := hivego.NewHiveRpc(apiAddrs)
+	if chainID != "" {
+		node.ChainID = chainID
+	}
 	return &HiveBroadcaster{
-		Node:    hivego.NewHiveRpc(apiAddrs),
+		Node:    node,
 		NetID:   netID,
 		Account: acct,
 		wif:     wif,

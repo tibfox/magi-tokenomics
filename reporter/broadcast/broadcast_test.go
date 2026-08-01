@@ -115,13 +115,13 @@ func TestDryRun_PropagatesBodyErrors(t *testing.T) {
 func TestNewHiveBroadcaster_RequiresKeyFromEnv(t *testing.T) {
 	const envName = "TEST_REPORTER_WIF_ABSENT"
 	t.Setenv(envName, "")
-	_, err := NewHiveBroadcaster([]string{"https://api.hive.blog"}, "vsc-testnet", "hive:rep", envName)
+	_, err := NewHiveBroadcaster([]string{"https://api.hive.blog"}, "vsc-testnet", "hive:rep", envName, "")
 	if err == nil || !strings.Contains(err.Error(), envName) {
 		t.Fatalf("an empty key env var must name itself in the error, got %v", err)
 	}
 
 	t.Setenv(envName, "5Kdummy")
-	b, err := NewHiveBroadcaster([]string{"https://api.hive.blog"}, "vsc-testnet", "hive:rep", envName)
+	b, err := NewHiveBroadcaster([]string{"https://api.hive.blog"}, "vsc-testnet", "hive:rep", envName, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestNewHiveBroadcaster_ValidatesConfig(t *testing.T) {
 		{"no net id", []string{"x"}, "", "rep"},
 		{"no account", []string{"x"}, "vsc-testnet", ""},
 	} {
-		if _, err := NewHiveBroadcaster(tc.addrs, tc.netID, tc.acct, envName); err == nil {
+		if _, err := NewHiveBroadcaster(tc.addrs, tc.netID, tc.acct, envName, ""); err == nil {
 			t.Fatalf("%s: expected an error", tc.name)
 		}
 	}
@@ -165,7 +165,7 @@ func TestBroadcasters_SatisfyTheInterface(t *testing.T) {
 // which builds the operation itself.
 func TestHiveBroadcaster_PostingAuthsAreEmptyNotNil(t *testing.T) {
 	t.Setenv("TEST_WIF", "5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n")
-	h, err := NewHiveBroadcaster([]string{"http://localhost:1"}, "vsc-devnet", "hive:someone", "TEST_WIF")
+	h, err := NewHiveBroadcaster([]string{"http://localhost:1"}, "vsc-devnet", "hive:someone", "TEST_WIF", "")
 	if err != nil {
 		t.Fatalf("constructing broadcaster: %v", err)
 	}
@@ -193,5 +193,32 @@ func TestHiveBroadcaster_PostingAuthsAreEmptyNotNil(t *testing.T) {
 	if strings.Contains(string(src), `BroadcastJson([]string{h.Account}, nil,`) {
 		t.Fatal("Send passes nil for required_posting_auths — Hive rejects the transaction " +
 			"with \"Invalid cast from null_type to Array\" and nothing is ever broadcast")
+	}
+}
+
+// A VSC network can run on a Hive chain that is not mainnet, and signatures must be
+// made over THAT chain's id. Signing against the wrong one does not fail loudly as a
+// chain mismatch — the signature recovers to a different key and the node reports
+// "missing required active authority", which reads as a permissions problem and sends
+// the operator hunting for the wrong thing.
+func TestHiveBroadcaster_ChainIDIsConfigurable(t *testing.T) {
+	t.Setenv("TEST_WIF", "5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n")
+	const custom = "18dcf0a285365fc58b71f18b3d3fec954aa0c141c44e4e5cb4cf777b9eab274e"
+
+	h, err := NewHiveBroadcaster([]string{"http://localhost:1"}, "vsc-devnet", "hive:a", "TEST_WIF", custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Node.ChainID != custom {
+		t.Fatalf("ChainID = %q, want the configured %q", h.Node.ChainID, custom)
+	}
+
+	// empty must leave hivego's default alone rather than blanking it
+	def, err := NewHiveBroadcaster([]string{"http://localhost:1"}, "vsc-mainnet", "hive:a", "TEST_WIF", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Node.ChainID != "" {
+		t.Fatalf("an unset chain_id must leave hivego's default in place, got %q", def.Node.ChainID)
 	}
 }

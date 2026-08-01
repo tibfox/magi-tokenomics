@@ -169,8 +169,15 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 	t.Setenv(wifEnv, d.cfg.InitminerWIF)
 
 	cfgBody, err := json.Marshal(map[string]any{
-		"hive": map[string]any{"api": []string{d.HiveRPCEndpoint()}},
-		"vsc":  map[string]any{"api": d.GQLEndpoint(1), "net_id": "vsc-devnet"},
+		// chain_id is REQUIRED here: this devnet's Hive runs its own chain id, and a
+		// signature made over mainnet's recovers to a different key. The node then
+		// reports "missing required active authority", which reads as a permissions
+		// problem rather than a chain mismatch — it cost a full run to diagnose.
+		"hive": map[string]any{
+			"api":      []string{d.HiveRPCEndpoint()},
+			"chain_id": devnetChainID,
+		},
+		"vsc": map[string]any{"api": d.GQLEndpoint(1), "net_id": "vsc-devnet"},
 		"indexer": map[string]any{
 			"api": idx.URL, "secret": "", "pool": fx.pool, "page_size": 1000,
 		},

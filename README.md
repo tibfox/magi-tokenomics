@@ -277,20 +277,22 @@ passthrough.
 - **Cosigned auth (mode 1) has never run on devnet.** It needs M signatures in ONE
   transaction and the devnet harness signs with a single account, so it is covered by
   unit tests only. Single and Attest both run on devnet.
-- **The reporter's real signing path is never executed on devnet.** The suites take
-  the reporter's computed payloads and broadcast them through the harness, so
-  `broadcast.HiveBroadcaster` — the code that builds the `vsc.call` envelope, signs it
-  with an active key and submits it — is exercised by unit tests alone. A mismatch in
-  the envelope, the auth arrays or the payload shape would not show up.
+- ~~The reporter's real signing path is never executed on devnet.~~ **Closed** by
+  `magi_realbroadcast_devnet_test.go`, which runs `reporter run -broadcast` against a
+  live devnet so the reporter builds the envelope, signs with an active key and
+  submits every call itself. It found two bugs that made the submission path
+  completely non-functional: `required_posting_auths` passed as nil (Hive rejects the
+  transaction as `Invalid cast from null_type to Array`) and no configurable Hive
+  chain id (every signature was made over mainnet's, so on any other chain it
+  recovered to the wrong key and the node reported a misleading "missing required
+  active authority").
 
-  This is awkward to close, and the reason is structural: the devnet suites are
-  `package devnet` compiled inside the **go-vsc-node module**, which does not depend on
-  `magi_token`, so they cannot import the broadcaster at all. Two ways round it, both
-  with costs — add a `replace` to go-vsc-node's `go.mod` (an external repo this project
-  does not modify), or run the reporter BINARY with `run -broadcast` and have the
-  fake-Hive fixture proxy broadcast methods through to the devnet's Hive node while
-  still serving fixture data for reads. The second is the right shape; it just needs
-  the fixture server to become a partial proxy.
+  It works in LP mode specifically. Content mode needs Hive post data from a fixture
+  server, and the reporter uses ONE endpoint list for both reads and broadcasts, so a
+  fixture endpoint cannot also accept transactions. LP mode reads from the indexer and
+  touches Hive only for the head block — which the devnet's real node answers on the
+  same endpoint it accepts broadcasts on.
+
 - **Scale is verified in-process, not on devnet.** A 500-earner epoch across 9 pages
   is covered by `TestCovDist_FiveHundredEarnersAcrossNinePages`: totalShares
   accumulates exactly, all 500 claims pay, and 99,748 of 100,000 is distributed with
