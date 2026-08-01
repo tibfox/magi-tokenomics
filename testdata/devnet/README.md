@@ -33,7 +33,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The eight suites
+## The nine suites
 
 | test | covers | ~time |
 |---|---|---|
@@ -45,6 +45,7 @@ to your own paths.
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
 | `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode against a faked indexer | 24 min |
+| `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast | 12 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -123,6 +124,7 @@ fails several minutes later with a misleading message. Where each one stands:
 | `magi_refill_devnet_test.go` | yes | 1006s |
 | `magi_lp_multiepoch_devnet_test.go` | yes | 1415s, re-run 1205s after the audit fixes |
 | `magi_reporter_devnet_test.go` | yes | 721s |
+| `magi_realbroadcast_devnet_test.go` | yes | 692s |
 
 **Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
 unaffected, on the grounds that it never calls `distributeEpoch` or `pullFunding`.

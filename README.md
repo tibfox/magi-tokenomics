@@ -40,8 +40,8 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 89 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 117 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 92 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 120 reporter tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -266,8 +266,8 @@ can never reach its authority check. Its guardian gate is proven in-process inst
 
 ## Status
 
-All 6 contracts + reporter are complete, audited, and green: **89 contract tests, 117
-reporter tests, and eight devnet suites** — the full-system run, the adversarial
+All 6 contracts + reporter are complete, audited, and green: **92 contract tests, 120
+reporter tests, and nine devnet suites** — the full-system run, the adversarial
 suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
 passthrough.
 
