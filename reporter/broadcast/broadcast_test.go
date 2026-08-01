@@ -154,3 +154,44 @@ func TestBroadcasters_SatisfyTheInterface(t *testing.T) {
 	var _ Broadcaster = &DryRun{}
 	var _ Broadcaster = &HiveBroadcaster{}
 }
+
+// required_posting_auths must be an EMPTY ARRAY, never nil.
+//
+// hivego passes this field straight into CustomJsonOperation, and a nil slice
+// marshals to JSON `null`. Hive's fc deserialiser rejects that with "Bad Cast:
+// Invalid cast from null_type to Array" and the transaction never executes — so a nil
+// here means the reporter cannot broadcast at all. That is precisely what happened,
+// and it survived because every devnet suite broadcasts through the test harness,
+// which builds the operation itself.
+func TestHiveBroadcaster_PostingAuthsAreEmptyNotNil(t *testing.T) {
+	t.Setenv("TEST_WIF", "5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n")
+	h, err := NewHiveBroadcaster([]string{"http://localhost:1"}, "vsc-devnet", "hive:someone", "TEST_WIF")
+	if err != nil {
+		t.Fatalf("constructing broadcaster: %v", err)
+	}
+	if h.Account != "someone" {
+		t.Fatalf("account = %q, want the hive: prefix stripped", h.Account)
+	}
+
+	// Marshalling a nil []string yields "null"; an empty one yields "[]". Pin the
+	// distinction directly, because it is invisible in Go and fatal on the wire.
+	var nilAuths []string
+	b, _ := json.Marshal(nilAuths)
+	if string(b) != "null" {
+		t.Fatalf("precondition: a nil []string should marshal to null, got %s", b)
+	}
+	b, _ = json.Marshal([]string{})
+	if string(b) != "[]" {
+		t.Fatalf("precondition: an empty []string should marshal to [], got %s", b)
+	}
+
+	// And the source must not regress to nil.
+	src, rerr := os.ReadFile("broadcast.go")
+	if rerr != nil {
+		t.Fatalf("read broadcast.go: %v", rerr)
+	}
+	if strings.Contains(string(src), `BroadcastJson([]string{h.Account}, nil,`) {
+		t.Fatal("Send passes nil for required_posting_auths — Hive rejects the transaction " +
+			"with \"Invalid cast from null_type to Array\" and nothing is ever broadcast")
+	}
+}

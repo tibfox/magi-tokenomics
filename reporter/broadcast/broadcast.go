@@ -104,8 +104,16 @@ func (h *HiveBroadcaster) Send(c submit.Call) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// active auth only; required_posting_auths deliberately left empty (see above)
-	return h.Node.BroadcastJson([]string{h.Account}, nil, "vsc.call", body, &h.wif)
+	// Active auth only; required_posting_auths deliberately EMPTY (see above) — but
+	// empty must be `[]string{}`, NEVER nil.
+	//
+	// hivego drops this straight into CustomJsonOperation, and a nil slice marshals to
+	// JSON `null`. Hive's fc deserialiser then rejects the whole transaction with
+	// "Bad Cast: Invalid cast from null_type to Array", so EVERY broadcast failed at
+	// the node. It went unnoticed because no test ever ran this path against a real
+	// Hive node: the devnet suites hand their payloads to the test harness, which
+	// builds the operation itself with []string{}.
+	return h.Node.BroadcastJson([]string{h.Account}, []string{}, "vsc.call", body, &h.wif)
 }
 
 // DryRun records what would have been sent and sends nothing.
