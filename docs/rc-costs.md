@@ -35,12 +35,12 @@ Measured on a devnet run: depositing 100 HBD gave an account ~110,000 RC.
 | C0 token | `transfer` (to account) | 214 | ok |
 | C0 token | `approve` | 243 | ok |
 | C0 token | `changeOwner` | 863 | ok |
-| C1 staking | `init` | 939 | ok |
-| C1 staking | `stake` (first, creates history) | 1,179 | ok |
-| C1 staking | `stake` (subsequent) | 1,018 | ok |
-| C1 staking | `stakeFor` | 1,066 | ok |
-| C1 staking | `unstake` | 603 | ok |
-| C1 staking | `claimUnstaked` | 501 | ok |
+| C1 staking | `init` | 970 | ok |
+| C1 staking | `stake` (first, creates history) | 1,204 | ok |
+| C1 staking | `stake` (subsequent) | 1,043 | ok |
+| C1 staking | `stakeFor` | 1,090 | ok |
+| C1 staking | `unstake` | 628 | ok |
+| C1 staking | `claimUnstaked` | 502 | ok |
 | C2 emission | `init` (3 buckets) | 5,725 | ok |
 | C2 emission | `queueTokenOp` | 163 | ok |
 | C2 emission | `cancelTokenOp` | 100 | ok |
@@ -50,12 +50,22 @@ Measured on a devnet run: depositing 100 HBD gave an account ~110,000 RC.
 | C3 / C5 | `finalizeEpoch` | 343–347 | ok |
 | C3 / C5 | `claim` | 497–529 | ok |
 | C6 migration | `init` | 1,175 | ok |
-| C7 yield | `init` | 3,061 | ok |
-| C7 yield | `pullFunding` | 880 | ok |
-| C7 yield | `claim` (reads C1 history) | 1,069 | ok |
+| C7 yield | `init` | 3,102 | ok |
+| C7 yield | `pullFunding` | 822 | ok |
+| C7 yield | `claim` (reads C1 history) | 980 | ok |
 
 Read-only queries (`stakeOf`, `stakeAtHeight`, `scheduleInfo`, `owedOf`, `shareOf`,
-`fundedOf`) all land at the **100 RC floor**.
+`fundedOf`, `minStakeSum`) all land at the **100 RC floor**.
+
+**What C1's drawdown accumulator costs.** Every `stake`/`unstake` now also files that
+account's position against its epoch-start level, so C7 can divide by the exact
+`Σ min(aᵢ,bᵢ)` (see the C7 section of the [README](../README.md)). That is one extra
+history lookup and one state write: **+25 RC**, flat, on a ~600–1,200 RC operation.
+
+C7's `claim` got **89 RC cheaper** in the same change — it now makes one cross-contract
+call for the denominator instead of two `totalStakedAtHeight` reads. So the exact
+denominator is not merely affordable, it is net cheaper for the operation users perform
+most, and the cost sits with staking rather than with claiming.
 
 Every fixed-cost call fits the free tier comfortably. The whole deployment sequence
 — seven `init`s plus the token handover — totals roughly **18,000 RC**, so a

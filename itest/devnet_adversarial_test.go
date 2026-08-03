@@ -82,6 +82,9 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	call(t, &ct, advC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, advTok), owner, 0, true)
 	call(t, &ct, advC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"%s","reporterThreshold":"1","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
 		advTok, advC2, advReporter, advTreasury, advGuardian), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, advC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, advC2), owner, 0, true)
 	call(t, &ct, advC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
 		advTok, advC2, advC1, advTreasury, advGuardian), owner, 0, true)
 	call(t, &ct, advC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, advTok), owner, 0, true)

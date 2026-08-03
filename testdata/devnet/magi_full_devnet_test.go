@@ -323,6 +323,12 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	distInit(c3ID, "C3 init (content)")
 	distInit(c5ID, "C5 init (LP)")
+	// C1 adopts the emission schedule now that C2 exists. This is what arms the
+	// per-epoch drawdown accumulator that gives C7 an EXACT yield denominator; C7's
+	// init refuses a stakeSource without it, because dividing by min(Σa,Σb) instead
+	// strands part of every epoch and is what forced the old claim deadline.
+	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
+	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
 	initAs(c7ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
@@ -545,7 +551,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		// roles they do not hold
 		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "finalize as a mere shareholder"},
 		{c3ID, "sweepUnallocated", `{"nonce":"2"}`, "sweep the content pot (valid nonce)"},
-		{c7ID, "sweepResidual", `{"epoch":"0"}`, "sweep the yield residual (blocked by maturity before auth)"},
+		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "sweep a yield epoch that has stakers (refused on that, before auth)"},
 	}
 	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
 	hsent := 0
@@ -684,7 +690,7 @@ func TestDevnetMagiFull(t *testing.T) {
 
 		// --- C7 yield ---
 		{c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
-		{c7ID, "sweepResidual", `{"epoch":"0"}`, "C7 sweep the yield residual (aborts on the 1000-block maturity, not on auth)"},
+		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "C7 sweep an epoch with stakers (aborts on the stakers check, not on auth)"},
 		{c7ID, "claim", `{"epoch":"0"}`, "C7 claim yield with no stake"},
 	}
 

@@ -177,6 +177,11 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 		tokenID, c2ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c5.init")
 	waitKey(c5ID, "init", "c5 init")
 
+	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
+	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
+	send(1, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "c1.adoptSchedule")
+	waitKey(c1ID, "cfg_genesis", "c1 schedule adopted")
+
 	c7tx := send(1, c7ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
 		tokenID, c2ID, c1ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c7.init")
@@ -268,7 +273,7 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 		{c5ID, "sweepUnallocated", `{"nonce":"1"}`, "attacker sweeps C5"},
 		{c5ID, "claim", `{"epoch":"0"}`, "attacker double-claims C5"},
 		{c7ID, "claim", `{"epoch":"0"}`, "attacker double-claims C7"},
-		{c7ID, "sweepResidual", `{"epoch":"0"}`, "attacker sweeps C7 residual"},
+		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "attacker sweeps a C7 epoch that HAS stakers"},
 		{c1ID, "stakeFor", fmt.Sprintf(`{"acct":"hive:%s","amount":"500"}`, holder), "attacker stakeFor (not allowlisted)"},
 		{c1ID, "unstake", `{"amount":"999999"}`, "attacker unstakes more than staked"},
 		{c5ID, "init", `{"token":"x"}`, "attacker re-inits C5"},

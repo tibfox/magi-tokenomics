@@ -129,6 +129,9 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 	}
 	record("C3 content", "init", "", call(t, &ct, pC3, "init", distCfg(pC3), owner, 41, true))
 	record("C5 LP", "init", "", call(t, &ct, pC5, "init", distCfg(pC5), owner, 41, true))
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, pC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, pC2), owner, 41, true)
 	record("C7 yield", "init", "", call(t, &ct, pC7, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"%s",`+
 			`"guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,

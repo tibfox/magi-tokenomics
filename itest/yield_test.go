@@ -32,6 +32,9 @@ func TestStakingYieldSlice(t *testing.T) {
 	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, c7ID)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", c2init, owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, c1ID), owner, 0, true)
 
 	// mint 1000 to owner, hand out to alice/bob (all before ownership handover)

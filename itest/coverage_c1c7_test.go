@@ -402,6 +402,9 @@ func c17BootYield(t *testing.T) test_utils.ContractTest {
 	call(t, &ct, c17C2, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`,
 		tokenID, c17C7), c17Owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c17C2), c17Owner, 0, true)
 	call(t, &ct, c17C7, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 		tokenID, c17C2, c17C1), c17Owner, 0, true)
@@ -494,20 +497,31 @@ func TestCovStake_YieldMinOverEpochRule(t *testing.T) {
 	funded := c17I64(t, f.Ret, "funded")
 	assert.EqualValues(t, 100000, funded)
 
-	// denominator = min(totalAt(0), totalAt(9)) = 900
+	// THE EXACT DENOMINATOR: Σ min(aᵢ,bᵢ) = alice 300 + bob 400 + carol 0 = 700, which
+	// C1 reports as totalAt(0) − drawdown = 1000 − 300.
+	//
+	// This used to divide by min(totalAt(0), totalAt(9)) = 900 — the closest figure C7
+	// could compute unaided — which paid out only 77,777 of 100,000 and left 22,223
+	// belonging to nobody. 22% of one epoch. Recovering that is what the guardian
+	// sweep was for, and the sweep is why claims had to close after ~10 days.
 	ca := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:alice", 11, true)
 	cb := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:bob", 11, true)
 	pa, pb := c17I64(t, ca.Ret, "claimed"), c17I64(t, cb.Ret, "claimed")
-	assert.EqualValues(t, 33333, pa, "alice is paid on min(600,300)=300 / 900")
-	assert.EqualValues(t, 44444, pb, "bob is paid on 400/900")
+	assert.EqualValues(t, 42857, pa, "alice is paid on min(600,300)=300 / 700")
+	assert.EqualValues(t, 57142, pb, "bob is paid on 400/700")
 	assert.Less(t, pa, pb, "leaving mid-epoch must cost alice her lead over bob")
 
 	// carol joined mid-epoch → min(0,200)=0 → nothing for this epoch
 	call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:carol", 11, false)
 
 	assert.LessOrEqual(t, pa+pb, funded, "Σclaims must not exceed funded")
-	assert.EqualValues(t, 33333, c17TokenBal(t, &ct, "hive:alice", 11))
-	assert.EqualValues(t, 44444, c17TokenBal(t, &ct, "hive:bob", 11))
+	// THE POINT OF THE WHOLE CHANGE: what stays behind is now per-claimant truncation
+	// dust, not a structural hole. Two claimants ⇒ at most 2 units lost to integer
+	// division. If this ever grows again, the deadline pressure comes back with it.
+	assert.LessOrEqual(t, funded-(pa+pb), int64(2),
+		"the epoch must be fully distributed apart from truncation dust")
+	assert.EqualValues(t, 42857, c17TokenBal(t, &ct, "hive:alice", 11))
+	assert.EqualValues(t, 57142, c17TokenBal(t, &ct, "hive:bob", 11))
 	assert.EqualValues(t, 0, c17TokenBal(t, &ct, "hive:carol", 11))
 
 	// carol IS entitled for the NEXT epoch, which she holds start-to-end
@@ -648,18 +662,32 @@ func TestCovStake_C7RejectsAStakeSourceOnTheWrongSchedule(t *testing.T) {
 		`{"token":"%s","kind":"0","cooldown":"7","epochLen":"5","allow":""}`, tokenID),
 		c17Owner, 0, true)
 
-	// C7 must refuse to adopt it: cooldown 7 does NOT exceed the real epoch of 10, so
-	// a staker could capture a full epoch of yield and exit.
+	// Adoption is the first moment C1 can compare its supplied epochLen against the
+	// real one, and it must refuse: cooldown 7 does NOT exceed the real epoch of 10, so
+	// a staker could capture a full epoch of yield and exit. This is strictly earlier
+	// than C7's init, which is where the mismatch used to surface.
+	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c17C2), c17Owner, 0, false)
+
+	// And C7 refuses in turn. The failed adoption left C1 with no schedule at all, so
+	// it can supply neither an R15 guarantee nor an exact yield denominator.
 	call(t, &ct, c17C7, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
 			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
 		tokenID, c17C2, c17C1), c17Owner, 0, false)
 }
 
-// An uninitialised C1 must not block C7's deploy. scheduleInfo is read-only and a
-// nested abort would revert the CALLER's transaction, turning "C1 is not ready" into
-// "C7 cannot be deployed" — a deploy-order requirement invented by a diagnostic.
-func TestCovStake_UninitialisedStakeSourceDoesNotBlockC7(t *testing.T) {
+// C7 must REFUSE a stakeSource that cannot supply an exact denominator — and the
+// refusal has to be C7's OWN diagnostic, not a nested abort from inside C1.
+//
+// scheduleInfo is deliberately free of assertInit, because a nested abort reverts the
+// CALLER's transaction: "C1 is not ready" would surface as an unexplained C7 deploy
+// failure. The diagnostic must not be the thing that breaks the deploy.
+//
+// This test asserted the OPPOSITE until the exact-denominator work — that an
+// uninitialised C1 did not block C7. That was right while C7 could fall back to
+// min(Σa,Σb); it cannot now, and accepting such a C1 would silently strand part of
+// every epoch and bring the claim deadline back with it.
+func TestCovStake_C7RefusesAStakeSourceWithNoSchedule(t *testing.T) {
 	ct := c17NewTest(t, map[string]string{
 		c17C1: c17C1Only,
 		c17C2: "../c2-emission/artifacts/main.wasm",
@@ -673,9 +701,12 @@ func TestCovStake_UninitialisedStakeSourceDoesNotBlockC7(t *testing.T) {
 			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
 			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C7), c17Owner, 0, true)
 
-	// C1 registered but NEVER initialised — C7 must still deploy
-	call(t, &ct, c17C7, "init", fmt.Sprintf(
+	// C1 registered but NEVER initialised, so it has no schedule and records nothing.
+	res := call(t, &ct, c17C7, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
 			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
-		tokenID, c17C2, c17C1), c17Owner, 0, true)
+		tokenID, c17C2, c17C1), c17Owner, 0, false)
+	assert.Contains(t, res.ErrMsg, "no adopted schedule",
+		"the refusal must be C7's own check — an assertInit inside C1.scheduleInfo would "+
+			"revert the whole transaction with an unrelated message instead")
 }

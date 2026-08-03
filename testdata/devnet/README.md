@@ -286,3 +286,9 @@ way; ignoring them wastes 10–25 minutes per run.
 - **Stake before initialising C2.** C2's `genesis` is the block it initialises at,
   and C7 credits `min(stakeAt(start), stakeAt(end))` — so stake arriving later is
   zero at both epoch-0 boundaries and that epoch's yield is unclaimable.
+- **`C1.adoptSchedule` between `C2.init` and `C7.init`.** C1 accumulates a per-epoch
+  drawdown so C7 can divide by the exact `Σ min(aᵢ,bᵢ)` rather than an over-counting
+  total; it needs the epoch boundaries to do that, and cannot be told at its own init
+  because C2's genesis does not exist yet. C7's init refuses a `stakeSource` that
+  skipped this step, so a suite that forgets it fails at deploy with a clear message
+  rather than silently under-paying every yield epoch.

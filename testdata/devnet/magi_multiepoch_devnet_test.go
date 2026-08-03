@@ -200,6 +200,10 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
 		tokenID, c2ID, owner, treasury, guardian), "C3 init")
 	waitKey(c3ID, "cfg_funder", "C3 ready")
+	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
+	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
+	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
+	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
 	call(c7ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
@@ -390,6 +394,44 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 			t.Fatalf("epoch %s paid %s > funded %s", ep, paid, fundedN)
 		}
 	}
+
+	// ---- NO RESIDUE: every epoch is distributed in FULL --------------------
+	//
+	// This is the property that removed C7's claim deadline, asserted on a real chain.
+	//
+	// A and B are the only stakers, so once BOTH have claimed an epoch, `paid` must
+	// equal `funded` apart from per-claimant truncation dust. That holds only because
+	// C7 divides by C1's exact Σ min(aᵢ,bᵢ). Under the previous min(Σa,Σb) denominator
+	// this assertion would fail on precisely the epoch where A unstaked 100 while B
+	// staked +500 — movement in BOTH directions, which is what opened the gap — and
+	// roughly a tenth of that epoch would sit here unclaimable by anyone.
+	//
+	// The leftover is what a guardian sweep existed to recover, and the sweep is why
+	// claims had to close. No leftover, no sweep, no deadline.
+	for _, ep := range []string{"0", "1", "2", "3", "4"} {
+		callN(1, c7ID, "claim", fmt.Sprintf(`{"epoch":"%s"}`, ep), "A claims yield e"+ep)
+		if !waitStateKeyPresent(t, d, ctx, 1, c7ID, "claimed|"+ep+"|hive:"+owner, 3*time.Minute) {
+			t.Fatalf("A never claimed yield epoch %s", ep)
+		}
+	}
+	time.Sleep(15 * time.Second) // let the last transfers settle
+	for _, ep := range []string{"0", "1", "2", "3", "4"} {
+		paid, ok1 := new(big.Int).SetString(stateOf(c7ID, "paid|"+ep), 10)
+		fundedN, ok2 := new(big.Int).SetString(stateOf(c7ID, "funded|"+ep), 10)
+		if !ok1 || !ok2 {
+			t.Fatalf("epoch %s: could not read paid/funded", ep)
+		}
+		residue := new(big.Int).Sub(fundedN, paid)
+		if residue.Sign() < 0 || residue.Cmp(big.NewInt(2)) > 0 {
+			t.Fatalf("epoch %s left a residue of %s (funded %s, paid %s). Both stakers have "+
+				"claimed, so at most 2 units of truncation dust may remain — anything more "+
+				"means the yield denominator is over-counting again, which is what forced "+
+				"the old claim deadline", ep, residue, fundedN, paid)
+		}
+		t.Logf("epoch %s fully distributed: funded=%s paid=%s residue=%s", ep, fundedN, paid, residue)
+	}
+	t.Logf("NO RESIDUE OK: all 5 epochs paid out in full — nothing is left unclaimable, " +
+		"so nothing needs sweeping and claims never have to close")
 	// Epoch 0 predates the top-up entirely; epoch 4 is entirely after it. B's share
 	// must therefore be strictly larger in epoch 4 — and epoch 0 must be unchanged
 	// by a stake increase that happened later, which is the anti-flash-stake

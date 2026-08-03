@@ -42,6 +42,9 @@ func hdBoot(t *testing.T, ct *test_utils.ContractTest) {
 	call(t, ct, hdC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hdveto","vetoThreshold":"1","buckets":"author:contract:%s:5000,yield:contract:%s:5000"}`, hdTok, hdC3, hdC7), owner, 0, true)
 	call(t, ct, hdC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hdTok), owner, 0, true)
 	call(t, ct, hdC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hdreporter","reporterThreshold":"1","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, ct, hdC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hdC2), owner, 0, true)
 	call(t, ct, hdC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2, hdC1), owner, 0, true)
 }
 

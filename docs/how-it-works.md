@@ -86,25 +86,40 @@ Each round (an "epoch", usually a day):
 Staking yield skips steps 4 and 5 entirely: it reads the staking history itself, so
 there's nothing to report and nothing to challenge.
 
-### One deadline you should know about
+### Nothing you earn ever expires
 
-**Staking yield has a claim window. Content and LP rewards do not.**
+**Claim whenever you like — content, LP and staking yield alike.** Come back after a
+month, or a year. Your share waits for you.
 
-- **Content (C3) and LP (C5):** claim whenever you like. There is no expiry.
-- **Staking yield (C7): claim within roughly ten days.** After that the epoch's
-  leftover can be swept and your share of it is gone.
+This was not always true. Staking yield used to have a roughly ten-day deadline, and
+the story of why is worth a paragraph, because it shows how one small inaccuracy
+turns into a rule that punishes users.
 
-The reason is mechanical rather than punitive. Content and LP funding is only ever
-swept from an epoch a guardian *cancelled*, so a live epoch's money is never at risk
-and no deadline is needed. Staking yield instead pays out of a pool that nobody
-submits a list for, so the contract cannot know when everyone entitled has collected —
-it can only wait a generous interval and then let the remainder be swept. Closing
-claims at exactly that moment is what makes swept funds genuinely unclaimable rather
-than stolen from someone who was slow.
+Staking yield pays you on the *smaller* of your stake at the start and end of the day,
+so that only people who held throughout get paid. Fine. But to work out your share the
+contract has to divide by the total everyone earned on — and it couldn't count that.
+Adding up each person's smaller-of-two-numbers means going through every staker one by
+one, which a contract cannot do. So it divided by the total staked instead, which is a
+slightly bigger number whenever some people added and others removed on the same day.
 
-The exact window is `max(epochLength × 10, 1000 blocks)` after the later of the
-epoch's end and the block its funding arrived — about ten days on a daily schedule. If
-you stake, claim your yield periodically; a monthly habit is not enough.
+Dividing by too big a number means paying out less than the full pot. The remainder
+belonged to nobody. To stop it piling up forever, a guardian was allowed to sweep it —
+but a sweep can't tell leftover money from money you simply haven't collected yet. So
+claims had to be closed first. **That deadline existed only to make the sweep safe.**
+
+It's fixed now, at the source. The staking contract keeps one running number per day:
+how far people have dropped below where they started. Subtract it from the day's
+opening total and you have the exact figure, with no counting through stakers. The
+division is now correct, the pot is paid out in full, there's nothing left to sweep,
+and so there's nothing to close claims for.
+
+The only money still left behind is rounding — fractions of a token too small to
+divide. That's the same in all three contracts.
+
+One narrow exception exists: if a day passes with *nobody staked at all*, that day's
+yield can never be claimed by anyone, and the guardian can recover it to the treasury.
+That needs no deadline, because whether anyone was staked is settled history and no
+amount of waiting could change it.
 
 ## Who can do what
 
@@ -266,8 +281,10 @@ You don't need all of it.
   in the contract rather than being over-paid. Splitting your holdings across many
   accounts loses you money rather than gaining it. A share small enough that its
   payout truncates to zero cannot be claimed at all — the dust stays behind.
-- **Staking yield expires; content and LP rewards do not.** See the deadline note
-  above. This catches people out precisely because the other two never expire.
+- **A day with no stakers at all is recoverable by the guardian.** Its yield can
+  never reach anyone, so it goes to the treasury rather than sitting locked. This is
+  the only case where anyone can take reward money, and it cannot touch a day that had
+  even one staker.
 - **NFT-backed tokens are not supported.** The setting exists but is deliberately
   blocked rather than half-working.
 - **LP rewards depend on an indexer.** Content rewards can be checked by anyone

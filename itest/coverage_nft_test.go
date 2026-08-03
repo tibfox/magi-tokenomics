@@ -125,6 +125,13 @@ func TestCovNFT_EveryContractRejectsNFTKindAtInit(t *testing.T) {
 	}
 	for _, c := range seq {
 		call(t, ct, c.id, "init", nftPayload(c.tmpl, "0", ""), nftOwner, 0, true)
+		// C1 adopts the emission schedule the moment C2 exists. C7's init below refuses
+		// a stakeSource that is not accumulating drawdowns, because without them its
+		// yield denominator over-counts and part of every epoch is stranded.
+		if c.name == "c2-emission" {
+			call(t, ct, nftC1ID, "adoptSchedule",
+				fmt.Sprintf(`{"funder":"%s"}`, nftC2ID), nftOwner, 0, true)
+		}
 	}
 }
 
@@ -170,8 +177,11 @@ func TestCovNFT_FungibleEmissionAndClaimStillWorks(t *testing.T) {
 	fundC2Pool(t, ct, nftTokenID, nftC2ID, "500000000", 0)
 	call(t, ct, nftC2ID, "init", nftPayload(byName["c2-emission"], "0", ""), nftOwner, 0, true)
 	call(t, ct, nftC3ID, "init", nftPayload(byName["c3-distributor"], "0", ""), nftOwner, 0, true)
-	call(t, ct, nftC7ID, "init", nftPayload(byName["c7-yield"], "0", ""), nftOwner, 0, true)
+	// C1 before C7, and adopting the schedule in between: C7 refuses a stakeSource that
+	// is not accumulating drawdowns, so it can no longer be initialised first.
 	call(t, ct, nftC1ID, "init", nftPayload(byName["c1-staking"], "0", ""), nftOwner, 0, true)
+	call(t, ct, nftC1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, nftC2ID), nftOwner, 0, true)
+	call(t, ct, nftC7ID, "init", nftPayload(byName["c7-yield"], "0", ""), nftOwner, 0, true)
 
 	// C2 becomes the token owner so it can mint.
 	call(t, ct, nftTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, nftC2ID), nftOwner, 0, true)

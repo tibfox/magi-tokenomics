@@ -46,6 +46,9 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`, hosTok, hosC3, hosC7), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
 	call(t, &ct, hosC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hosreporter","reporterThreshold":"1","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
 	call(t, &ct, hosC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2, hosC1), owner, 0, true)
 	call(t, &ct, hosTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, hosC2), owner, 0, true)
 
@@ -128,6 +131,9 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
 	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, hosTok, hosC7), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
 	call(t, &ct, hosC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2, hosC1), owner, 0, true)
 
 	// give the attacker's CONTRACT real tokens and a real approval, so the composed

@@ -27,6 +27,9 @@ const (
 	kCooldown = "cfg_cooldown"
 	kTotal    = "total_staked"
 	kCkptN    = "ckpt_n"
+	kEpochLen = "cfg_epochLen"
+	kGenesis  = "cfg_genesis"
+	kFunder   = "cfg_funder"
 	maxClaim  = 20 // bound RC per claimUnstaked call
 )
 
@@ -112,11 +115,20 @@ func Init(payload *string) *string {
 		if se != field(payload, "epochLen") {
 			sdk.Abort("epochLen mismatch with funder — R15's cooldown check would be made against the wrong epoch")
 		}
-		sdk.StateSetObject("cfg_funder", fu)
+		sdk.StateSetObject(kFunder, fu)
+		// A funder at init means C2 already exists, so its genesis is knowable NOW and
+		// the separate adoptSchedule step is unnecessary. Adopting here keeps the
+		// drawdown accumulator armed from C1's very first block in that deploy order.
+		if sg := pickField(sch, "genesis"); sg != "" {
+			if _, err := strconv.ParseUint(sg, 10, 64); err != nil {
+				sdk.Abort("funder genesis is not a uint")
+			}
+			sdk.StateSetObject(kGenesis, sg)
+		}
 	}
 	// Store it either way, so the value R15 was checked against is auditable after
 	// deploy rather than parsed once and discarded.
-	sdk.StateSetObject("cfg_epochLen", field(payload, "epochLen"))
+	sdk.StateSetObject(kEpochLen, field(payload, "epochLen"))
 	// stakeFor allowlist (immutable)
 	for _, a := range splitComma(field(payload, "allow")) {
 		if a != "" {
@@ -195,6 +207,7 @@ func Unstake(payload *string) *string {
 	total := new(big.Int).Sub(getBig(kTotal), amt)
 	setBig(kTotal, total)
 	h := blockHeight()
+	noteDrawdown(c, cur, newStake, h) // BEFORE appendHist — see the function doc
 	appendHist(c, h, newStake)
 	appendCkpt(h, total)
 	// queue withdrawal
@@ -263,7 +276,10 @@ func ScheduleInfo(_ *string) *string {
 	// cannot be deployed", inventing a deploy-order requirement rather than reporting
 	// a fact. Empty fields say "nothing to check", which is what an uninitialised
 	// instance actually means.
-	return str(`{"epochLen":"` + getStr("cfg_epochLen") + `","cooldown":"` + getStr(kCooldown) + `"}`)
+	// `genesis` is empty until adoptSchedule runs. C7 reads it to confirm this C1 is
+	// actually accumulating drawdowns before it agrees to pay against them.
+	return str(`{"epochLen":"` + getStr(kEpochLen) + `","cooldown":"` + getStr(kCooldown) +
+		`","genesis":"` + getStr(kGenesis) + `"}`)
 }
 
 //go:wasmexport stakeOf
@@ -293,6 +309,92 @@ func TotalStakedAtHeight(payload *string) *string {
 	return str(`{"total":"` + ckptAt(h).String() + `"}`)
 }
 
+// adoptSchedule: {"funder"} — learn the emission schedule from C2, ONCE.
+//
+// C1 cannot take `genesis` at init. The deploy order is C1 → C2 → C7 (stake has to
+// exist before C2's genesis or epoch 0's yield is funded-but-unclaimable), and C2's
+// genesis defaults to its own deploy block — a value that does not exist yet while
+// C1 is being initialised. So the schedule is adopted afterwards, from the contract
+// that defines it, rather than copied by hand into two places.
+//
+// OWNER-ONLY, and that is load-bearing rather than ceremonial: `genesis` decides
+// which epoch bucket every drawdown lands in. A caller who could point C1 at a
+// fabricated C2 would shift the boundaries, shrink the drawdown for a real epoch,
+// and inflate C7's denominator against the payouts it has already made. Adoption is
+// also once-only for the same reason — re-anchoring live epochs would retroactively
+// invalidate every accumulator already written.
+//
+//go:wasmexport adoptSchedule
+func AdoptSchedule(payload *string) *string {
+	assertInit()
+	owner, caller := sdk.GetEnvKey("contract.owner"), sdk.GetEnvKey("msg.caller")
+	if owner == nil || caller == nil || *owner != *caller {
+		sdk.Abort("only contract owner can adopt the schedule")
+	}
+	if present(kGenesis) {
+		sdk.Abort("schedule already adopted (immutable: re-anchoring would invalidate every drawdown already recorded)")
+	}
+	fu := field(payload, "funder")
+	if fu == "" {
+		sdk.Abort("funder required")
+	}
+	validateAddr(fu)
+	sch := sdk.ContractCall(fu, "scheduleInfo", "", nil)
+	sg, se := pickField(sch, "genesis"), pickField(sch, "epochLen")
+	if sg == "" || se == "" {
+		sdk.Abort("funder scheduleInfo unavailable — init the emission contract (C2) first")
+	}
+	// The epochLen R15's cooldown check was made against must be the one the funder
+	// actually runs, or the drawdown buckets and C7's snapshots straddle each other.
+	if se != getStr(kEpochLen) {
+		sdk.Abort("funder epochLen disagrees with this contract's — R15's cooldown check was made against the wrong epoch length")
+	}
+	if _, err := strconv.ParseUint(sg, 10, 64); err != nil {
+		sdk.Abort("funder genesis is not a uint")
+	}
+	sdk.StateSetObject(kGenesis, sg)
+	sdk.StateSetObject(kFunder, fu)
+	return ok()
+}
+
+// minStakeSum: {"epoch"} → Σᵢ min(stakeᵢ(start), stakeᵢ(end)) — the EXACT denominator
+// C7 must divide an epoch's yield by. See the drawdown accumulator's doc for why
+// this cannot be derived from the running total alone.
+//
+// Reports "" when no schedule has been adopted, so C7 can refuse loudly at init
+// rather than quietly pay against a denominator that over-counts.
+//
+//go:wasmexport minStakeSum
+func MinStakeSum(payload *string) *string {
+	assertInit()
+	el := idx(kEpochLen)
+	if el == 0 || !present(kGenesis) {
+		return str(`{"total":""}`)
+	}
+	g := idx(kGenesis)
+	ep, err := strconv.ParseUint(field(payload, "epoch"), 10, 64)
+	if err != nil {
+		sdk.Abort("epoch required")
+	}
+	// `epoch` is caller-supplied, so g+ep*el must not be allowed to wrap: a wrapped
+	// start height lands on a real checkpoint and would report a confident, wrong
+	// denominator for an epoch that does not exist.
+	if ep > (^uint64(0)-g)/el {
+		sdk.Abort("epoch out of range")
+	}
+	start := g + ep*el
+	// Refuse while the epoch is still open: the drawdown is still moving, so an
+	// answer now could exceed the final one and over-pay whoever claimed early.
+	if start+el-1 >= blockHeight() {
+		sdk.Abort("epoch not fully elapsed")
+	}
+	s := new(big.Int).Sub(ckptAt(start), getBig("dd|"+strconv.FormatUint(ep, 10)))
+	if s.Sign() < 0 {
+		s = new(big.Int) // unreachable: drawdown ≤ Σa by construction
+	}
+	return str(`{"total":"` + s.String() + `"}`)
+}
+
 // ---- core: credit + checkpoints ------------------------------------------
 
 func credit(acct string, amt *big.Int) {
@@ -306,11 +408,13 @@ func creditFor(from, acct string, amt *big.Int) {
 }
 
 func applyCredit(acct string, amt *big.Int) {
-	newStake := new(big.Int).Add(getBig("stake|"+acct), amt)
+	old := getBig("stake|" + acct)
+	newStake := new(big.Int).Add(old, amt)
 	setBig("stake|"+acct, newStake)
 	total := new(big.Int).Add(getBig(kTotal), amt)
 	setBig(kTotal, total)
 	h := blockHeight()
+	noteDrawdown(acct, old, newStake, h) // BEFORE appendHist — see the function doc
 	appendHist(acct, h, newStake)
 	appendCkpt(h, total)
 }
@@ -334,6 +438,83 @@ func appendHist(acct string, h uint64, stake *big.Int) {
 func histAt(acct string, h uint64) *big.Int {
 	n := idx("hist_n|" + acct)
 	return searchVal(func(i uint64) *string { return sdk.StateGetObject("hist|" + acct + "|" + strconv.FormatUint(i, 10)) }, n, h)
+}
+
+// ---- the epoch drawdown accumulator (C7's exact denominator) --------------
+//
+// WHY THIS EXISTS. C7 pays each staker on min(stake at epoch start, stake at epoch
+// end), so that only stake held for the WHOLE epoch earns and neither joining late
+// nor leaving early is rewarded. That rule is right, but it leaves C7 without a
+// denominator it can compute. The correct one is
+//
+//	S = Σᵢ min(aᵢ, bᵢ)     aᵢ = stakeᵢ(epoch start), bᵢ = stakeᵢ(epoch end)
+//
+// and no contract can evaluate it directly: summing a PER-ACCOUNT minimum means
+// iterating every staker, which a contract cannot do. C7 therefore used to divide by
+// min(Σa, Σb) — the only figure it could see — which is ≥ S whenever stakers move in
+// BOTH directions during one epoch. Payouts then summed to less than `funded`, and
+// the shortfall was money no account could ever claim. Recovering it needed a
+// guardian sweep; the sweep could not be allowed to take a slow claimant's share, so
+// claims had to CLOSE first. That is the whole origin of C7's old ~10-day claim
+// deadline: not a policy anyone wanted, just a consequence of a denominator that
+// over-counted.
+//
+// The gap is attributable entirely to accounts that ENDED the epoch below where they
+// started, because min(aᵢ,bᵢ) = aᵢ - max(0, aᵢ-bᵢ). So
+//
+//	S = Σaᵢ - Σ max(0, aᵢ-bᵢ) = totalStakedAtHeight(start) - drawdown(epoch)
+//
+// and `drawdown` is ONE running number per epoch, maintainable in O(1) on each stake
+// change. C7 divides by the exact S, nothing is left unclaimable beyond truncation
+// dust, there is nothing worth sweeping, and claims never have to close.
+//
+// TELESCOPING. For an account's mutations at h₁<…<h_k inside one epoch, each update
+// adds (new contribution − old contribution), so the series collapses to the final
+// max(0, aᵢ−bᵢ) no matter how often it moved or in which direction.
+//
+// SAFE WHEN OFF. A standalone C1 with no adopted schedule tracks nothing, and
+// drawdown reads as 0 — which yields S = Σa, the old over-counting denominator. That
+// under-pays slightly and can never over-pay, so the degraded mode stays solvent.
+//
+// ORDER MATTERS: call this BEFORE appendHist. It reads aᵢ through histAt(acct,
+// start), and at h == start the account's own new entry would redefine aᵢ mid-update.
+func noteDrawdown(acct string, oldS, newS *big.Int, h uint64) {
+	el := idx(kEpochLen)
+	if el == 0 || !present(kGenesis) {
+		return // no schedule adopted — nothing to track (see SAFE WHEN OFF above)
+	}
+	g := idx(kGenesis)
+	if h < g {
+		return // before epoch 0 exists
+	}
+	ep := (h - g) / el
+	start := g + ep*el
+	// A mutation ON the epoch's first block DEFINES aᵢ rather than moving away from
+	// it, so its drawdown is 0 by construction — as was any earlier mutation in that
+	// same block. Skipping keeps the telescoping baseline at 0.
+	if h == start {
+		return
+	}
+	a := histAt(acct, start)
+	oldC, newC := drawdownOf(a, oldS), drawdownOf(a, newS)
+	if oldC.Cmp(newC) == 0 {
+		return
+	}
+	k := "dd|" + strconv.FormatUint(ep, 10)
+	d := new(big.Int).Add(getBig(k), new(big.Int).Sub(newC, oldC))
+	if d.Sign() < 0 {
+		d = new(big.Int) // defensive: a sum of non-negatives can never be negative
+	}
+	setBig(k, d)
+}
+
+// drawdownOf = max(0, a-s): how far below its epoch-start level a stake now sits.
+func drawdownOf(a, s *big.Int) *big.Int {
+	d := new(big.Int).Sub(a, s)
+	if d.Sign() < 0 {
+		return new(big.Int)
+	}
+	return d
 }
 
 func ckptAt(h uint64) *big.Int {

@@ -55,7 +55,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + repo
 
 # Deployment
 
-## Order matters — three constraints that are easy to get wrong
+## Order matters — four constraints that are easy to get wrong
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
@@ -70,6 +70,13 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + repo
      `min(stakeAt(epochStart), stakeAt(epochEnd))`, so stake that arrives *after*
      C2's init is zero at both boundaries of epoch 0 — that epoch's yield bucket
      ends up **funded but permanently unclaimable**.
+4. **Call `C1.adoptSchedule` after `C2.init`, before `C7.init`.** C1 has to know where
+   epoch boundaries fall in order to accumulate the per-epoch drawdown that gives C7
+   an exact yield denominator, and it cannot be told at its own init: the deploy order
+   puts C1 first (constraint 3), while C2's `genesis` defaults to a block that does not
+   exist yet. So it is adopted from C2 afterwards, owner-only and once. C7's init
+   refuses a `stakeSource` that skipped this, rather than silently paying against an
+   over-counting denominator — see [C7](#c7--staking-yield-trustless).
 
 ## Recommended sequence
 
@@ -85,6 +92,7 @@ C1.init                                 # staking must be live before anyone sta
   holders: token.approve -> C1 ; C1.stake
 <source>: token.approve -> contract:<C2>  # let C2 draw the pool
 C2.init  {"source": "<source>"}         # <- sets `genesis`; the clock starts here
+C1.adoptSchedule {"funder":"<C2>"}      # arms C1's exact-denominator accumulator
 C3.init / C5.init / C7.init             # they adopt C2's schedule automatically
 
 # token ownership is now OPTIONAL: C2 does not need it. Hand it over only if you
@@ -168,6 +176,38 @@ so nobody can influence the split. It adopts `genesis`/`epochLen` from the funde
 It credits `min(stakeAt(epochStart), stakeAt(epochEnd))`, so only stake held for the
 **whole** epoch earns. That is deliberate: it defeats flash-staking a single block
 around the snapshot.
+
+**`stakeSource` must have adopted the emission schedule first** — `C1.adoptSchedule`,
+after C2 is initialised. C7 refuses otherwise, and the reason is the one design point
+worth understanding here.
+
+The numerator is each staker's `min(aᵢ,bᵢ)`, so the denominator has to be
+`Σ min(aᵢ,bᵢ)` — and no contract can compute that, because summing a per-account
+minimum means iterating every staker. This is why C7 alone was affected: C3 and C5 are
+*handed* their denominator, accumulating `totalShares` from the entries as they are
+submitted, so theirs is the sum of its own numerators by construction. C7 has no
+reporter and had to derive it from aggregate state it could not decompose.
+
+C7 used to divide by `min(Σa, Σb)` instead — the closest figure it could reach
+unaided. That is *larger* whenever stakers move in both directions during an epoch
+(roughly `min(gross stake-ins, gross stake-outs)` larger), so payouts summed to less
+than `funded` and the difference
+belonged to nobody. Recovering it needed a guardian sweep, and a sweep cannot tell
+stranded money from money not yet collected — so claims had to close first. **That is
+where C7's old ~10-day claim deadline came from.**
+
+C1 now keeps one running number per epoch: the total by which accounts have fallen
+below their epoch-start level. `Σ min(aᵢ,bᵢ) = totalStakedAtHeight(start) − drawdown`,
+maintained in O(1) per stake change. The denominator is exact, payouts sum to `funded`
+less truncation dust, and every consequence unwinds:
+
+- **claims never expire** — content, LP and yield are now identical in this respect;
+- `sweepResidual` is gone. `sweepEmptyEpoch` replaces it and fires only when the
+  denominator is **zero** — nobody held stake across the epoch, so no claim can ever
+  succeed. That condition is settled history, needs no maturity wait, and cannot
+  strand a slow claimant.
+
+`treasury` still pins where `sweepEmptyEpoch` sends a stakerless epoch.
 
 ## NFT mode (not available)
 
@@ -260,9 +300,12 @@ guarded against explicitly:
 - **A vacuous assertion.** The pre-attack state snapshot is rejected if any baseline
   value is empty, since an empty baseline compares equal to anything.
 
-One honest limit: C7's `sweepResidual` has a 1000-block maturity, so a devnet run
-can never reach its authority check. Its guardian gate is proven in-process instead
-(`itest/security_regression_test.go`), and the devnet attack is labelled accordingly.
+One honest limit: C7's `sweepEmptyEpoch` refuses any epoch that has stakers, and it
+checks that before authority — so a devnet run, where stakers exist by construction,
+cannot reach its authority gate. That gate is proven in-process instead, on a
+genuinely stakerless epoch where a non-guardian moves nothing and the guardian
+recovers the full amount (`itest/security_regression_test.go`). The devnet attack is
+labelled accordingly rather than claiming more than it shows.
 
 ## Status
 

@@ -100,12 +100,25 @@ func Init(payload *string) *string {
 	// exists to protect. A C1 carrying a typo'd or stale epochLen otherwise enforces a
 	// cooldown that silently fails to cover an epoch.
 	//
-	// An older C1 without scheduleInfo reports nothing and is tolerated, so this cannot
-	// block a new C7 against an existing deployment.
-	if si := sdk.ContractCall(f(payload, "stakeSource"), "scheduleInfo", "", nil); si != nil {
-		if c1El := pickField(si, "epochLen"); c1El != "" && c1El != se {
-			sdk.Abort("stakeSource epochLen disagrees with the funder — C1's R15 cooldown check was made against the wrong epoch length")
-		}
+	si := sdk.ContractCall(f(payload, "stakeSource"), "scheduleInfo", "", nil)
+	if si == nil {
+		sdk.Abort("stakeSource scheduleInfo unavailable — C1 must be initialised before C7")
+	}
+	if c1El := pickField(si, "epochLen"); c1El != "" && c1El != se {
+		sdk.Abort("stakeSource epochLen disagrees with the funder — C1's R15 cooldown check was made against the wrong epoch length")
+	}
+	// C1 must ALSO be anchored to the same genesis, because that is what decides which
+	// epoch bucket each drawdown lands in — and the drawdown is what makes claim's
+	// denominator exact (see C1's accumulator doc). A C1 that never adopted a schedule
+	// reports an empty genesis and accumulates nothing; paying against it would divide
+	// by an over-counting total, strand part of every epoch, and bring back the claim
+	// deadline this design removed. Refusing at init is the only place that is visible.
+	c1G := pickField(si, "genesis")
+	if c1G == "" {
+		sdk.Abort("stakeSource has no adopted schedule — call C1.adoptSchedule({funder}) after C2 is initialised, or C7 cannot compute an exact denominator")
+	}
+	if c1G != sg {
+		sdk.Abort("stakeSource genesis disagrees with the funder — C1's drawdown buckets and C7's epoch snapshots would straddle each other")
 	}
 	set(kInit, "1")
 	return ok()
@@ -122,15 +135,13 @@ func PullFunding(payload *string) *string {
 	got := parseBig(pickField(res, "claimed"))
 	k := "funded|" + ep
 	setBig(k, new(big.Int).Add(getBig(k), got))
-	if !present("fundedAt|" + ep) {
-		// Anchor the claim window to when funding ACTUALLY arrived — the keeper
-		// pokes are permissionless and may lag past hEnd+grace (MEDIUM).
-		set("fundedAt|"+ep, strconv.FormatUint(blockHeight(), 10))
-	}
+	// `fundedAt` used to be recorded here to anchor the claim window against keeper
+	// lag. With no window to anchor, keeping it would be state written every epoch and
+	// read by nothing.
 	return str(`{"funded":"` + getBig(k).String() + `"}`)
 }
 
-// claim — self-serve pro-rata yield. {"epoch"} — payout = funded*stakeAt/totalAt.
+// claim — self-serve pro-rata yield. {"epoch"} — payout = funded*minStake/Σmin.
 //
 //go:wasmexport claim
 func Claim(payload *string) *string {
@@ -150,21 +161,27 @@ func Claim(payload *string) *string {
 	// Two epoch-boundary snapshots. Require the epoch FULLY elapsed so both are
 	// historical (blocks future-snapshot config abuse), and credit the MINIMUM
 	// stake over the epoch → only stakers committed for the WHOLE epoch earn,
-	// defeating the 1-block flash-stake capture (H3). Conservation holds:
-	// Σ min(start,end) ≤ Σ end = totalAt(hEnd) = denominator.
+	// defeating the 1-block flash-stake capture (H3).
+	//
+	// Conservation is now an EQUALITY rather than an inequality: the denominator below
+	// is Σᵢ min(aᵢ,bᵢ) exactly, so Σ payouts = funded·(Σ minᵢ)/(Σ minᵢ) = funded, less
+	// the ≤1 unit each payout loses to integer division. It used to be
+	// Σ min(aᵢ,bᵢ) ≤ min(Σa,Σb), and the slack in that ≤ was the unclaimable residue.
 	g, el := getU("cfg_genesis"), getU("cfg_epochLen")
 	hStart := g + pu(ep)*el
 	hEnd := g + (pu(ep)+1)*el - 1 // LAST block of the epoch, not the first of the next
 	if hEnd >= blockHeight() {
 		sdk.Abort("epoch not fully elapsed")
 	}
-	// Claims close at the same deadline the guardian may sweep from, so swept
-	// funds are genuinely unclaimable and Σclaims≤funded holds (HIGH-1).
-	if blockHeight() >= deadlineOf(ep, hEnd) {
-		sdk.Abort("claim window closed")
-	}
+	// NO CLAIM DEADLINE. Yield stays claimable forever, exactly like C3 and C5.
+	//
+	// There used to be one, ~10 days wide. It existed only to make the residual sweep
+	// safe: the denominator over-counted, every epoch left tokens no account could
+	// claim, and a guardian sweep to recover them could not be allowed to take a slow
+	// staker's share — so claims had to close first. The exact denominator below
+	// removes the residual, which removes the sweep, which removes the deadline.
 	if present("swept|" + ep) {
-		sdk.Abort("epoch residual already swept")
+		sdk.Abort("epoch was swept as unclaimable")
 	}
 	sStart := stakeAt(c, hStart)
 	sEnd := stakeAt(c, hEnd)
@@ -175,15 +192,17 @@ func Claim(payload *string) *string {
 	if stake.Sign() <= 0 {
 		sdk.Abort("not staked across the whole epoch")
 	}
-	// Denominator MUST use the same measure as the numerator: Σ min(aᵢ,bᵢ) ≤ min(Σa,Σb).
-	// Using only totalAt(hEnd) let a stake-at-end actor inflate the denominator and
-	// burn everyone else's yield (HIGH-1 regression from the R1 flash-stake fix).
-	total := totalAt(hEnd)
-	if ts := totalAt(hStart); ts.Cmp(total) < 0 {
-		total = ts
-	}
+	// THE EXACT DENOMINATOR: Σᵢ min(aᵢ,bᵢ), read from C1's drawdown accumulator.
+	//
+	// It must use the same measure as the numerator or the two do not reconcile. This
+	// previously used min(Σa,Σb) — the closest thing C7 could compute unaided — which
+	// is ≥ Σ min(aᵢ,bᵢ) whenever stakers move in both directions during an epoch. The
+	// difference was paid to nobody and needed a guardian sweep, and the sweep needed
+	// a claim deadline. C1 now maintains the exact figure in O(1), so payouts sum to
+	// `funded` less truncation dust and every one of those consequences disappears.
+	total := minStakeSum(ep)
 	if total.Sign() <= 0 {
-		sdk.Abort("no total stake at snapshot")
+		sdk.Abort("no stake held across the whole epoch")
 	}
 	payout := new(big.Int).Mul(funded, stake)
 	payout.Div(payout, total)
@@ -196,24 +215,40 @@ func Claim(payload *string) *string {
 	return str(`{"claimed":"` + payout.String() + `"}`)
 }
 
-// sweepResidual — guardian recovers only the UNCLAIMABLE residue of ONE epoch
-// (funded-paid), and only after a grace period. Never an arbitrary amount (HIGH-2).
+// sweepEmptyEpoch — guardian recovers an epoch that NOBODY can ever claim.
 //
-//go:wasmexport sweepResidual
-func SweepResidual(payload *string) *string {
+// This replaces the old sweepResidual, and the difference is what let the claim
+// deadline go. That one swept `funded-paid` after a grace period: an amount which is
+// only unclaimable because claims were forced shut at the same moment. This one fires
+// on a condition that is decided by history and can never change afterwards — no
+// stake was held across the whole epoch, so the denominator is zero and every
+// possible claim aborts. There is no slow claimant to strand, so no deadline is
+// needed, so claims stay open forever.
+//
+// Epochs that DO have stakers are never swept at all. Their leftover is truncation
+// dust, under one unit per claimant, and it stays in the contract exactly as C3's and
+// C5's does — nobody, including the guardian, can take it.
+//
+//go:wasmexport sweepEmptyEpoch
+func SweepEmptyEpoch(payload *string) *string {
 	assertInit()
 	ep := mustEpoch(payload)
 	g, el := getU("cfg_genesis"), getU("cfg_epochLen")
 	hEnd := g + (pu(ep)+1)*el - 1
-	if blockHeight() < deadlineOf(ep, hEnd) {
-		sdk.Abort("residual not mature yet")
+	if hEnd >= blockHeight() {
+		sdk.Abort("epoch not fully elapsed")
+	}
+	// The whole safety argument. Both snapshots are historical and immutable, so a
+	// zero here is permanent: no account can ever produce a payout for this epoch.
+	if minStakeSum(ep).Sign() != 0 {
+		sdk.Abort("epoch has stakers — their yield is claimable forever and is not sweepable")
 	}
 	funded := getBig("funded|" + ep)
 	residual := new(big.Int).Sub(funded, getBig("paid|"+ep))
 	if residual.Sign() <= 0 {
-		sdk.Abort("no residual for epoch")
+		sdk.Abort("nothing to sweep for epoch")
 	}
-	ak := "sweepres:" + ep
+	ak := "sweepempty:" + ep
 	if !auth.Authorize(guardianCfg(), "grd", ak, ak, mustCaller(), reqAuths()) {
 		return str(`{"swept":false}`)
 	}
@@ -286,25 +321,6 @@ func asset() adapter.Asset {
 	return adapter.Asset{Kind: k, Contract: getStr("cfg_token"), TokenId: getStr("cfg_tokenId")}
 }
 
-// deadlineOf: claims close (and the sweep opens) at
-// max(epoch end, funding arrival) + grace — so keeper lag never strands an epoch.
-func deadlineOf(ep string, hEnd uint64) uint64 {
-	anchor := hEnd
-	if fa := getU("fundedAt|" + ep); fa > anchor {
-		anchor = fa
-	}
-	return anchor + graceOf()
-}
-
-// graceOf: shared claim-deadline / sweep-maturity window.
-func graceOf() uint64 {
-	g := getU("cfg_epochLen") * 10
-	if g < 1000 {
-		g = 1000
-	}
-	return g
-}
-
 func hasPrefix(s, p string) bool {
 	if len(s) < len(p) {
 		return false
@@ -328,6 +344,22 @@ func totalAt(h uint64) *big.Int {
 	hs := strconv.FormatUint(h, 10)
 	return parseBig(pickField(sdk.ContractCall(getStr("cfg_stake"), "totalStakedAtHeight",
 		`{"height":"`+hs+`"}`, nil), "total"))
+}
+
+// minStakeSum = Σᵢ min(stakeᵢ(start), stakeᵢ(end)) for the epoch, from C1.
+//
+// An EMPTY answer is not zero and must never be treated as one: it means the C1 being
+// read has no adopted schedule and is accumulating nothing. Zero would abort claim as
+// "no stake held", which reads like an empty epoch rather than a misconfigured one.
+// C7's init already refuses such a C1, so reaching this is a swapped/upgraded
+// stakeSource — worth its own message rather than a misleading one.
+func minStakeSum(ep string) *big.Int {
+	raw := pickField(sdk.ContractCall(getStr("cfg_stake"), "minStakeSum",
+		`{"epoch":"`+ep+`"}`, nil), "total")
+	if raw == "" {
+		sdk.Abort("stakeSource reports no adopted schedule — it cannot supply an exact denominator")
+	}
+	return parseBig(raw)
 }
 func blockHeight() uint64 {
 	h := sdk.GetEnvKey("block.height")

@@ -35,6 +35,9 @@ func TestSec_BoundaryJoinerCannotDilute(t *testing.T) {
 	call(t, &ct, rgC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, rgC7), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, rgC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, rgC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, rgC1), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"10000"}`, owner, 0, true)
@@ -162,9 +165,14 @@ func TestSec_StaleRescueCannotDivertLiveEpoch(t *testing.T) {
 	call(t, &ct, rgC3, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 1050, true)
 }
 
-// FINAL/HIGH-1: C7 sweepResidual must not steal still-claimable yield. Claims close
-// at the same deadline the sweep opens, so swept funds are genuinely unclaimable
-// and Σclaims ≤ funded holds.
+// FINAL/HIGH-1: the C7 sweep must never take still-claimable yield.
+//
+// The mechanism changed and the new one is strictly stronger. It used to hold by
+// TIMING — claims closed at exactly the block the sweep opened, so nothing could be
+// both claimable and sweepable, at the cost of a ~10-day deadline on every staker.
+// Now it holds by CONSTRUCTION: the sweep only fires on an epoch whose denominator is
+// zero, meaning nobody held stake across it and no claim can ever succeed. Claims
+// themselves never expire, which is what this test now pins.
 func TestSec_C7SweepCannotStealClaimableYield(t *testing.T) {
 	const fC1, fC7 = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9", "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
 	os.RemoveAll("data/badger")
@@ -179,6 +187,9 @@ func TestSec_C7SweepCannotStealClaimableYield(t *testing.T) {
 	call(t, &ct, fC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, fC7), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, fC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, fC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, fC1), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"600"}`, owner, 0, true)
@@ -189,12 +200,68 @@ func TestSec_C7SweepCannotStealClaimableYield(t *testing.T) {
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 2, true)
 	call(t, &ct, fC7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 2, true)
 
-	// too early to sweep — the yield is still claimable
-	call(t, &ct, fC7, "sweepResidual", `{"epoch":"0"}`, "hive:guardian", 2, false)
-	// after the deadline the guardian may sweep the (now unclaimable) residual...
-	call(t, &ct, fC7, "sweepResidual", `{"epoch":"0"}`, "hive:guardian", 5000, true)
-	// ...and a late claimer must NOT also be paid (would break Σclaims ≤ funded)
-	call(t, &ct, fC7, "claim", `{"epoch":"0"}`, "hive:alice", 5001, false)
+	// Alice held 600 across the whole of epoch 0, so the epoch HAS a claimant and the
+	// sweep must refuse. Not merely "not yet" — at every height, including absurdly
+	// late ones, because there is no longer any deadline past which her yield becomes
+	// takeable. Under the old design the 5000 call succeeded and took it.
+	for _, h := range []uint64{2, 5000, 500000} {
+		call(t, &ct, fC7, "sweepEmptyEpoch", `{"epoch":"0"}`, "hive:guardian", h, false)
+	}
+
+	// ...and Alice is still paid, 500,000 blocks after the epoch closed. She is the
+	// only staker, so the exact denominator pays her the ENTIRE epoch with no residue:
+	// emission = baseAnnual*epochLen/blocksPerYear = 1000000*1/10, all of it to yield.
+	res := call(t, &ct, fC7, "claim", `{"epoch":"0"}`, "hive:alice", 500001, true)
+	assert.Contains(t, res.Ret, `"100000"`,
+		"a sole staker must receive the whole epoch, however late the claim: "+res.Ret)
+
+	// Σclaims ≤ funded still holds: the second claim is refused as already-claimed,
+	// not as out-of-time.
+	call(t, &ct, fC7, "claim", `{"epoch":"0"}`, "hive:alice", 500002, false)
+}
+
+// The other half of the sweep contract: an epoch NOBODY can claim must still be
+// recoverable, or funding for a stakerless epoch is locked away forever.
+//
+// This is the only case the sweep now covers, and it needs no deadline because the
+// condition is decided by history: both snapshots are in the past, the denominator is
+// zero, and no future action can make a claim succeed.
+func TestSec_C7SweepRecoversAnEpochNobodyCanClaim(t *testing.T) {
+	const eC1, eC7 = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9", "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
+	os.RemoveAll("data/badger")
+	ct := test_utils.NewContractTest()
+	t.Cleanup(func() { ct.DataLayer.Stop() })
+	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
+	ct.RegisterContract(eC1, owner, read("../c1-staking/artifacts/main.wasm"))
+	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
+	ct.RegisterContract(eC7, owner, read("../c7-yield/artifacts/main.wasm"))
+
+	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
+	call(t, &ct, eC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
+	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, eC7), owner, 0, true)
+	call(t, &ct, eC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, eC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, eC1), owner, 0, true)
+	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
+
+	// NOBODY ever stakes. Epoch 0 is funded and its denominator is zero.
+	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 2, true)
+	call(t, &ct, eC7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 2, true)
+	call(t, &ct, eC7, "claim", `{"epoch":"0"}`, "hive:alice", 2, false)
+
+	// An outsider must not be able to take it — the sweep is still guardian-gated.
+	call(t, &ct, eC7, "sweepEmptyEpoch", `{"epoch":"0"}`, "hive:mallory", 3, false)
+	assert.EqualValues(t, 0, c17TokenBal(t, &ct, "hive:treasury", 3),
+		"a non-guardian sweep must move nothing")
+
+	// The guardian recovers it to the PINNED treasury, immediately — no maturity wait,
+	// because no amount of waiting could ever produce a claimant.
+	call(t, &ct, eC7, "sweepEmptyEpoch", `{"epoch":"0"}`, "hive:guardian", 3, true)
+	assert.EqualValues(t, 100000, c17TokenBal(t, &ct, "hive:treasury", 3),
+		"the whole stakerless epoch must reach the treasury")
+
+	// ...and only once.
+	call(t, &ct, eC7, "sweepEmptyEpoch", `{"epoch":"0"}`, "hive:guardian", 4, false)
 }
 
 // FINAL/HIGH-2: a guardian must not escape a spent veto by re-queueing the same op.
@@ -242,6 +309,9 @@ func TestSec_KeeperLagCannotStrandEpoch(t *testing.T) {
 	call(t, &ct, kC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, kC7), owner, 0, true)
+	// C7 requires its stakeSource to have adopted the emission schedule:
+	// without it C1 records no drawdowns and the yield denominator over-counts.
+	call(t, &ct, kC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, kC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, kC1), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"600"}`, owner, 0, true)

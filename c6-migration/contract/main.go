@@ -50,7 +50,7 @@ func Init(payload *string) *string {
 	// leave ONLY through airdropBatch, bounded by maxAirdrop. So every token above the
 	// cap, every token under it that the snapshot turns out not to need, and every
 	// entry the ledger-address filter skips is LOCKED IN THIS CONTRACT FOREVER. C3/C5
-	// have sweepUnallocated and C7 has sweepResidual; C6, which holds the largest
+	// have sweepUnallocated and C7 has sweepEmptyEpoch; C6, which holds the largest
 	// single balance at launch, had no exit at all.
 	//
 	// Left optional on purpose. A sweep is also a clawback capability, and a launch
