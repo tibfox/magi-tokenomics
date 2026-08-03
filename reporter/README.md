@@ -325,12 +325,8 @@ once voting has closed. Every vote is counted exactly once, by its weight. Rewar
 lag one payout period behind posting, exactly as they do natively on Hive and in
 SCOT.
 
-**This is not configurable, deliberately.** Scoring a post in the epoch it was
-*posted* in would pay sooner, and the trade is not worth it: voting stays open for 7
-days, so a post made in the last minute of an epoch would be scored with almost none
-of its votes while one made at the start got a full epoch's worth, and every vote
-cast after the boundary would be counted by nobody, ever. A config carrying an
-`attribution` key is rejected at load rather than ignored.
+This is not configurable. A config carrying an `attribution` key is rejected at load
+rather than ignored.
 
 Because membership is decided by payout time but Hive's feed can only be paged by
 creation time, the reporter walks a creation window shifted back one payout period

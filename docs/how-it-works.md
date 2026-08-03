@@ -197,13 +197,8 @@ Same knob, opposite cultures. Pick deliberately.
 Hive keeps voting open on a post for 7 days, and **a post is always scored after that
 voting has finished** — never before. Every vote counts exactly once, by its weight.
 
-This is not a setting. Scoring a post while it is still collecting votes would mean a
-post made near the end of a day is judged before most of its votes arrive, so late
-posters are systematically underpaid, and every vote cast after the snapshot is
-counted by nobody, ever. It is not worth offering.
-
-The cost is that rewards arrive about a week after posting — the same lag Hive itself
-has. Your first payout day is therefore roughly a week after launch.
+Rewards therefore arrive about a week after posting — the same lag Hive itself has.
+Your first payout day is roughly a week after launch.
 
 ### The LP rewards
 
