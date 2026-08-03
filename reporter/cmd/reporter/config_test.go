@@ -196,7 +196,6 @@ func TestValidate_LPModeNeedsIndexerNotContentSettings(t *testing.T) {
 		// deliberately strip everything content-specific
 		c.Source.Tag = ""
 		c.Source.Weight = ""
-		c.Source.Attribution = ""
 		c.Shares.AuthorCurve = ""
 		c.Shares.CurationCurve = ""
 		return c
@@ -338,5 +337,30 @@ func TestValidate_PageMustFitTheRcLimit(t *testing.T) {
 	c.Submit.RcLimit = 2000
 	if err := c.Validate(); err != nil {
 		t.Fatalf("a small page inside a small rc limit must be accepted: %v", err)
+	}
+}
+
+// A post is ALWAYS scored after its voting period ends. There is no setting for
+// scoring it earlier, and a config carrying one must fail loudly rather than be
+// ignored: a silently-dropped `attribution` key would leave an operator believing
+// they had configured something that does not exist.
+func TestConfig_AttributionIsNotConfigurable(t *testing.T) {
+	raw := `{
+	  "vsc":       {"api":"http://x","net_id":"vsc-testnet"},
+	  "contracts": {"distributor":"vsc1c3"},
+	  "epoch":     {"len":100},
+	  "source":    {"tag":"t","attribution":"created"},
+	  "submit":    {"rc_limit":60000}
+	}`
+	f := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(f, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(f)
+	if err == nil {
+		t.Fatal("a config setting `attribution` must be rejected — the option does not exist")
+	}
+	if !strings.Contains(err.Error(), "attribution") {
+		t.Fatalf("the error must name the offending key so it is fixable, got: %v", err)
 	}
 }

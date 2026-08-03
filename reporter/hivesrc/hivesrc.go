@@ -104,7 +104,7 @@ type RawPost struct {
 	Depth    int    `json:"depth"`
 
 	// PayoutAt is when voting closes (creation + 7 days on Hive). It is the
-	// authoritative field for AttributeCashout — do not recompute it from Created.
+	// authoritative field for payout attribution — do not recompute it from Created.
 	PayoutAt string `json:"payout_at"`
 
 	// IsPaidout reports that voting has finished and the vote set is final.
@@ -141,44 +141,30 @@ type Options struct {
 	// ExcludeAccounts are dropped entirely (SCOT muting / app filters).
 	ExcludeAccounts []string
 
-	// Attribution decides which epoch a post belongs to. See the Attribute* consts.
-	Attribution Attribution
-
-	// Since/Until bound the CREATION-time window used to walk the feed. Under
-	// AttributeCashout the caller shifts this back by the payout period, because
-	// the feed can only be paged by creation time.
+	// Since/Until bound the CREATION-time window used to walk the feed. The caller
+	// shifts this back by the payout period, because the feed can only be paged by
+	// creation time while membership is decided by payout time.
 	//
 	// Zero values disable the filter (useful for tests); the CLI always sets both.
 	Since, Until time.Time
 
 	// PayoutSince/PayoutUntil bound the epoch by PAYOUT time and are the actual
-	// membership test under AttributeCashout. Ignored under AttributeCreated.
+	// membership test.
 	PayoutSince, PayoutUntil time.Time
 }
 
-// Attribution selects which epoch a post's rewards land in.
-type Attribution string
-
-const (
-	// AttributeCashout scores a post in the epoch its PAYOUT falls in — i.e. when
-	// Hive closes voting, 7 days after posting. This is what SCOT and Hive itself
-	// do, and it is the default because AttributeCreated is quietly unfair:
-	//
-	//	Voting stays open for 7 days, so a post created in the last minute of an
-	//	epoch would be scored with almost none of its votes, while one created at
-	//	the start gets a full epoch's worth. Every vote cast after the snapshot
-	//	would be counted by nobody, ever.
-	//
-	// The cost is that rewards lag one payout period behind posting, exactly as
-	// they do natively on Hive.
-	AttributeCashout Attribution = "cashout"
-
-	// AttributeCreated scores a post in the epoch it was created in, using whatever
-	// votes exist at the cutoff. Rewards are immediate, but late votes are lost and
-	// late posters are systematically underpaid. Offered for tenants who prefer
-	// promptness over accuracy; it is not the default.
-	AttributeCreated Attribution = "created"
-)
+// A POST IS SCORED IN THE EPOCH ITS PAYOUT FALLS IN — i.e. once Hive has closed
+// voting, seven days after posting. This is what SCOT and Hive itself do, and it is
+// the only mode offered, deliberately.
+//
+// Scoring a post in the epoch it was CREATED in would be prompter and is quietly
+// unfair: voting stays open for seven days, so a post created in the last minute of
+// an epoch would be scored with almost none of its votes while one created at the
+// start gets a full epoch's worth, and every vote cast after the snapshot would be
+// counted by nobody, ever. There is no configuration for that.
+//
+// The cost is that rewards lag one payout period behind posting, exactly as they do
+// natively on Hive.
 
 // PayoutPeriod is how long Hive keeps voting open on a post.
 const PayoutPeriod = 7 * 24 * time.Hour
@@ -201,11 +187,11 @@ func Collect(tr Transport, opt Options) ([]sharecore.Post, error) {
 		if p.Author == "" || p.Permlink == "" || excl["hive:"+p.Author] {
 			continue
 		}
-		// Under AttributeCashout the whole point is that voting has CLOSED, so a post
+		// The whole point of payout attribution is that voting has CLOSED, so a post
 		// that has not paid out yet means the reporter ran before the epoch's posts
 		// finished. Refuse rather than freeze a partial vote set into a finalized
 		// epoch; `run` is idempotent, so re-running shortly after fixes it.
-		if opt.Attribution == AttributeCashout && !p.IsPaidout {
+		if !p.IsPaidout {
 			return nil, fmt.Errorf(
 				"@%s/%s has not paid out yet (payout_at %s) — voting is still open, so this "+
 					"epoch cannot be scored yet. Re-run once its posts have paid out",
@@ -307,10 +293,10 @@ func FetchPosts(tr Transport, opt Options) ([]RawPost, error) {
 			if !opt.Since.IsZero() && created.Before(opt.Since) {
 				continue // older than this epoch; may still be a pinned outlier
 			}
-			// Under AttributeCashout the creation window above only bounds the
+			// The creation window above only bounds the
 			// WALK. Membership is decided by payout time, which is authoritative
 			// and need not be exactly created+7d.
-			if opt.Attribution == AttributeCashout && !opt.PayoutSince.IsZero() {
+			if !opt.PayoutSince.IsZero() {
 				paid, perr := ParseHiveTime(p.PayoutAt)
 				if perr != nil {
 					return nil, fmt.Errorf("post @%s/%s payout_at: %w", p.Author, p.Permlink, perr)
@@ -357,15 +343,11 @@ func FetchPosts(tr Transport, opt Options) ([]RawPost, error) {
 //
 // A zero cutoff means "no cutoff" and is only for tests.
 func VoteCutoff(p RawPost, opt Options) (time.Time, error) {
-	if opt.Attribution == AttributeCashout {
-		if p.PayoutAt == "" {
-			return time.Time{}, fmt.Errorf(
-				"@%s/%s has no payout_at, so its vote set cannot be frozen", p.Author, p.Permlink)
-		}
-		return ParseHiveTime(p.PayoutAt)
+	if p.PayoutAt == "" {
+		return time.Time{}, fmt.Errorf(
+			"@%s/%s has no payout_at, so its vote set cannot be frozen", p.Author, p.Permlink)
 	}
-	// AttributeCreated: freeze at the epoch boundary instead.
-	return opt.Until, nil
+	return ParseHiveTime(p.PayoutAt)
 }
 
 // MapPost converts one raw post + its votes into sharecore form. Exported so the

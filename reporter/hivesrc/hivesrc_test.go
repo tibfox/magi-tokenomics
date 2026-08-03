@@ -16,7 +16,7 @@ func (f fakeStake) StakeAtHeight(acct string, h uint64) (*big.Int, error) {
 // Vote ordering must come from vote TIME, not the node's response order, or two
 // reporters querying different nodes would compute different curation slices.
 func TestMapPost_OrdersVotesByTimeNotResponseOrder(t *testing.T) {
-	p := RawPost{Author: "bob", Permlink: "hello"}
+	p := RawPost{Author: "bob", Permlink: "hello", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
 	votes := []RawVote{
 		{Voter: "zed", Rshares: "300", Percent: 10000, Time: "2026-01-01T00:00:30"},
 		{Voter: "amy", Rshares: "100", Percent: 10000, Time: "2026-01-01T00:00:10"},
@@ -43,10 +43,10 @@ func TestMapPost_OrdersVotesByTimeNotResponseOrder(t *testing.T) {
 // Downvotes (negative rshares) must clamp to zero — the contract cannot subtract
 // shares, so downvote policy has to arrive as NET non-negative weights.
 func TestMapPost_DownvotesClampToZeroAndAreDropped(t *testing.T) {
-	p := RawPost{Author: "bob", Permlink: "x"}
+	p := RawPost{Author: "bob", Permlink: "x", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
 	votes := []RawVote{
-		{Voter: "good", Rshares: "500", Percent: 10000, Time: "t1"},
-		{Voter: "flag", Rshares: "-900", Percent: -10000, Time: "t2"},
+		{Voter: "good", Rshares: "500", Percent: 10000, Time: "2026-01-01T00:00:01"},
+		{Voter: "flag", Rshares: "-900", Percent: -10000, Time: "2026-01-01T00:00:02"},
 	}
 	got, _ := MapPost(p, votes, Options{Mode: WeightHiveRshares}, map[string]bool{})
 	if len(got.Votes) != 1 || got.Votes[0].Voter != "hive:good" {
@@ -73,10 +73,10 @@ func TestParseRshares_AcceptsStringAndNumber(t *testing.T) {
 // token governs curation power rather than HIVE stake.
 func TestMapPost_TokenStakeMode(t *testing.T) {
 	st := fakeStake{m: map[string]int64{"hive:whale": 10000, "hive:minnow": 100}}
-	p := RawPost{Author: "bob", Permlink: "x"}
+	p := RawPost{Author: "bob", Permlink: "x", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
 	votes := []RawVote{
-		{Voter: "whale", Rshares: "1", Percent: 10000, Time: "t1"},      // 100%
-		{Voter: "minnow", Rshares: "999999", Percent: 5000, Time: "t2"}, // 50%
+		{Voter: "whale", Rshares: "1", Percent: 10000, Time: "2026-01-01T00:00:01"},      // 100%
+		{Voter: "minnow", Rshares: "999999", Percent: 5000, Time: "2026-01-01T00:00:02"}, // 50%
 	}
 	got, err := MapPost(p, votes, Options{Mode: WeightTokenStake, Stake: st, SnapshotHeight: 10}, map[string]bool{})
 	if err != nil {
@@ -93,10 +93,10 @@ func TestMapPost_TokenStakeMode(t *testing.T) {
 
 func TestMapPost_ExcludedAccountsDropped(t *testing.T) {
 	excl := map[string]bool{"hive:muted": true}
-	p := RawPost{Author: "bob", Permlink: "x"}
+	p := RawPost{Author: "bob", Permlink: "x", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
 	votes := []RawVote{
-		{Voter: "muted", Rshares: "500", Percent: 10000, Time: "t1"},
-		{Voter: "ok", Rshares: "100", Percent: 10000, Time: "t2"},
+		{Voter: "muted", Rshares: "500", Percent: 10000, Time: "2026-01-01T00:00:01"},
+		{Voter: "ok", Rshares: "100", Percent: 10000, Time: "2026-01-01T00:00:02"},
 	}
 	got, _ := MapPost(p, votes, Options{Mode: WeightHiveRshares}, excl)
 	if len(got.Votes) != 1 || got.Votes[0].Voter != "hive:ok" {
@@ -106,11 +106,11 @@ func TestMapPost_ExcludedAccountsDropped(t *testing.T) {
 
 // End-to-end determinism through the mapping layer into sharecore.
 func TestMapping_FeedsDeterministicCore(t *testing.T) {
-	p := RawPost{Author: "bob", Permlink: "x"}
+	p := RawPost{Author: "bob", Permlink: "x", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
 	votes := []RawVote{
-		{Voter: "c", Rshares: "300", Percent: 10000, Time: "t3"},
-		{Voter: "a", Rshares: "100", Percent: 10000, Time: "t1"},
-		{Voter: "b", Rshares: "200", Percent: 10000, Time: "t2"},
+		{Voter: "c", Rshares: "300", Percent: 10000, Time: "2026-01-01T00:00:03"},
+		{Voter: "a", Rshares: "100", Percent: 10000, Time: "2026-01-01T00:00:01"},
+		{Voter: "b", Rshares: "200", Percent: 10000, Time: "2026-01-01T00:00:02"},
 	}
 	cfg := sharecore.Config{AuthorRewardBps: 5000, AuthorCurveNum: 1, AuthorCurveDen: 1,
 		CurationCurveNum: 1, CurationCurveDen: 2}

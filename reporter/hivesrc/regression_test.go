@@ -117,7 +117,7 @@ func TestRegression_OrganicOlderPageStopsTheWalk(t *testing.T) {
 // mainnet: @tibfox/blrdbeha, created 2023-03-09 and paid out 2023-03-16, still
 // returns all 287 votes with time/percent/rshares 1234 days later.
 //
-// So a paid-out post is the NORMAL input under AttributeCashout, not an error.
+// So a paid-out post is the NORMAL input, not an error.
 func TestRegression_PaidOutPostsAreScorable(t *testing.T) {
 	p := post("tibfox", "blrdbeha", "2023-03-09T21:19:06")
 	p.IsPaidout = true
@@ -133,7 +133,7 @@ func TestRegression_PaidOutPostsAreScorable(t *testing.T) {
 	until, _ := ParseHiveTime("2023-03-16T23:59:59")
 
 	got, err := Collect(tr, Options{
-		Tag: "x", Mode: WeightHiveRshares, Attribution: AttributeCashout,
+		Tag: "x", Mode: WeightHiveRshares,
 		Since: mustTime("2023-03-09T00:00:00"), Until: mustTime("2023-03-09T23:59:59"),
 		PayoutSince: since, PayoutUntil: until,
 	})
@@ -159,7 +159,7 @@ func TestRegression_VotesAfterPayoutAreExcluded(t *testing.T) {
 		{Voter: "intime", Rshares: "100", Percent: 10000, Time: "2023-03-10T08:08:06"},
 		{Voter: "late", Rshares: "999999", Percent: 10000, Time: "2023-03-20T21:20:30"}, // after payout
 	}
-	opt := Options{Mode: WeightHiveRshares, Attribution: AttributeCashout}
+	opt := Options{Mode: WeightHiveRshares}
 
 	got, err := MapPost(p, votes, opt, map[string]bool{})
 	if err != nil {
@@ -170,32 +170,12 @@ func TestRegression_VotesAfterPayoutAreExcluded(t *testing.T) {
 	}
 }
 
-// Under AttributeCreated the cutoff is the epoch boundary instead, so the same
-// immutability holds for tenants who choose promptness over completeness.
-func TestRegression_CreatedModeCutsOffAtEpochEnd(t *testing.T) {
-	p := post("a", "p", "2026-01-02T00:10:00")
-	votes := []RawVote{
-		{Voter: "inside", Rshares: "100", Percent: 10000, Time: "2026-01-02T12:00:00"},
-		{Voter: "after", Rshares: "500", Percent: 10000, Time: "2026-01-03T05:00:00"},
-	}
-	opt := Options{
-		Mode: WeightHiveRshares, Attribution: AttributeCreated,
-		Since: mustTime("2026-01-02T00:00:00"), Until: mustTime("2026-01-02T23:59:59"),
-	}
-	got, err := MapPost(p, votes, opt, map[string]bool{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Votes) != 1 || got.Votes[0].Voter != "hive:inside" {
-		t.Fatalf("votes after the epoch end must not count in created mode: %+v", got.Votes)
-	}
-}
-
-// Cashout mode exists to fix a real unfairness: with created-time attribution a
-// post made near the end of an epoch is scored before its votes arrive. This pins
-// the difference concretely.
-func TestRegression_LatePosterNotPenalisedUnderCashout(t *testing.T) {
-	// posted 10 minutes before the epoch closed; most votes land the next day
+// A post made near the end of an epoch must NOT be penalised for it. Scoring on
+// payout means the vote set is whatever existed when Hive closed voting, so votes
+// arriving on later days still count — which is the whole reason a post is never
+// scored before its voting period ends.
+func TestRegression_LatePosterIsNotPenalised(t *testing.T) {
+	// posted 10 minutes before the epoch closed; most votes land on later days
 	p := post("latecomer", "post", "2026-01-02T23:50:00")
 	p.IsPaidout = true
 	p.PayoutAt = "2026-01-09T23:50:00"
@@ -204,25 +184,21 @@ func TestRegression_LatePosterNotPenalisedUnderCashout(t *testing.T) {
 		{Voter: "v2", Rshares: "900", Percent: 10000, Time: "2026-01-03T09:00:00"},
 		{Voter: "v3", Rshares: "900", Percent: 10000, Time: "2026-01-04T09:00:00"},
 	}
-
-	created, err := MapPost(p, votes, Options{
-		Mode: WeightHiveRshares, Attribution: AttributeCreated,
-		Since: mustTime("2026-01-02T00:00:00"), Until: mustTime("2026-01-02T23:59:59"),
-	}, map[string]bool{})
+	got, err := MapPost(p, votes, Options{Mode: WeightHiveRshares}, map[string]bool{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cashout, err := MapPost(p, votes, Options{
-		Mode: WeightHiveRshares, Attribution: AttributeCashout,
-	}, map[string]bool{})
-	if err != nil {
-		t.Fatal(err)
+	if len(got.Votes) != 3 {
+		t.Fatalf("all three votes must count, got %d — scoring a post before its "+
+			"voting period ends is what would drop the later two", len(got.Votes))
 	}
-	if len(created.Votes) != 1 {
-		t.Fatalf("created mode should see only the one in-epoch vote, got %d", len(created.Votes))
+	// ...and each is weighted, not merely counted: v2/v3 carry 9x v1's weight.
+	total := new(big.Int)
+	for _, v := range got.Votes {
+		total.Add(total, v.Weight)
 	}
-	if len(cashout.Votes) != 3 {
-		t.Fatalf("cashout mode should see all three votes, got %d", len(cashout.Votes))
+	if total.String() != "1900" {
+		t.Fatalf("votes must contribute their WEIGHT (100+900+900=1900), got %s", total)
 	}
 }
 
@@ -236,7 +212,7 @@ func TestRegression_UnpaidPostUnderCashoutIsRefused(t *testing.T) {
 	tr := &fakeTransport{feeds: [][]RawPost{{p}, {}}}
 
 	_, err := Collect(tr, Options{
-		Tag: "x", Mode: WeightHiveRshares, Attribution: AttributeCashout,
+		Tag: "x", Mode: WeightHiveRshares,
 		Since: mustTime("2026-07-25T00:00:00"), Until: mustTime("2026-07-25T23:59:59"),
 	})
 	if err == nil {

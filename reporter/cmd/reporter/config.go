@@ -98,13 +98,11 @@ type Config struct {
 	Source struct {
 		Tag   string `json:"tag"`
 		Limit int    `json:"limit"`
-		// Attribution: "cashout" (default) scores a post in the epoch its Hive
-		// payout falls in, so every vote is counted exactly once; "created" scores
-		// it in the epoch it was posted in, which is prompter but loses every vote
-		// cast after the snapshot. See hivesrc.Attribution.
-		Attribution string   `json:"attribution"`
-		Weight      string   `json:"weight"` // hive_rshares | token_stake
-		Exclude     []string `json:"exclude"`
+		// A post is ALWAYS scored in the epoch its Hive payout falls in, once voting
+		// has closed, so every vote is counted exactly once by its weight. There is
+		// no setting for scoring earlier — see the rule at the top of hivesrc.
+		Weight  string   `json:"weight"` // hive_rshares | token_stake
+		Exclude []string `json:"exclude"`
 		// Kind selects the data source: "content" (default) reads Hive posts/votes
 		// for C3; "lp" replays liquidity events from the indexer for C5. The rest of
 		// the pipeline — canonicalisation, pagination, submission, Attest — is shared.
@@ -165,9 +163,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Source.Weight == "" {
 		c.Source.Weight = string(hivesrc.WeightHiveRshares)
-	}
-	if c.Source.Attribution == "" {
-		c.Source.Attribution = string(hivesrc.AttributeCashout)
 	}
 	if c.Source.Limit == 0 {
 		c.Source.Limit = 1000
@@ -290,12 +285,6 @@ func (c *Config) validateSource() error {
 			return fmt.Errorf("source.weight must be %q or %q, got %q",
 				hivesrc.WeightHiveRshares, hivesrc.WeightTokenStake, c.Source.Weight)
 		}
-		switch hivesrc.Attribution(c.Source.Attribution) {
-		case hivesrc.AttributeCashout, hivesrc.AttributeCreated:
-		default:
-			return fmt.Errorf("source.attribution must be %q or %q, got %q",
-				hivesrc.AttributeCashout, hivesrc.AttributeCreated, c.Source.Attribution)
-		}
 		if c.Shares.AuthorRewardBps < 0 || c.Shares.AuthorRewardBps > 10000 {
 			return fmt.Errorf("shares.author_reward_bps must be 0..10000, got %d", c.Shares.AuthorRewardBps)
 		}
@@ -357,11 +346,10 @@ const ExampleConfig = `{
   },
   "epoch":  { "genesis": 0, "len": 28800 },
   "source": {
-    "tag":         "yourtribe",
-    "limit":       1000,
-    "attribution": "cashout",
-    "weight":      "hive_rshares",
-    "exclude":     []
+    "tag":     "yourtribe",
+    "limit":   1000,
+    "weight":  "hive_rshares",
+    "exclude": []
   },
   "shares": {
     "author_reward_bps": 5000,

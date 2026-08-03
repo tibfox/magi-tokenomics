@@ -54,8 +54,7 @@ func TestLive_FetchAndCompute(t *testing.T) {
 	// window one payout period earlier (exactly what the CLI does).
 	posts, err := Collect(tr, Options{
 		Tag: tag, Limit: 15, Mode: WeightHiveRshares,
-		Attribution: AttributeCashout,
-		Since:       win.StartTime, Until: win.EndTime,
+		Since: win.StartTime, Until: win.EndTime,
 		PayoutSince: win.StartTime.Add(PayoutPeriod),
 		PayoutUntil: win.EndTime.Add(PayoutPeriod),
 	})

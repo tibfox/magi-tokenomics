@@ -166,8 +166,19 @@ func TestParseHiveTime(t *testing.T) {
 
 // ---- FetchPosts ----------------------------------------------------------
 
+// post builds a fixture that is ALREADY PAID OUT, because that is the only kind the
+// reporter ever scores: a post is attributed to the epoch its payout falls in, so a
+// post still taking votes has no frozen vote set and is refused. Tests that need an
+// unpaid post override IsPaidout/PayoutAt explicitly.
 func post(author, permlink, created string) RawPost {
-	return RawPost{Author: author, Permlink: permlink, Created: created, Depth: 0}
+	pa := ""
+	if t, err := ParseHiveTime(created); err == nil {
+		pa = t.Add(PayoutPeriod).Format("2006-01-02T15:04:05")
+	}
+	return RawPost{
+		Author: author, Permlink: permlink, Created: created, Depth: 0,
+		IsPaidout: true, PayoutAt: pa,
+	}
 }
 
 func TestFetchPosts_FiltersToTheEpochWindow(t *testing.T) {

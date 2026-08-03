@@ -70,8 +70,7 @@ which is unrecoverable.
 | `source.kind` | `content` | `content` reads Hive posts/votes → C3; `lp` replays liquidity events → C5 |
 | `source.tag` | *required for* `kind=content` | the Hive tag/community that counts |
 | `source.limit` | `1000` | max posts fetched per epoch |
-| `source.attribution` | `cashout` | `cashout` scores a post in the epoch its Hive payout lands in (every vote counted once); `created` is prompter but discards votes cast after the snapshot |
-| `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required) |
+| `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required). Either way a vote contributes its **weight**, not a unit: `hive_rshares` uses Hive's own stake-weighted figure, `token_stake` uses `stake x vote% / 10000` |
 | `source.exclude` | `[]` | accounts whose posts are skipped entirely |
 | `shares.author_reward_bps` | `0` | author/curator split, `0..10000` |
 | `shares.author_curve` | `"1/1"` | `"num/den"` rational exponent |
@@ -319,27 +318,28 @@ than skipped.
 
 Override with `-epoch N`. An epoch that has not closed yet is refused.
 
-## When a post is scored (attribution)
+## When a post is scored
 
-`source.attribution` decides which epoch a post's rewards land in. This is the
-most consequential setting in the file.
+**A post is scored in the epoch its Hive payout falls in** — 7 days after posting,
+once voting has closed. Every vote is counted exactly once, by its weight. Rewards
+lag one payout period behind posting, exactly as they do natively on Hive and in
+SCOT.
 
-**`"cashout"` (default).** A post is scored in the epoch its Hive **payout** falls
-in — 7 days after posting, when voting has closed. Every vote is counted exactly
-once. Rewards lag one payout period behind posting, exactly as they do natively on
-Hive and in SCOT.
+**This is not configurable, deliberately.** Scoring a post in the epoch it was
+*posted* in would pay sooner, and the trade is not worth it: voting stays open for 7
+days, so a post made in the last minute of an epoch would be scored with almost none
+of its votes while one made at the start got a full epoch's worth, and every vote
+cast after the boundary would be counted by nobody, ever. A config carrying an
+`attribution` key is rejected at load rather than ignored.
 
-**`"created"`.** A post is scored in the epoch it was posted in, using whatever
-votes exist at the epoch boundary. Rewards are immediate, but the trade is real and
-worth stating plainly: voting stays open for 7 days, so a post made in the last
-minute of an epoch is scored with almost none of its votes while one made at the
-start gets a full epoch's worth, and every vote cast after the boundary is counted
-by nobody, ever. Offered for tenants who want promptness; it is not the default.
+Because membership is decided by payout time but Hive's feed can only be paged by
+creation time, the reporter walks a creation window shifted back one payout period
+(plus an hour of margin) and lets payout time decide what actually belongs. A post
+that has not paid out yet is refused, not scored early.
 
 ### The vote cutoff
 
-Under either mode the vote set is frozen at a cutoff — the post's `payout_at` under
-`cashout`, the epoch end under `created` — and votes after it are dropped.
+The vote set is frozen at the post's `payout_at`, and votes after it are dropped.
 
 This is not a detail. Hive keeps recording votes after a post pays out: a real post
 that paid out on 2023-03-16 still took a vote on 2023-03-20. Without the cutoff,

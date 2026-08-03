@@ -115,7 +115,6 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 	opt := hivesrc.Options{
 		Tag:             "hive-167922",
 		Mode:            hivesrc.WeightHiveRshares,
-		Attribution:     hivesrc.AttributeCashout,
 		ExcludeAccounts: []string{"hive:erin"}, // muted author
 	}
 	excl := map[string]bool{"hive:erin": true}

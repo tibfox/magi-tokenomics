@@ -459,20 +459,15 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 		Mode:            hivesrc.WeightMode(a.cfg.Source.Weight),
 		SnapshotHeight:  win.EndBlock,
 		ExcludeAccounts: a.cfg.Source.Exclude,
-		Attribution:     hivesrc.Attribution(a.cfg.Source.Attribution),
-		Since:           win.StartTime,
-		Until:           win.EndTime,
 	}
-	if opt.Attribution == hivesrc.AttributeCashout {
-		// The epoch is defined by PAYOUT time, but the feed can only be paged by
-		// creation time — so walk the window shifted back one payout period and let
-		// PayoutSince/Until decide actual membership. The margin absorbs posts whose
-		// payout_at is not exactly created+7d.
-		const margin = time.Hour
-		opt.PayoutSince, opt.PayoutUntil = win.StartTime, win.EndTime
-		opt.Since = win.StartTime.Add(-hivesrc.PayoutPeriod - margin)
-		opt.Until = win.EndTime.Add(-hivesrc.PayoutPeriod + margin)
-	}
+	// The epoch is defined by PAYOUT time, but the feed can only be paged by creation
+	// time — so walk the window shifted back one payout period and let
+	// PayoutSince/Until decide actual membership. The margin absorbs posts whose
+	// payout_at is not exactly created+7d.
+	const margin = time.Hour
+	opt.PayoutSince, opt.PayoutUntil = win.StartTime, win.EndTime
+	opt.Since = win.StartTime.Add(-hivesrc.PayoutPeriod - margin)
+	opt.Until = win.EndTime.Add(-hivesrc.PayoutPeriod + margin)
 	if opt.Mode == hivesrc.WeightTokenStake {
 		opt.Stake = vscapi.NewStakeSource(a.vsc, a.cfg.Contracts.Stake)
 	}
