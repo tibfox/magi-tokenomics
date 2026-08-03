@@ -215,14 +215,6 @@ Two properties follow from the denominator being exact:
 
 `treasury` pins where `sweepEmptyEpoch` sends a stakerless epoch.
 
-## NFT mode (not available)
-
-Every `init` rejects `kind:"1"` and any non-empty `tokenId`. Editioned-NFT mode is
-unimplemented and fails closed rather than silently misbehaving: without a
-fractional-carry accumulator, every pro-rata slice that truncates below one whole
-edition strands the claimant permanently. See `adapter/adapter.go` for the full
-rationale and what must be built first.
-
 ## Devnet tests
 
 The docker multi-node tests are in [`testdata/devnet/`](testdata/devnet/) — see that

@@ -108,11 +108,6 @@ which is why claims never need to close.
 The only money left behind is rounding: fractions of a token too small to divide.
 That is the same in all three reward contracts.
 
-One narrow exception: if a day passes with *nobody staked at all*, that day's yield
-can never reach anyone, and the guardian can recover it to the treasury. That needs no
-deadline either, because whether anyone was staked is settled history and no amount of
-waiting could change it. A day with even one staker can never be touched.
-
 ## Who can do what
 
 The system assumes the person who deploys it is trustworthy. The protection is
@@ -267,12 +262,6 @@ You don't need all of it.
   in the contract rather than being over-paid. Splitting your holdings across many
   accounts loses you money rather than gaining it. A share small enough that its
   payout truncates to zero cannot be claimed at all — the dust stays behind.
-- **A day with no stakers at all is recoverable by the guardian.** Its yield can
-  never reach anyone, so it goes to the treasury rather than sitting locked. This is
-  the only case where anyone can take reward money, and it cannot touch a day that had
-  even one staker.
-- **NFT-backed tokens are not supported.** The setting exists but is deliberately
-  blocked rather than half-working.
 - **LP rewards depend on an indexer.** Content rewards can be checked by anyone
   against Hive. LP rewards are reconstructed from an indexer's event log, because the
   exchange keeps no history of its own and putting that history on-chain would cost
