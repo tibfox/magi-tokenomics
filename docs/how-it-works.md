@@ -171,9 +171,8 @@ part-day. It waits in the pool for the next top-up.
 One thing to know: because the whole pool is minted up front, **total supply doesn't
 grow as rewards go out**. Explorers will show the full supply from day one, with most
 of it sitting in the pool account. To see how much has actually been distributed,
-watch that account's balance fall. There's no built-in halving; if you want a decaying schedule,
-the design is preserved in [`halving-schedule.md`](halving-schedule.md) and can be
-put back.
+watch that account's balance fall. There's no built-in halving; if you want a decaying
+schedule, customize the contract.
 
 ### The content rewards
 

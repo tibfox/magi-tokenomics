@@ -361,6 +361,6 @@ function, the scaling curves for `submitShares` / `distributeEpoch` / `airdropBa
 and which roles need a funded account (reporter and deployer do; claimants and a
 healthy keeper do not).
 
-**Archived design:** [`docs/halving-schedule.md`](docs/halving-schedule.md) — the
-decaying/halving emission schedule, removed from C2 as out of scope, with the exact
-removed code and a verified restore checklist.
+**Emission is flat** — the same amount every epoch, at `baseAnnual * epochLen /
+blocksPerYear`. There is no decaying or halving schedule; if you want one, customize
+the contract.
