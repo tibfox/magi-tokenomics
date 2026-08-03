@@ -16,10 +16,12 @@ func main() {}
 
 const kInit = "init"
 
-// Init: {"token","kind","tokenId","funder"(C2 id),"window",
+// Init: {"token","kind","tokenId","funder"(C2 id),"treasury",
 //
-//	"reporterMode","reporterAuth","reporterThreshold",
 //	"guardianMode","guardianAuth","guardianThreshold"}
+//
+// Reward channels — each with its own bucket, challenge window and reporter
+// authority — are registered afterwards with addChannel.
 //
 //go:wasmexport init
 func Init(payload *string) *string {
@@ -41,25 +43,19 @@ func Init(payload *string) *string {
 	adapter.RequireNoTokenId(f(payload, "tokenId"))
 	set("cfg_tokenId", "")
 	set("cfg_funder", f(payload, "funder"))
-	set("cfg_window", canon(f(payload, "window"), "window")) // MED-3: must be present+>0
-	if getU("cfg_window") == 0 {
-		sdk.Abort("window must be > 0")
-	}
-	set("cfg_rMode", f(payload, "reporterMode"))
-	set("cfg_rAuth", f(payload, "reporterAuth"))
-	set("cfg_rThr", f(payload, "reporterThreshold"))
 	set("cfg_gMode", f(payload, "guardianMode"))
 	set("cfg_gAuth", f(payload, "guardianAuth"))
 	set("cfg_gThr", f(payload, "guardianThreshold"))
+	auth.Validate(guardianCfg())
 	// Pinned sweep destination — sweepUnallocated can ONLY send here, so a malicious
 	// guardian cannot cancel+sweep an epoch to an arbitrary address (H2).
 	tre := f(payload, "treasury")
 	if tre == "" {
-		sdk.Abort("treasury required (cancel/sweep destination)") // MED-1
+		sdk.Abort("treasury required (cancel/sweep destination)")
 	}
 	validateAddr(tre)
-	validateLedgerAddr(tre) // MED: typo-proof the immutable payout destination
-	// HIGH-4: a guardian-controlled treasury turns cancel+sweep into a drain, and a
+	validateLedgerAddr(tre) // typo-proof the immutable payout destination
+	// A guardian-controlled treasury turns cancel+sweep into a drain, and a
 	// self-pointing treasury bricks the sweep (token forbids transfer-to-self).
 	if tre == selfAddr() {
 		sdk.Abort("treasury cannot be this contract")
@@ -80,38 +76,8 @@ func Init(payload *string) *string {
 	}
 	set("cfg_genesis", sg)
 	set("cfg_epochLen", se)
-	// UPPER bound on the challenge window, now that the schedule is known.
-	//
-	// The window is immutable after init and gates two things: when claims open, and
-	// when the guardian's veto expires. A fat-fingered value (an extra zero, or blocks
-	// confused with seconds) is unrecoverable — claims would never open and the veto
-	// would never expire, with the funding stuck and no way to correct it. Ten epochs
-	// is already a generous challenge period; anything beyond it is a typo.
-	if w, el := getU("cfg_window"), getU("cfg_epochLen"); el > 0 && w > 10*el {
-		sdk.Abort("window must be <= 10 * epochLen (an immutable window that long is a typo)")
-	}
-	// OPTIONAL self-label. C3 and C5 are the same code deployed twice, so nothing on
-	// chain distinguishes a content distributor from an LP one: a swapped id in a
-	// reporter config passes every existing cross-check and scores an epoch from the
-	// wrong data source. Setting this lets the reporter refuse that. Empty stays legal
-	// so existing deployments and payloads are unaffected.
-	if role := f(payload, "role"); role != "" {
-		if role != "content" && role != "lp" {
-			sdk.Abort("role must be \"content\" or \"lp\" if set")
-		}
-		set("cfg_role", role)
-	}
-	auth.Validate(reporterCfg())
-	auth.Validate(guardianCfg())
-	// reporter and guardian authority sets MUST be disjoint, else one coalition can
-	// finalize a fraudulent report AND refuse to cancel it (HIGH-3).
-	for _, r := range splitComma(f(payload, "reporterAuth")) {
-		for _, g := range splitComma(f(payload, "guardianAuth")) {
-			if r != "" && r == g {
-				sdk.Abort("reporter and guardian authorities must be disjoint")
-			}
-		}
-	}
+	// Reward channels are added afterwards with addChannel, because verifying each
+	// one's bucket requires calling the funder and a deployment may carry several.
 	set(kInit, "1")
 	return ok()
 }
@@ -122,16 +88,18 @@ func Init(payload *string) *string {
 //go:wasmexport pullFunding
 func PullFunding(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	if statusOf(ep) != "" {
+	if statusOf(ch, ep) != "" {
 		sdk.Abort("epoch finalized/cancelled — funding locked") // LOW: no late growth
 	}
-	res := sdk.ContractCall(getStr("cfg_funder"), "claimBucket", `{"epoch":"`+ep+`"}`, nil)
+	res := sdk.ContractCall(getStr("cfg_funder"), "claimBucket",
+		`{"epoch":"`+ep+`","bucket":"`+getStr("ch_bucket|"+ch)+`"}`, nil)
 	got := parseBig(pickField(res, "claimed"))
-	k := "funded|" + ep
+	k := "funded|" + ch + "|" + ep
 	setBig(k, new(big.Int).Add(getBig(k), got))
-	if !present("fundedAt|" + ep) {
-		set("fundedAt|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
+	if !present("fundedAt|" + ch + "|" + ep) {
+		set("fundedAt|"+ch+"|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
 	}
 	return str(`{"funded":"` + getBig(k).String() + `"}`)
 }
@@ -144,28 +112,29 @@ func PullFunding(payload *string) *string {
 //go:wasmexport submitShares
 func SubmitShares(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	if statusOf(ep) != "" {
+	if statusOf(ch, ep) != "" {
 		sdk.Abort("epoch not open")
 	}
 	entries := f(payload, "entries")
 	page := canon(f(payload, "page"), "page") // canonical → no "0"/"00" idempotency bypass (M1)
-	actionKey := "ss:" + ep + ":" + page
-	committed := auth.Authorize(reporterCfg(), "rep", actionKey, entries, mustCaller(), reqAuths())
+	actionKey := "ss:" + ch + ":" + ep + ":" + page
+	committed := auth.Authorize(reporterCfg(ch), "rep", actionKey, entries, mustCaller(), reqAuths())
 	if committed {
 		// Apply each (epoch,page) exactly once across ALL auth modes (H2/LOW-1).
-		ak := "ssdone|" + ep + "|" + page
+		ak := "ssdone|" + ch + "|" + ep + "|" + page
 		if present(ak) {
 			sdk.Abort("page already applied")
 		}
 		set(ak, "1")
-		applyEntries(ep, entries)
+		applyEntries(ch, ep, entries)
 	}
 	return str(`{"applied":` + boolStr(committed) + `}`)
 }
 
-func applyEntries(ep, entries string) {
-	total := getBig("totalShares|" + ep)
+func applyEntries(ch, ep, entries string) {
+	total := getBig("totalShares|" + ch + "|" + ep)
 	for _, e := range splitComma(entries) {
 		acct, sh := split2(e)
 		if acct == "" {
@@ -185,11 +154,11 @@ func applyEntries(ep, entries string) {
 		if s.Sign() <= 0 {
 			continue
 		}
-		sk := "share|" + ep + "|" + acct
+		sk := "share|" + ch + "|" + ep + "|" + acct
 		setBig(sk, new(big.Int).Add(getBig(sk), s))
 		total.Add(total, s)
 	}
-	setBig("totalShares|"+ep, total)
+	setBig("totalShares|"+ch+"|"+ep, total)
 }
 
 // finalizeEpoch — reporter freezes the epoch and opens the challenge window.
@@ -197,18 +166,19 @@ func applyEntries(ep, entries string) {
 //go:wasmexport finalizeEpoch
 func FinalizeEpoch(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	if statusOf(ep) != "" {
+	if statusOf(ch, ep) != "" {
 		sdk.Abort("already finalized/cancelled")
 	}
 	// Must be funded before finalize, else pullFunding is locked out afterwards and
 	// the epoch's C2 allocation is stranded forever (⓸).
-	if getBig("funded|"+ep).Sign() <= 0 {
+	if getBig("funded|"+ch+"|"+ep).Sign() <= 0 {
 		sdk.Abort("epoch not funded — pull funding first")
 	}
 	// An empty report would freeze the epoch (every claim aborts "no shares"),
 	// so reject finalizing with nothing to distribute (MED-5).
-	if getBig("totalShares|"+ep).Sign() <= 0 {
+	if getBig("totalShares|"+ch+"|"+ep).Sign() <= 0 {
 		sdk.Abort("no shares submitted for epoch")
 	}
 	// Gate on the auth result — in Attest mode this must reach threshold (CRIT-1).
@@ -226,11 +196,11 @@ func FinalizeEpoch(payload *string) *string {
 	//
 	// Anti-equivocation is untouched: one vote per authority per action still holds.
 	// cancelEpoch already attests over a constant for the same reason.
-	if !auth.Authorize(reporterCfg(), "rep", "fin:"+ep, "fin:"+ep, mustCaller(), reqAuths()) {
+	if !auth.Authorize(reporterCfg(ch), "rep", "fin:"+ch+":"+ep, "fin:"+ch+":"+ep, mustCaller(), reqAuths()) {
 		return str(`{"finalized":false}`) // pending more attestations
 	}
-	set("status|"+ep, "finalized")
-	set("chal|"+ep, strconv.FormatUint(blockHeight()+getU("cfg_window"), 10))
+	set("status|"+ch+"|"+ep, "finalized")
+	set("chal|"+ch+"|"+ep, strconv.FormatUint(blockHeight()+getU("ch_window|"+ch), 10))
 	return ok()
 }
 
@@ -239,18 +209,19 @@ func FinalizeEpoch(payload *string) *string {
 //go:wasmexport cancelEpoch
 func CancelEpoch(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
 	// Either: finalized and still inside the challenge window (the veto), OR the
 	// epoch was funded but never finalized for > staleness (rescue, MED-2) — else
 	// a silent reporter would strand the funding forever.
-	st := statusOf(ep)
+	st := statusOf(ch, ep)
 	if st == "finalized" {
-		if blockHeight() >= getU("chal|"+ep) {
+		if blockHeight() >= getU("chal|"+ch+"|"+ep) {
 			sdk.Abort("challenge window elapsed")
 		}
 	} else if st == "" {
 		// Rescue only an epoch that actually HOLDS money here.
-		if getBig("funded|"+ep).Sign() <= 0 {
+		if getBig("funded|"+ch+"|"+ep).Sign() <= 0 {
 			sdk.Abort("epoch not funded")
 		}
 		// Anchor on the LATER of the schedule and the block the funding actually
@@ -271,25 +242,25 @@ func CancelEpoch(payload *string) *string {
 		// one, so the HIGH-1 property (a reporter working a live epoch cannot be
 		// front-run) is preserved by construction.
 		anchor := epochEnd(ep)
-		if fa := getU("fundedAt|" + ep); fa > anchor {
+		if fa := getU("fundedAt|" + ch + "|" + ep); fa > anchor {
 			anchor = fa
 		}
-		if blockHeight() < anchor+staleBlocks() {
+		if blockHeight() < anchor+staleBlocks(ch) {
 			sdk.Abort("epoch not finalized (and not stale yet)")
 		}
 	} else {
 		sdk.Abort("epoch already cancelled")
 	}
 	// Gate on the auth result (CRIT-1: Attest-mode guardian needs threshold).
-	if !auth.Authorize(guardianCfg(), "grd", "cancel:"+ep, "cancel:"+ep, mustCaller(), reqAuths()) {
+	if !auth.Authorize(guardianCfg(), "grd", "cancel:"+ch+":"+ep, "cancel:"+ch+":"+ep, mustCaller(), reqAuths()) {
 		return str(`{"cancelled":false}`)
 	}
-	set("status|"+ep, "cancelled")
+	set("status|"+ch+"|"+ep, "cancelled")
 	// Roll the pulled funding forward into the unallocated pool (M-B/R11) so it
 	// is not stranded — recoverable via sweepUnallocated.
-	fk := "funded|" + ep
+	fk := "funded|" + ch + "|" + ep
 	if amt := getBig(fk); amt.Sign() > 0 {
-		setBig("unallocated", new(big.Int).Add(getBig("unallocated"), amt))
+		setBig("unalloc|" + ch, new(big.Int).Add(getBig("unalloc|" + ch), amt))
 		setBig(fk, new(big.Int))
 	}
 	return ok()
@@ -301,24 +272,25 @@ func CancelEpoch(payload *string) *string {
 //go:wasmexport sweepUnallocated
 func SweepUnallocated(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	to := getStr("cfg_treasury") // pinned at init — NOT caller-chosen (H2)
 	if to == "" {
 		sdk.Abort("no treasury configured")
 	}
 	nonce := canon(f(payload, "nonce"), "nonce")
-	amt := getBig("unallocated")
+	amt := getBig("unalloc|" + ch)
 	// Bind the attestation to the AMOUNT — otherwise a co-signer approving a sweep
 	// of 0 could be reused weeks later to move a large balance (MED). Authorize
 	// BEFORE the emptiness check so a replayed nonce still reports "already
 	// committed" rather than masking it behind an empty pool.
-	ak := "sweep:" + nonce
+	ak := "sweep:" + ch + ":" + nonce
 	if !auth.Authorize(guardianCfg(), "grd", ak, amt.String(), mustCaller(), reqAuths()) {
 		return str(`{"swept":false}`)
 	}
 	if amt.Sign() <= 0 {
 		sdk.Abort("nothing to sweep")
 	}
-	setBig("unallocated", new(big.Int)) // CEI before transfer
+	setBig("unalloc|" + ch, new(big.Int)) // CEI before transfer
 	adapter.Transfer(asset(), to, amt)
 	return str(`{"swept":"` + amt.String() + `"}`)
 }
@@ -329,27 +301,28 @@ func SweepUnallocated(payload *string) *string {
 //go:wasmexport claim
 func Claim(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	if statusOf(ep) != "finalized" {
+	if statusOf(ch, ep) != "finalized" {
 		sdk.Abort("epoch not finalized")
 	}
-	if blockHeight() < getU("chal|"+ep) {
+	if blockHeight() < getU("chal|"+ch+"|"+ep) {
 		sdk.Abort("challenge window not elapsed")
 	}
 	c := mustCaller()
-	ck := "claimed|" + ep + "|" + c
+	ck := "claimed|" + ch + "|" + ep + "|" + c
 	if present(ck) {
 		sdk.Abort("already claimed")
 	}
-	funded := getBig("funded|" + ep)
+	funded := getBig("funded|" + ch + "|" + ep)
 	if funded.Sign() <= 0 {
 		sdk.Abort("epoch not funded yet") // don't burn the claimed flag (M5)
 	}
-	ts := getBig("totalShares|" + ep)
+	ts := getBig("totalShares|" + ch + "|" + ep)
 	if ts.Sign() <= 0 {
 		sdk.Abort("no shares")
 	}
-	share := getBig("share|" + ep + "|" + c)
+	share := getBig("share|" + ch + "|" + ep + "|" + c)
 	if share.Sign() <= 0 {
 		sdk.Abort("no share for caller")
 	}
@@ -369,11 +342,12 @@ func Claim(payload *string) *string {
 //go:wasmexport shareOf
 func ShareOf(payload *string) *string {
 	assertInit()
+	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	return str(`{"share":"` + getBig("share|"+ep+"|"+f(payload, "account")).String() +
-		`","totalShares":"` + getBig("totalShares|"+ep).String() +
-		`","funded":"` + getBig("funded|"+ep).String() +
-		`","status":"` + statusOf(ep) + `"}`)
+	return str(`{"share":"` + getBig("share|"+ch+"|"+ep+"|"+f(payload, "account")).String() +
+		`","totalShares":"` + getBig("totalShares|"+ch+"|"+ep).String() +
+		`","funded":"` + getBig("funded|"+ch+"|"+ep).String() +
+		`","status":"` + statusOf(ch, ep) + `"}`)
 }
 
 // ---- helpers -------------------------------------------------------------
@@ -405,7 +379,7 @@ func canon(s, name string) string {
 	return s
 }
 
-func statusOf(ep string) string { return getStr("status|" + ep) }
+func statusOf(ch, ep string) string { return getStr("status|" + ch + "|" + ep) }
 
 // epochEnd: last block of the given epoch, from the funder's schedule.
 func epochEnd(ep string) uint64 {
@@ -417,8 +391,8 @@ func epochEnd(ep string) uint64 {
 // staleBlocks: grace after the EPOCH ENDS before a guardian may rescue an
 // unfinalized epoch — at least 2 full epochs, and at least 10x the challenge
 // window, so a reporter working a live epoch can never be front-run (HIGH-1).
-func staleBlocks() uint64 {
-	n := getU("cfg_window") * 10
+func staleBlocks(ch string) uint64 {
+	n := getU("ch_window|"+ch) * 10
 	if el2 := getU("cfg_epochLen") * 2; n < el2 {
 		n = el2
 	}
@@ -439,7 +413,9 @@ func asset() adapter.Asset {
 	}
 	return adapter.Asset{Kind: k, Contract: getStr("cfg_token"), TokenId: getStr("cfg_tokenId")}
 }
-func reporterCfg() auth.Config { return authCfg("cfg_rMode", "cfg_rAuth", "cfg_rThr") }
+func reporterCfg(ch string) auth.Config {
+	return authCfg("ch_rMode|"+ch, "ch_rAuth|"+ch, "ch_rThr|"+ch)
+}
 func guardianCfg() auth.Config { return authCfg("cfg_gMode", "cfg_gAuth", "cfg_gThr") }
 func authCfg(mk, ak, tk string) auth.Config {
 	var mode auth.Mode
@@ -666,4 +642,141 @@ func selfAddr() string {
 		sdk.Abort("no contract.id in env")
 	}
 	return "contract:" + *id
+}
+
+// ---- CHANNELS ------------------------------------------------------------
+//
+// One deployed distributor serves several reward streams — content, LP, whatever a
+// tenant adds later — instead of one contract per stream. Every epoch key is scoped
+// by channel, so the streams share code and a treasury but nothing else: separate
+// funding, separate share books, separate claims, separate reporter authority.
+//
+// The reporter authority MUST be per channel. A content reporter and an LP reporter
+// are different services holding different keys, and one should not be able to submit
+// the other's shares.
+//
+// Auth action keys are channel-scoped for a subtler reason. The auth module records
+// one vote per (action, authority) with no payload component, so an action key of
+// `fin:5` would let a reporter attesting content epoch 5 burn its single vote for LP
+// epoch 5 at the same time — the second channel could then never reach threshold.
+//
+// Channels are added after init, not in it, because verifying a channel's bucket
+// requires calling the funder, and they are append-only: re-pointing a live channel's
+// reporter authority or bucket would rewrite the rules under an epoch already in
+// flight.
+
+// addChannel: {"channel","bucket","window","reporterMode","reporterAuth",
+//              "reporterThreshold","role"} — owner-only, once per name.
+//
+//go:wasmexport addChannel
+func AddChannel(payload *string) *string {
+	assertInit()
+	ownerK := sdk.GetEnvKey("contract.owner")
+	if ownerK == nil || mustCaller() != *ownerK {
+		sdk.Abort("only owner can add a channel")
+	}
+	ch := f(payload, "channel")
+	if ch == "" {
+		sdk.Abort("channel required")
+	}
+	// Channel names are part of every state key, so they must not contain the
+	// separator or they could be made to collide with a different channel's keys.
+	for i := 0; i < len(ch); i++ {
+		if ch[i] == '|' || ch[i] == ':' || ch[i] == ',' {
+			sdk.Abort("channel name must not contain | : or ,")
+		}
+	}
+	if present("ch_bucket|" + ch) {
+		sdk.Abort("channel already exists — channels are append-only")
+	}
+
+	// The bucket that funds this channel, verified against the funder now: a name C2
+	// does not know, or one paying a different contract, would otherwise surface only
+	// at the first pullFunding, after the epoch it should have funded had elapsed.
+	bucket := f(payload, "bucket")
+	if bucket == "" {
+		sdk.Abort("bucket required — the funder bucket that pays this channel")
+	}
+	bt := pickField(sdk.ContractCall(getStr("cfg_funder"), "bucketTarget",
+		`{"bucket":"`+bucket+`"}`, nil), "target")
+	if bt == "" {
+		sdk.Abort("the funder has no bucket by that name")
+	}
+	if bt != selfAddr() {
+		sdk.Abort("the funder's bucket of that name pays a different contract")
+	}
+	// Two channels drawing one bucket would split a single allocation unpredictably
+	// between two share books.
+	if present("ch_forbucket|" + bucket) {
+		sdk.Abort("that bucket already funds another channel")
+	}
+
+	w := f(payload, "window")
+	wn, werr := strconv.ParseUint(w, 10, 64)
+	if werr != nil || wn == 0 {
+		sdk.Abort("window must be a uint > 0")
+	}
+	// An immutable window longer than ten epochs is a typo, and it would hold every
+	// claim shut for that long with no way to correct it.
+	if el := getU("cfg_epochLen"); el > 0 && wn > 10*el {
+		sdk.Abort("window must be <= 10 * epochLen (an immutable window that long is a typo)")
+	}
+
+	set("ch_rMode|"+ch, f(payload, "reporterMode"))
+	set("ch_rAuth|"+ch, f(payload, "reporterAuth"))
+	set("ch_rThr|"+ch, f(payload, "reporterThreshold"))
+	auth.Validate(reporterCfg(ch))
+	// The reporter and the guardian must stay disjoint per channel, or one coalition
+	// could finalize a fraudulent report AND refuse to cancel it.
+	for _, r := range splitComma(f(payload, "reporterAuth")) {
+		for _, g := range splitComma(getStr("cfg_gAuth")) {
+			if r != "" && r == g {
+				sdk.Abort("reporter and guardian authorities must be disjoint")
+			}
+		}
+	}
+	if tre := getStr("cfg_treasury"); tre != "" {
+		for _, r := range splitComma(f(payload, "reporterAuth")) {
+			if r != "" && r == tre {
+				sdk.Abort("treasury must not be a reporter authority")
+			}
+		}
+	}
+	if role := f(payload, "role"); role != "" {
+		if role != "content" && role != "lp" {
+			sdk.Abort("role must be \"content\" or \"lp\" if set")
+		}
+		set("ch_role|"+ch, role)
+	}
+	set("ch_window|"+ch, w)
+	set("ch_forbucket|"+bucket, ch)
+	set("ch_bucket|"+ch, bucket) // written LAST: it is what mustChannel tests
+	return ok()
+}
+
+// mustChannel resolves and proves the channel exists. Requiring it to exist is what
+// stops a typo'd name quietly opening a fresh, unfunded namespace whose epochs would
+// look empty rather than wrong.
+func mustChannel(payload *string) string {
+	ch := f(payload, "channel")
+	if ch == "" {
+		sdk.Abort("channel required")
+	}
+	if !present("ch_bucket|" + ch) {
+		sdk.Abort("no such channel — add it with addChannel first")
+	}
+	return ch
+}
+
+// channelInfo: {"channel"} — what a reporter cross-checks itself against.
+//
+//go:wasmexport channelInfo
+func ChannelInfo(payload *string) *string {
+	assertInit()
+	ch := f(payload, "channel")
+	return str(`{"bucket":"` + getStr("ch_bucket|"+ch) +
+		`","window":"` + getStr("ch_window|"+ch) +
+		`","role":"` + getStr("ch_role|"+ch) +
+		`","genesis":"` + getStr("cfg_genesis") +
+		`","epochLen":"` + getStr("cfg_epochLen") + `"}`)
 }

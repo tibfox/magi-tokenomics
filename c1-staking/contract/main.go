@@ -1,10 +1,31 @@
-// C1 — Dedicated Staking (plan §19.2). Stakes the value asset (fungible token in
-// v1) via allowance, tracks per-account stake + a height-checkpointed running
-// total so that stakeAtHeight/totalStakedAtHeight are consistent by construction
-// (invariant #3). Single-tenant (D3). stakeFor conserves Σstake==custody (R7).
+// C1 — Staking, staking yield, and the launch airdrop.
 //
-// Amounts are stored as decimal strings. Checkpoint/history entries are appended
-// in block order, so heights are non-decreasing by index → binary-searchable.
+// Three roles in one contract because each deploy costs a real fee and these three
+// share a balance and a history anyway:
+//
+//	STAKING   stakes the value asset via allowance and keeps per-account stake plus a
+//	          height-checkpointed running total, so stakeAtHeight/totalStakedAtHeight
+//	          are consistent by construction (invariant #3). stakeFor conserves
+//	          Σstake == custody (R7).
+//	YIELD     pays stakers pro-rata from a C2 bucket, with no reporter — it reads the
+//	          stake history directly. Merged here because it never read anything else.
+//	AIRDROP   a launch-time snapshot import, optionally crediting stake directly.
+//	          Runs a handful of times and is then dead, which is precisely why it does
+//	          not warrant a contract of its own.
+//
+// THE ONE THING TO PRESERVE. Three pools now share one balance, and the custody rule
+// is no longer the simple Σstake == balance:
+//
+//	balance >= total_staked + (yield funded but unclaimed) + whatever the airdrop
+//	           has left
+//
+// Only the airdrop may spend the unobligated remainder, and it checks that before
+// paying (see the airdrop section). Yield pays from its own funded pool; principal is
+// only ever returned to the staker who put it in. If those envelopes ever leak into
+// each other, rewards get paid out of somebody's principal.
+//
+// Single-tenant (D3). Amounts are decimal strings. Checkpoint/history entries are
+// appended in block order, so heights are non-decreasing by index → binary-searchable.
 package main
 
 import (
@@ -30,7 +51,15 @@ const (
 	kEpochLen = "cfg_epochLen"
 	kGenesis  = "cfg_genesis"
 	kFunder   = "cfg_funder"
-	maxClaim  = 20 // bound RC per claimUnstaked call
+	kBucket   = "cfg_bucket"   // the C2 bucket that funds yield here
+	kTreasury = "cfg_treasury" // pinned sweep destination
+	kMaxAir   = "cfg_maxAirdrop"
+	kAirStake = "cfg_airdropStaked" // "1" = airdrop credits stake instead of transferring
+	kAirTotal = "airdrop_total"
+	// kYieldOutstanding is yield pulled from C2 but not yet claimed or swept. Tracked
+	// incrementally because deriving it would mean summing every epoch ever funded.
+	kYieldOutstanding = "yield_outstanding"
+	maxClaim          = 20 // bound RC per claimUnstaked call
 )
 
 func assertInit() {
@@ -136,7 +165,57 @@ func Init(payload *string) *string {
 			sdk.StateSetObject("allow|"+a, "1")
 		}
 	}
+	// ---- optional capabilities -------------------------------------------
+	//
+	// Yield and the airdrop are configured, not switched on. A deployment that wants
+	// staking alone supplies none of the below and gets exactly that: pullFunding has
+	// no bucket to pull, sweepEmptyEpoch has no guardian to authorise it, and
+	// airdropBatch has no cap to work within, so each refuses rather than sitting
+	// there as a half-wired feature.
+
+	// Treasury: where sweepEmptyEpoch sends an epoch nobody can claim. Pinned now so
+	// a sweep can never be redirected later.
+	if tre := field(payload, "treasury"); tre != "" {
+		validateAddr(tre)
+		if !isLedgerAddr(tre) {
+			sdk.Abort("treasury must start with hive:/contract:/did:/system:")
+		}
+		if tre == selfAddr() {
+			sdk.Abort("treasury cannot be this contract")
+		}
+		// A guardian-controlled treasury turns a sweep into a drain.
+		for _, g := range splitComma(field(payload, "guardianAuth")) {
+			if g != "" && g == tre {
+				sdk.Abort("treasury must not be a guardian authority")
+			}
+		}
+		sdk.StateSetObject(kTreasury, tre)
+	}
+	if gm := field(payload, "guardianMode"); gm != "" {
+		sdk.StateSetObject("cfg_gMode", gm)
+		sdk.StateSetObject("cfg_gAuth", field(payload, "guardianAuth"))
+		sdk.StateSetObject("cfg_gThr", field(payload, "guardianThreshold"))
+		auth.Validate(guardianCfg())
+		if getStr(kTreasury) == "" {
+			sdk.Abort("guardian configured without a treasury — a sweep would have nowhere to go")
+		}
+	}
+	// Airdrop cap. Absent means the airdrop entrypoint is unavailable.
+	if ma := field(payload, "maxAirdrop"); ma != "" {
+		if parseBig(ma).Sign() <= 0 {
+			sdk.Abort("maxAirdrop must be > 0 when set")
+		}
+		sdk.StateSetObject(kMaxAir, ma)
+		// Credit stake directly instead of transferring liquid tokens. Recipients then
+		// earn yield from the first epoch and must serve the unstake cooldown before
+		// they can sell, which is usually the point of doing it this way.
+		if field(payload, "airdropStaked") == "1" {
+			sdk.StateSetObject(kAirStake, "1")
+		}
+	}
+
 	setBig(kTotal, new(big.Int))
+	setBig(kYieldOutstanding, new(big.Int))
 	sdk.StateSetObject(kCkptN, "0")
 	sdk.StateSetObject(kInit, "1")
 	return ok()
@@ -354,6 +433,22 @@ func AdoptSchedule(payload *string) *string {
 	}
 	sdk.StateSetObject(kGenesis, sg)
 	sdk.StateSetObject(kFunder, fu)
+	// The yield bucket is adopted here for the same reason as the genesis: it names a
+	// bucket on a contract that did not exist when this one was initialised. Verified
+	// against the funder immediately — a name C2 does not know, or one paying somebody
+	// else, would otherwise deploy cleanly and fail at the first pullFunding, after
+	// the epoch it should have funded had already elapsed.
+	if bucket := field(payload, "bucket"); bucket != "" {
+		bt := pickField(sdk.ContractCall(fu, "bucketTarget",
+			`{"bucket":"`+bucket+`"}`, nil), "target")
+		if bt == "" {
+			sdk.Abort("the funder has no bucket by that name")
+		}
+		if bt != selfAddr() {
+			sdk.Abort("the funder's bucket of that name pays a different contract")
+		}
+		sdk.StateSetObject(kBucket, bucket)
+	}
 	return ok()
 }
 
@@ -382,17 +477,25 @@ func MinStakeSum(payload *string) *string {
 	if ep > (^uint64(0)-g)/el {
 		sdk.Abort("epoch out of range")
 	}
+	return str(`{"total":"` + minStakeSumAt(ep).String() + `"}`)
+}
+
+// minStakeSumAt is the exact Σᵢ min(aᵢ,bᵢ) for a CLOSED epoch: the epoch-start total
+// less everything that dropped below its starting level. Shared by the query above
+// and by claimYield, so an external verifier and the payout can never disagree.
+func minStakeSumAt(ep uint64) *big.Int {
+	g, el := idx(kGenesis), idx(kEpochLen)
 	start := g + ep*el
 	// Refuse while the epoch is still open: the drawdown is still moving, so an
 	// answer now could exceed the final one and over-pay whoever claimed early.
 	if start+el-1 >= blockHeight() {
 		sdk.Abort("epoch not fully elapsed")
 	}
-	s := new(big.Int).Sub(ckptAt(start), getBig("dd|"+strconv.FormatUint(ep, 10)))
-	if s.Sign() < 0 {
-		s = new(big.Int) // unreachable: drawdown ≤ Σa by construction
+	v := new(big.Int).Sub(ckptAt(start), getBig("dd|"+strconv.FormatUint(ep, 10)))
+	if v.Sign() < 0 {
+		v = new(big.Int) // unreachable: drawdown ≤ Σa by construction
 	}
-	return str(`{"total":"` + s.String() + `"}`)
+	return v
 }
 
 // ---- core: credit + checkpoints ------------------------------------------
@@ -750,4 +853,349 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// ---- STAKING YIELD -------------------------------------------------------
+//
+// Yield lives here rather than in its own contract because it never did anything
+// except read this one: per-account stake at two heights, and the exact
+// Σ min(aᵢ,bᵢ) denominator from the drawdown accumulator above. Merged, those become
+// local reads instead of three cross-contract calls per claim, and the deployment
+// costs one contract fee less.
+//
+// THE CUSTODY INVARIANT CHANGES SHAPE, so it is restated here and asserted on every
+// outbound path. Separately, C1 held only staked principal and the rule was the
+// simple `Σstake == balance`. This contract now holds three distinct pools:
+//
+//	balance  >=  total_staked                     (principal, owed to stakers)
+//	           + Σ(y_funded − y_paid)             (yield pulled but not yet claimed)
+//	           + whatever remains for the airdrop
+//
+// obligations() below is the first two terms — everything this contract already owes
+// someone. Anything above it is unobligated, and only the airdrop may spend that. A
+// bug that let one pool draw on another would pay rewards out of people's principal,
+// which is the single worst thing this file could do, so the check is explicit and
+// not inferred from balances.
+
+// obligations = principal + yield that has been funded but not yet claimed.
+func obligations() *big.Int {
+	o := new(big.Int).Set(getBig(kTotal))
+	return o.Add(o, getBig(kYieldOutstanding))
+}
+
+// pullFunding — pull this epoch's yield slice from C2 (permissionless).
+//
+//go:wasmexport pullFunding
+func PullFunding(payload *string) *string {
+	assertInit()
+	if getStr(kBucket) == "" {
+		sdk.Abort("no yield bucket adopted — call adoptSchedule({funder,bucket}) after C2 is initialised")
+	}
+	ep := mustEpoch(payload)
+	res := sdk.ContractCall(getStr(kFunder), "claimBucket",
+		`{"epoch":"`+ep+`","bucket":"`+getStr(kBucket)+`"}`, nil)
+	got := parseBig(pickField(res, "claimed"))
+	k := "y_funded|" + ep
+	setBig(k, new(big.Int).Add(getBig(k), got))
+	// Track the outstanding pool incrementally: recomputing it would mean summing
+	// every epoch ever funded, which grows without bound.
+	setBig(kYieldOutstanding, new(big.Int).Add(getBig(kYieldOutstanding), got))
+	return str(`{"funded":"` + getBig(k).String() + `"}`)
+}
+
+// claimYield — self-serve pro-rata yield for one epoch. Never expires.
+//
+// Named apart from claimUnstaked deliberately: one returns your own principal after
+// its cooldown, the other pays a reward. Calling the wrong one should read wrong.
+//
+//go:wasmexport claimYield
+func ClaimYield(payload *string) *string {
+	assertInit()
+	ep := mustEpoch(payload)
+	c := mustCaller()
+	validateAddr(c)
+	ck := "y_claimed|" + ep + "|" + c
+	if present(ck) {
+		sdk.Abort("already claimed")
+	}
+	funded := getBig("y_funded|" + ep)
+	if funded.Sign() <= 0 {
+		sdk.Abort("epoch not funded yet")
+	}
+	set(ck, "1") // CEI: mark before any transfer
+	if present("y_swept|" + ep) {
+		sdk.Abort("epoch was swept as unclaimable")
+	}
+	g, el := idx(kGenesis), idx(kEpochLen)
+	if el == 0 {
+		sdk.Abort("no schedule adopted")
+	}
+	hStart := g + pu(ep)*el
+	hEnd := g + (pu(ep)+1)*el - 1
+	if hEnd >= blockHeight() {
+		sdk.Abort("epoch not fully elapsed")
+	}
+	// min(stake at start, stake at end): only stake held for the WHOLE epoch earns,
+	// which is what defeats a one-block flash stake around either boundary.
+	stake := histAt(c, hStart)
+	if e := histAt(c, hEnd); e.Cmp(stake) < 0 {
+		stake = e
+	}
+	if stake.Sign() <= 0 {
+		sdk.Abort("not staked across the whole epoch")
+	}
+	total := minStakeSumAt(pu(ep))
+	if total.Sign() <= 0 {
+		sdk.Abort("no stake held across the whole epoch")
+	}
+	payout := new(big.Int).Mul(funded, stake)
+	payout.Div(payout, total)
+	if payout.Sign() <= 0 {
+		sdk.Abort("payout rounds to zero")
+	}
+	pk := "y_paid|" + ep
+	setBig(pk, new(big.Int).Add(getBig(pk), payout))
+	setBig(kYieldOutstanding, new(big.Int).Sub(getBig(kYieldOutstanding), payout))
+	adapter.Transfer(asset(), c, payout)
+	return str(`{"claimed":"` + payout.String() + `"}`)
+}
+
+// sweepEmptyEpoch — guardian recovers an epoch NOBODY can ever claim.
+//
+// Fires only when the denominator is zero: no account held stake across that epoch,
+// so every possible claim aborts and the funding would otherwise be locked forever.
+// That condition is settled by history and cannot change, so no maturity wait is
+// needed and no slow claimant can be stranded. An epoch with even one staker is never
+// sweepable, at any height.
+//
+//go:wasmexport sweepEmptyEpoch
+func SweepEmptyEpoch(payload *string) *string {
+	assertInit()
+	ep := mustEpoch(payload)
+	g, el := idx(kGenesis), idx(kEpochLen)
+	if el == 0 {
+		sdk.Abort("no schedule adopted")
+	}
+	if g+(pu(ep)+1)*el-1 >= blockHeight() {
+		sdk.Abort("epoch not fully elapsed")
+	}
+	if minStakeSumAt(pu(ep)).Sign() != 0 {
+		sdk.Abort("epoch has stakers — their yield is claimable forever and is not sweepable")
+	}
+	funded := getBig("y_funded|" + ep)
+	residual := new(big.Int).Sub(funded, getBig("y_paid|"+ep))
+	if residual.Sign() <= 0 {
+		sdk.Abort("nothing to sweep for epoch")
+	}
+	ak := "sweepempty:" + ep
+	if !auth.Authorize(guardianCfg(), "grd", ak, ak, mustCaller(), reqAuths()) {
+		return str(`{"swept":false}`)
+	}
+	set("y_swept|"+ep, "1")
+	setBig("y_paid|"+ep, funded)
+	setBig(kYieldOutstanding, new(big.Int).Sub(getBig(kYieldOutstanding), residual))
+	adapter.Transfer(asset(), getStr(kTreasury), residual)
+	return str(`{"swept":"` + residual.String() + `"}`)
+}
+
+//go:wasmexport fundedOf
+func FundedOf(payload *string) *string {
+	assertInit()
+	return str(`{"funded":"` + getBig("y_funded|"+mustEpoch(payload)).String() + `"}`)
+}
+
+func guardianCfg() auth.Config {
+	var mode auth.Mode
+	switch getStr("cfg_gMode") {
+	case "0":
+		mode = auth.ModeSingle
+	case "1":
+		mode = auth.ModeCosigned
+	case "2":
+		mode = auth.ModeAttest
+	default:
+		sdk.Abort("auth: unknown mode")
+	}
+	thr, terr := strconv.Atoi(getStr("cfg_gThr"))
+	if terr != nil || thr < 1 {
+		sdk.Abort("auth threshold must be a positive integer")
+	}
+	return auth.Config{Mode: mode, Authorities: splitComma(getStr("cfg_gAuth")), Threshold: thr}
+}
+
+// ---- MIGRATION AIRDROP ---------------------------------------------------
+//
+// A launch-time snapshot import. It runs a handful of times and is then dead, which
+// is exactly why it does not deserve a contract of its own — but it does hold tokens,
+// and it now holds them in the same balance as everybody's staked principal.
+//
+// So every batch is bounded twice over:
+//
+//  1. by `maxAirdrop`, the cap chosen at init, and
+//  2. by the UNOBLIGATED balance — what is left after principal and unclaimed yield.
+//
+// The second is the one that matters here. Without it an over-sized airdrop would pay
+// itself out of staked principal and the shortfall would only surface later, when a
+// staker tried to withdraw and found the custody short. Checking it up front turns
+// that into a refused batch.
+//
+// AIRDROP DIRECTLY INTO STAKE (`airdropStaked`): credits stake instead of
+// transferring. Nothing leaves the contract — the float simply becomes principal — so
+// recipients start earning yield immediately and cannot dump on day one without
+// serving the unstake cooldown first. It routes through applyCredit, so checkpoints
+// and the drawdown accumulator stay correct by construction, and the envelope is
+// preserved exactly: the balance is unchanged while obligations rise by the amount
+// credited, which is the float being reclassified rather than spent.
+
+// unobligated = balance − (principal + unclaimed yield). Only the airdrop may spend it.
+func unobligated() *big.Int {
+	return new(big.Int).Sub(adapter.BalanceOfSelf(asset()), obligations())
+}
+
+// airdropBatch — owner-only, idempotent per batchId.
+// {"batchId","entries":"acct:amount,acct:amount"}
+//
+//go:wasmexport airdropBatch
+func AirdropBatch(payload *string) *string {
+	assertInit()
+	c := mustCaller()
+	owner := sdk.GetEnvKey("contract.owner")
+	if owner == nil || c != *owner {
+		sdk.Abort("only owner")
+	}
+	auth.RequireActive(c, reqAuths()) // a posting key must not move funds
+	if getStr(kMaxAir) == "" {
+		sdk.Abort("airdrop not configured — set maxAirdrop at init")
+	}
+	batch := field(payload, "batchId")
+	if batch == "" {
+		sdk.Abort("batchId required")
+	}
+	validateAddr(batch)
+	bk := "ad_done|" + batch
+	if present(bk) {
+		sdk.Abort("batch already applied")
+	}
+	set(bk, "1") // idempotent: the whole tx reverts if anything below fails
+
+	staked := getStr(kAirStake) == "1"
+	total := getBig(kAirTotal)
+	sum := new(big.Int) // this batch only, for the envelope check
+	type entry struct {
+		acct string
+		amt  *big.Int
+	}
+	list := []entry{}
+	for _, e := range splitComma(field(payload, "entries")) {
+		acct, amtStr := split2(e)
+		if acct == "" {
+			continue
+		}
+		validateAddr(acct)
+		// Recipients are credited on the ledger; a bare "alice" would credit a balance
+		// no key can spend. Skipped like any other malformed entry.
+		if !isLedgerAddr(acct) {
+			continue
+		}
+		amt := parseBig(amtStr)
+		if amt.Sign() <= 0 {
+			continue
+		}
+		list = append(list, entry{acct, amt})
+		sum.Add(sum, amt)
+		total.Add(total, amt)
+	}
+	if total.Cmp(parseBig(getStr(kMaxAir))) > 0 {
+		sdk.Abort("exceeds maxAirdrop cap")
+	}
+	// THE ENVELOPE. Refuse rather than dip into principal or funded yield.
+	if avail := unobligated(); sum.Cmp(avail) > 0 {
+		sdk.Abort("batch exceeds the unobligated balance — an airdrop must never be paid " +
+			"out of staked principal or funded yield; transfer more float in first")
+	}
+	for _, e := range list {
+		if staked {
+			applyCredit(e.acct, e.amt) // float becomes principal; nothing leaves
+		} else {
+			adapter.Transfer(asset(), e.acct, e.amt)
+		}
+	}
+	setBig(kAirTotal, total)
+	out := `{"airdropped_total":"` + total.String() + `"`
+	if staked {
+		out += `,"staked":true`
+	}
+	return str(out + `}`)
+}
+
+//go:wasmexport airdropTotal
+func AirdropTotal(_ *string) *string {
+	assertInit()
+	return str(`{"total":"` + getBig(kAirTotal).String() +
+		`","unobligated":"` + unobligated().String() + `"}`)
+}
+
+// ---- shared helpers ------------------------------------------------------
+
+func set(k, v string)    { sdk.StateSetObject(k, v) }
+func pu(s string) uint64 { n, _ := strconv.ParseUint(s, 10, 64); return n }
+
+// mustEpoch validates a canonical uint epoch string. Non-canonical forms ("00", or a
+// value past uint64) used to alias onto epoch 0 and drain it.
+func mustEpoch(payload *string) string {
+	e := field(payload, "epoch")
+	if e == "" || len(e) > 19 {
+		sdk.Abort("epoch required/too long")
+	}
+	for i := 0; i < len(e); i++ {
+		if e[i] < '0' || e[i] > '9' {
+			sdk.Abort("epoch must be numeric")
+		}
+	}
+	if len(e) > 1 && e[0] == '0' {
+		sdk.Abort("epoch must be canonical")
+	}
+	if _, err := strconv.ParseUint(e, 10, 64); err != nil {
+		sdk.Abort("epoch out of range")
+	}
+	return e
+}
+
+// split2 splits "a:b" on the LAST colon, so ledger addresses (which contain one) stay
+// intact in the left half.
+func split2(s string) (string, string) {
+	last := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			last = i
+		}
+	}
+	if last < 0 {
+		return "", ""
+	}
+	return s[:last], s[last+1:]
+}
+
+func isLedgerAddr(a string) bool {
+	return hasPrefix(a, "hive:") || hasPrefix(a, "contract:") ||
+		hasPrefix(a, "did:") || hasPrefix(a, "system:")
+}
+
+func hasPrefix(s, p string) bool {
+	if len(s) < len(p) {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if s[i] != p[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func selfAddr() string {
+	if id := sdk.GetEnvKey("contract.id"); id != nil {
+		return "contract:" + *id
+	}
+	return ""
 }

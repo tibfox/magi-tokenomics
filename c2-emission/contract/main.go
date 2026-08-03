@@ -167,6 +167,15 @@ func Init(payload *string) *string {
 		if name == dust {
 			dustSeen = true
 		}
+		// Names must be UNIQUE: allocations are recorded per bucket NAME, so two
+		// buckets sharing one would silently merge into a single owed record and the
+		// second would never be separately claimable. Names are also what lets two
+		// buckets point at the SAME contract — which is how one distributor instance
+		// serves several reward channels.
+		if present("bkt|" + name) {
+			sdk.Abort("duplicate bucket name — names identify allocations and must be unique")
+		}
+		set("bkt|"+name, target)
 		set("bucket|"+strconv.FormatUint(n, 10), name+":"+target+":"+strconv.Itoa(w))
 		n++
 	}
@@ -315,35 +324,38 @@ func recordAllocations(epoch uint64, minted *big.Int) {
 	n := getU("bucket_n")
 	dust := getStr("cfg_dustBucket")
 	distributed := new(big.Int)
-	var dustTarget string
 	for i := uint64(0); i < n; i++ {
-		name, target, w := split3(getStr("bucket|" + strconv.FormatUint(i, 10)))
+		name, _, w := split3(getStr("bucket|" + strconv.FormatUint(i, 10)))
 		wb, _ := strconv.Atoi(w)
-		if name == dust {
-			dustTarget = target
-		}
 		slice := new(big.Int).Mul(minted, big.NewInt(int64(wb)))
 		slice.Div(slice, big.NewInt(10000))
 		distributed.Add(distributed, slice)
-		addOwed(target, epoch, slice)
+		addOwed(name, epoch, slice)
 	}
-	// remainder → dust bucket
+	// remainder → dust bucket (init guarantees it names a configured bucket)
 	rem := new(big.Int).Sub(minted, distributed)
-	if rem.Sign() > 0 && dustTarget != "" {
-		addOwed(dustTarget, epoch, rem)
+	if rem.Sign() > 0 {
+		addOwed(dust, epoch, rem)
 	}
 }
 
-func addOwed(target string, epoch uint64, amt *big.Int) {
+// addOwed records an allocation against the bucket NAME rather than its target
+// address. Keying by address collapses two buckets that share a target into one
+// record, which is exactly the configuration a multi-channel distributor uses — one
+// contract funded by a `content` bucket and an `lp` bucket at the same id.
+func addOwed(name string, epoch uint64, amt *big.Int) {
 	if amt.Sign() == 0 {
 		return
 	}
-	k := "owed|" + target + "|" + strconv.FormatUint(epoch, 10)
+	k := "owed|" + name + "|" + strconv.FormatUint(epoch, 10)
 	setBig(k, new(big.Int).Add(getBig(k), amt))
 }
 
 // claimBucket: a bucket target pulls its slice for a given epoch.
-// {"epoch":"N"} — msg.caller must be the target recorded for some bucket.
+// {"epoch":"N","bucket":"name"} — msg.caller must be the target configured for that
+// bucket. The name is required because one contract may be the target of SEVERAL
+// buckets (a distributor serving both a content and an LP channel), so the caller
+// alone does not identify which allocation is being pulled.
 //
 //go:wasmexport claimBucket
 func ClaimBucket(payload *string) *string {
@@ -367,10 +379,19 @@ func ClaimBucket(payload *string) *string {
 	if perr != nil {
 		sdk.Abort("epoch out of range")
 	}
-	k := "owed|" + c + "|" + strconv.FormatUint(ep, 10)
+	bucket := f(payload, "bucket")
+	if bucket == "" {
+		sdk.Abort("bucket required")
+	}
+	// The caller must be the address this bucket was configured to pay. Without this
+	// any contract could name someone else's bucket and drain its allocation.
+	if getStr("bkt|"+bucket) != c {
+		sdk.Abort("caller is not the target of that bucket")
+	}
+	k := "owed|" + bucket + "|" + strconv.FormatUint(ep, 10)
 	amt := getBig(k)
 	if amt.Sign() <= 0 {
-		sdk.Abort("nothing owed for caller/epoch")
+		sdk.Abort("nothing owed for bucket/epoch")
 	}
 	// CEI: zero the owed record before the external transfer
 	sdk.StateDeleteObject(k)
@@ -479,10 +500,23 @@ func ScheduleInfo(_ *string) *string {
 	return str(`{"genesis":"` + getStr("cfg_genesis") + `","epochLen":"` + getStr("cfg_epochLen") + `"}`)
 }
 
+// bucketTarget: {"bucket"} -> the address that bucket pays, "" if no such bucket.
+//
+// Exists so a distributor can verify at ITS init that the bucket funding it actually
+// points back at it. Without that check a typo'd bucket name deploys cleanly and
+// fails much later at the first pullFunding, by which time the epoch it was supposed
+// to fund has already been scored.
+//
+//go:wasmexport bucketTarget
+func BucketTarget(payload *string) *string {
+	assertInit()
+	return str(`{"target":"` + getStr("bkt|"+f(payload, "bucket")) + `"}`)
+}
+
 //go:wasmexport owedOf
 func OwedOf(payload *string) *string {
 	assertInit()
-	return str(`{"owed":"` + getBig("owed|"+f(payload, "target")+"|"+f(payload, "epoch")).String() + `"}`)
+	return str(`{"owed":"` + getBig("owed|"+f(payload, "bucket")+"|"+f(payload, "epoch")).String() + `"}`)
 }
 
 //go:wasmexport emissionForEpochQ
