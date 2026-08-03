@@ -37,6 +37,64 @@ export REPORTER_ACTIVE_WIF=5J...           # the reporter account's ACTIVE key
 | `submit`    | builds the ordered call plan + durable progress                      |
 | `broadcast` | renders and signs `vsc.call` custom_json                             |
 
+## Config reference
+
+Every field, since they are otherwise scattered across the sections below. Unknown
+keys are a load error, not a silent default — a typo'd key never takes effect
+quietly.
+
+| field | default | notes |
+|---|---|---|
+| `hive.api` | `["https://api.hive.blog"]` | first is used for reads; **all** are handed to the broadcaster, so one node being down does not stall an epoch |
+| `hive.chain_id` | `""` = Hive **mainnet** | which chain signatures are made over. **Not** `vsc.net_id`. Wrong value → the signature recovers to a different key and the node says `missing required active authority`, which reads as a permissions bug |
+| `vsc.api` | *required* | node GraphQL, for contract state reads |
+| `vsc.net_id` | *required* | `vsc-mainnet` / `vsc-testnet` |
+| `indexer.api` | *required for* `kind=lp` | Hasura GraphQL endpoint |
+| `indexer.secret` | `""` | `x-hasura-admin-secret`; empty when public |
+| `indexer.pool` | *required for* `kind=lp` | pool contract id as `indexer_contract_id` |
+| `indexer.page_size` | `1000` | rows per GraphQL page |
+| `indexer.allow_stale` | `false` | disables the freshness gate. See the warning under **Two source kinds** before setting it |
+| `contracts.distributor` | *required* | C3 (content) or C5 (LP) |
+| `contracts.funder` | `""` | C2. Required when `submit.keeper` |
+| `contracts.stake` | `""` | C1. Required when `source.weight=token_stake` |
+| `epoch.genesis` | `0` | **must equal** the distributor's `cfg_genesis` |
+| `epoch.len` | *required* | **must equal** the distributor's `cfg_epochLen` |
+| `epoch.lookback` | `20` | how many closed epochs back to search for the oldest unfinalized one. Raise after downtime — a backlog longer than this can never be worked off |
+
+`reporter epoch` verifies `genesis`/`len` against on-chain state before anything is
+submitted. A mismatch would report on the wrong block range and then finalize it,
+which is unrecoverable.
+
+| field | default | notes |
+|---|---|---|
+| `source.kind` | `content` | `content` reads Hive posts/votes → C3; `lp` replays liquidity events → C5 |
+| `source.tag` | *required for* `kind=content` | the Hive tag/community that counts |
+| `source.limit` | `1000` | max posts fetched per epoch |
+| `source.attribution` | `cashout` | `cashout` scores a post in the epoch its Hive payout lands in (every vote counted once); `created` is prompter but discards votes cast after the snapshot |
+| `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required) |
+| `source.exclude` | `[]` | accounts whose posts are skipped entirely |
+| `shares.author_reward_bps` | `0` | author/curator split, `0..10000` |
+| `shares.author_curve` | `"1/1"` | `"num/den"` rational exponent |
+| `shares.curation_curve` | `"1/1"` | `"1/2"` = sqrt = **early** voters win; `>1` rewards late voters. Opposite cultures — pick deliberately |
+| `shares.muted` | `[]` | accounts that earn nothing |
+| `page.max_entries` | `60` | entries per `submitShares` call |
+| `page.max_bytes` | `3800` | must be `<= 4096`, the auth module's payload cap |
+| `submit.account` | `""` | reporter Hive account, with or without `hive:` |
+| `submit.wif_env` | `REPORTER_ACTIVE_WIF` | env var holding the ACTIVE key. **No key ever lives in the config**, so the file can be committed and shared across an Attest quorum |
+| `submit.rc_limit` | `60000` | must fit a **full** page — validated at load, see below |
+| `submit.progress_file` | `reporter-progress.json` | durable resume state |
+| `submit.keeper` | `false` | also poke `C2.distributeEpoch` |
+| `submit.pull_funding` | `false` | also call `pullFunding` |
+| `submit.finalize` | `false` | also call `finalizeEpoch` |
+| `submit.confirm_tries` | `6` | re-reads of the chain before finalizing. `0` selects the default — the gate **cannot** be turned off here |
+| `submit.confirm_interval_sec` | `15` | seconds between those re-reads. `0` selects the default |
+
+Two of these are checked **against each other** at load, because they validate
+perfectly in isolation and are ruinous together. Pagination only emits a short page
+at the very end, so if a full page exceeds `rc_limit` then *every page but the last*
+reverts, every time — while the cheap calls (poke, pull, finalize) all succeed. The
+budget is ~95 RC per entry over a ~200 base ([rc-costs.md](../docs/rc-costs.md)).
+
 ## Why the math is integer-only
 
 `sharecore` uses `math/big` throughout and never `float64`. Two reasons:

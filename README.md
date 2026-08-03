@@ -273,42 +273,52 @@ passthrough.
 
 **Not done, stated plainly:**
 
-- No real deployment yet. Everything here is devnet-verified only.
-- ~~Cosigned auth (mode 1) has never run on devnet.~~ **Closed** by
-  `magi_cosigned_devnet_test.go`: a 2-of-2 C3 rejects a single authority and applies
-  the page when both sign one transaction. All three auth modes now run on a live
-  chain.
-
-  Caveat worth keeping: the devnet's accounts share an active authority, so ONE
-  signature satisfies a two-account `required_auths` list. That proves the CONTRACT's
-  threshold logic — which is what mode 1 implements — but not Hive's aggregation of
-  signatures from genuinely distinct keys.
-
-- ~~The reporter's real signing path is never executed on devnet.~~ **Closed** by
-  `magi_realbroadcast_devnet_test.go`, which runs `reporter run -broadcast` against a
-  live devnet so the reporter builds the envelope, signs with an active key and
-  submits every call itself. It found two bugs that made the submission path
-  completely non-functional: `required_posting_auths` passed as nil (Hive rejects the
-  transaction as `Invalid cast from null_type to Array`) and no configurable Hive
-  chain id (every signature was made over mainnet's, so on any other chain it
-  recovered to the wrong key and the node reported a misleading "missing required
-  active authority").
-
-  It works in LP mode specifically. Content mode needs Hive post data from a fixture
-  server, and the reporter uses ONE endpoint list for both reads and broadcasts, so a
-  fixture endpoint cannot also accept transactions. LP mode reads from the indexer and
-  touches Hive only for the head block — which the devnet's real node answers on the
-  same endpoint it accepts broadcasts on.
-
+- **No real deployment yet.** Everything here is devnet-verified only.
 - **Scale is verified in-process, not on devnet.** A 500-earner epoch across 9 pages
   is covered by `TestCovDist_FiveHundredEarnersAcrossNinePages`: totalShares
   accumulates exactly, all 500 claims pay, and 99,748 of 100,000 is distributed with
   the remainder under one unit per earner — truncation dust, not a leak. What is still
   untested is that shape over a real multi-node chain, where per-transaction RC and
   block inclusion apply; `docs/rc-costs.md` has the measured per-entry curve.
-- `vsc.update_contract` (the in-place upgrade path) is untested, and C2 now aborts
-  loudly if upgraded from a pre-allowance deployment rather than silently starving.
+- **`vsc.update_contract` (the in-place upgrade path) is untested.** C2 aborts loudly
+  if upgraded from a pre-allowance deployment rather than silently starving, but that
+  abort has itself never been exercised against a real code swap.
+- **Cosigned mode 1 is proven at the contract layer, not the key layer.** The devnet's
+  accounts share an active authority, so ONE signature satisfies a two-account
+  `required_auths` list. That proves the CONTRACT's threshold logic — which is what
+  mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
 - Per-tenant config values and the governance DAO are out of scope here.
+
+### What closing the last two gaps found
+
+Both had been written off as untestable. Each was closable, and one was hiding real
+bugs — which is the argument for not accepting "can't be tested" as a resting state.
+
+**Cosigned auth on devnet** (`magi_cosigned_devnet_test.go`) — a 2-of-2 C3 rejects a
+single authority and applies the page when both sign one transaction. It was reachable
+because the test file can build the operation inline via `hivego` rather than through
+the harness's single-auth `CallContract`. All three auth modes now run on a chain.
+
+**The reporter's real signing path** (`magi_realbroadcast_devnet_test.go`) — runs
+`reporter run -broadcast` against a live devnet, so the reporter builds the envelope,
+signs with an active key and submits every call itself. This found **two bugs that
+made the submission path completely non-functional**:
+
+- `required_posting_auths` was passed as nil, so Hive rejected every transaction with
+  `Bad Cast: Invalid cast from null_type to Array`.
+- there was no configurable Hive chain id, so every signature was made over mainnet's.
+  On any other chain it recovered to the wrong key and the node reported a misleading
+  `missing required active authority` — a chain mismatch wearing a permissions error's
+  clothing.
+
+Both were invisible beforehand because the devnet harness supplied those fields itself,
+so every in-harness test passed while the shipped code could not broadcast at all.
+
+It works in **LP mode** specifically. Content mode needs Hive post data from a fixture
+server, and the reporter uses ONE endpoint list for both reads and broadcasts, so a
+fixture endpoint cannot also accept transactions. LP mode reads from the indexer and
+touches Hive only for the head block — which the devnet's real node answers on the same
+endpoint it accepts broadcasts on.
 
 **RC budgeting:** [`docs/rc-costs.md`](docs/rc-costs.md) — measured RC cost of every
 function, the scaling curves for `submitShares` / `distributeEpoch` / `airdropBatch`,

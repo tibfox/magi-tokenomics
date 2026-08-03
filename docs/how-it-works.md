@@ -5,7 +5,7 @@ Plain-language guide. No code. If you want the exact `init` parameters, see the
 
 ## The one-sentence version
 
-You have a token. Every day the system creates some new tokens, splits them between
+You have a token. Every day the system releases some of it from a pool, splits that between
 groups you choose (writers, liquidity providers, stakers, a treasury), and then each
 person comes and collects their share.
 
@@ -77,7 +77,7 @@ records what you're owed, and you claim it when you like.
 Each round (an "epoch", usually a day):
 
 1. Someone pokes C2 — anyone can, it's not privileged.
-2. C2 creates that day's tokens and records how much each bucket is owed.
+2. C2 draws that day's tokens from the pool and records how much each bucket is owed.
 3. Each payout contract pulls its share.
 4. For content and LP, a reporter submits the list of who earned what.
 5. A **challenge window** opens — a guardian can cancel a bad report during it.

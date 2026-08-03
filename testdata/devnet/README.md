@@ -95,9 +95,17 @@ Equally, the pre-attack snapshot is checked for emptiness before the sweep runs:
 baseline of empty strings compares equal to anything, so a mistyped state key would
 turn every "nothing moved" assertion into a no-op.
 
-The reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server, so
+Most reporter tests serve dummy Hive data from a local `httptest` JSON-RPC server, so
 they need no Hive access — but they do talk to the devnet's real GraphQL endpoint and
 broadcast real transactions to the devnet chain.
+
+`magi_realbroadcast_devnet_test.go` is the exception, and the reason is worth knowing
+before you try to extend it. There the *reporter* signs and broadcasts, and it uses
+ONE endpoint list for both reads and broadcasts — so it cannot read from a fixture and
+submit to the chain at the same time. That is why the suite runs in **LP mode**: LP
+reads come from the indexer, leaving Hive needed only for the head block, which the
+devnet's real node answers on the same endpoint it accepts transactions on. Content
+mode has no such split and stays fixture-driven, with the harness broadcasting.
 
 ### `magi_refill_devnet_test.go`
 
