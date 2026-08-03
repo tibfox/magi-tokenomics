@@ -57,15 +57,15 @@ Measured on a devnet run: depositing 100 HBD gave an account ~110,000 RC.
 Read-only queries (`stakeOf`, `stakeAtHeight`, `scheduleInfo`, `owedOf`, `shareOf`,
 `fundedOf`, `minStakeSum`) all land at the **100 RC floor**.
 
-**What C1's drawdown accumulator costs.** Every `stake`/`unstake` now also files that
+**What C1's drawdown accumulator costs.** Every `stake`/`unstake` also files that
 account's position against its epoch-start level, so C7 can divide by the exact
 `Σ min(aᵢ,bᵢ)` (see the C7 section of the [README](../README.md)). That is one extra
 history lookup and one state write: **+25 RC**, flat, on a ~600–1,200 RC operation.
 
-C7's `claim` got **89 RC cheaper** in the same change — it now makes one cross-contract
-call for the denominator instead of two `totalStakedAtHeight` reads. So the exact
-denominator is not merely affordable, it is net cheaper for the operation users perform
-most, and the cost sits with staking rather than with claiming.
+The cost sits with staking rather than with claiming. `C7.claim` makes a single
+cross-contract call for the denominator, which is cheaper than deriving one from two
+`totalStakedAtHeight` reads — so the exact denominator is not merely affordable, it is
+net cheaper for the operation users perform most.
 
 Every fixed-cost call fits the free tier comfortably. The whole deployment sequence
 — seven `init`s plus the token handover — totals roughly **18,000 RC**, so a
@@ -109,16 +109,14 @@ base of ~280. This is the cost that catches operators out: a keeper that stops f
 fortnight and then pokes once has to catch up every missed epoch in a single
 transaction.
 
-> **Re-measured 2026-07-29 for the allowance model, and the numbers went UP** — about
-> 19% per epoch with one bucket. C2 used to `mint`; it now does a cross-contract
-> `transferFrom` per epoch plus two reads (`allowance`, `balanceOf`) per poke. The
-> previous figures in this table (~770 RC/epoch/bucket) were measured under the
-> minting model and are no longer accurate.
+> **Why a poke is not cheap.** C2 does not mint. Each epoch costs a cross-contract
+> `transferFrom` against the pool, plus two reads (`allowance`, `balanceOf`) per poke.
 >
-> The measurement itself had also silently broken: `rc_measure_test.go` never minted
-> a pool, so every poke returned `{"distributed":"0","starved":true}` and the table
-> was recording a 271-RC no-op. If these numbers ever look suspiciously flat, check
-> the `ret=` column shows a non-zero `distributed` before trusting them.
+> **Trusting these numbers:** `rc_measure_test.go` only measures real emission if the
+> fixture funds a pool first — an unfunded one returns `{"distributed":"0",
+> "starved":true}` and the table records a ~271-RC no-op instead. The test asserts
+> `distributed` now, but if these figures ever look suspiciously flat, check the
+> `ret=` column shows a non-zero `distributed` before believing them.
 
 **This is what `maxCatch` is for.** It caps how many epochs one poke will process
 (1..1000, default 50). The free tier now covers only **~9 epochs of catch-up with one

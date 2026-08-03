@@ -181,33 +181,39 @@ around the snapshot.
 after C2 is initialised. C7 refuses otherwise, and the reason is the one design point
 worth understanding here.
 
-The numerator is each staker's `min(aᵢ,bᵢ)`, so the denominator has to be
-`Σ min(aᵢ,bᵢ)` — and no contract can compute that, because summing a per-account
-minimum means iterating every staker. This is why C7 alone was affected: C3 and C5 are
-*handed* their denominator, accumulating `totalShares` from the entries as they are
-submitted, so theirs is the sum of its own numerators by construction. C7 has no
-reporter and had to derive it from aggregate state it could not decompose.
+The numerator is each staker's `min(aᵢ,bᵢ)`, so the denominator must be
+`Σ min(aᵢ,bᵢ)` — which no contract can evaluate directly, because summing a
+per-account minimum means iterating every staker. The obvious substitute,
+`min(Σa, Σb)`, is *larger* whenever stakers move in both directions during an epoch
+(by roughly `min(gross stake-ins, gross stake-outs)`), and dividing by too large a
+figure pays out less than `funded` and strands the difference where no account can
+claim it.
 
-C7 used to divide by `min(Σa, Σb)` instead — the closest figure it could reach
-unaided. That is *larger* whenever stakers move in both directions during an epoch
-(roughly `min(gross stake-ins, gross stake-outs)` larger), so payouts summed to less
-than `funded` and the difference
-belonged to nobody. Recovering it needed a guardian sweep, and a sweep cannot tell
-stranded money from money not yet collected — so claims had to close first. **That is
-where C7's old ~10-day claim deadline came from.**
+C1 therefore maintains the exact value. It keeps one running number per epoch — the
+total by which accounts have fallen below their epoch-start level — giving
 
-C1 now keeps one running number per epoch: the total by which accounts have fallen
-below their epoch-start level. `Σ min(aᵢ,bᵢ) = totalStakedAtHeight(start) − drawdown`,
-maintained in O(1) per stake change. The denominator is exact, payouts sum to `funded`
-less truncation dust, and every consequence unwinds:
+```
+Σ min(aᵢ,bᵢ) = totalStakedAtHeight(epochStart) − drawdown(epoch)
+```
 
-- **claims never expire** — content, LP and yield are now identical in this respect;
-- `sweepResidual` is gone. `sweepEmptyEpoch` replaces it and fires only when the
-  denominator is **zero** — nobody held stake across the epoch, so no claim can ever
-  succeed. That condition is settled history, needs no maturity wait, and cannot
-  strand a slow claimant.
+in O(1) per stake change, with no iteration. Updates telescope, so an account's many
+moves within an epoch collapse to its final `max(0, aᵢ−bᵢ)`.
 
-`treasury` still pins where `sweepEmptyEpoch` sends a stakerless epoch.
+Only C7 needs this. C3 and C5 are *handed* their denominator, accumulating
+`totalShares` from the entries as they are submitted, so theirs is the sum of its own
+numerators by construction. C7 has no reporter and must derive it from aggregate state.
+
+Two properties follow from the denominator being exact:
+
+- **claims never expire** — content, LP and yield are identical in this respect. An
+  epoch is paid out in full, so there is no residue for anyone to reclaim and no
+  reason to ever close claims.
+- **`sweepEmptyEpoch` fires only when the denominator is zero** — nobody held stake
+  across the epoch, so no claim can ever succeed and the funding would otherwise be
+  locked forever. That condition is settled by history, needs no maturity wait, and
+  cannot strand a slow claimant. An epoch with even one staker is never sweepable.
+
+`treasury` pins where `sweepEmptyEpoch` sends a stakerless epoch.
 
 ## NFT mode (not available)
 
@@ -332,36 +338,23 @@ passthrough.
   mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
 - Per-tenant config values and the governance DAO are out of scope here.
 
-### What closing the last two gaps found
+### Two suites worth knowing about
 
-Both had been written off as untestable. Each was closable, and one was hiding real
-bugs — which is the argument for not accepting "can't be tested" as a resting state.
+**`magi_cosigned_devnet_test.go`** — a 2-of-2 C3 rejects a single authority and applies
+the page when both sign one transaction, so all three auth modes run on a chain. It
+builds the operation inline via `hivego` rather than through the harness's single-auth
+`CallContract`.
 
-**Cosigned auth on devnet** (`magi_cosigned_devnet_test.go`) — a 2-of-2 C3 rejects a
-single authority and applies the page when both sign one transaction. It was reachable
-because the test file can build the operation inline via `hivego` rather than through
-the harness's single-auth `CallContract`. All three auth modes now run on a chain.
+**`magi_realbroadcast_devnet_test.go`** — the only suite where the harness does not
+broadcast. `reporter run -broadcast` runs against a live devnet, so the reporter builds
+the envelope, signs with an active key and submits every call itself. It covers the
+whole signing path that no in-harness test can reach, because the harness supplies the
+transaction envelope those tests never exercise.
 
-**The reporter's real signing path** (`magi_realbroadcast_devnet_test.go`) — runs
-`reporter run -broadcast` against a live devnet, so the reporter builds the envelope,
-signs with an active key and submits every call itself. This found **two bugs that
-made the submission path completely non-functional**:
-
-- `required_posting_auths` was passed as nil, so Hive rejected every transaction with
-  `Bad Cast: Invalid cast from null_type to Array`.
-- there was no configurable Hive chain id, so every signature was made over mainnet's.
-  On any other chain it recovered to the wrong key and the node reported a misleading
-  `missing required active authority` — a chain mismatch wearing a permissions error's
-  clothing.
-
-Both were invisible beforehand because the devnet harness supplied those fields itself,
-so every in-harness test passed while the shipped code could not broadcast at all.
-
-It works in **LP mode** specifically. Content mode needs Hive post data from a fixture
-server, and the reporter uses ONE endpoint list for both reads and broadcasts, so a
-fixture endpoint cannot also accept transactions. LP mode reads from the indexer and
-touches Hive only for the head block — which the devnet's real node answers on the same
-endpoint it accepts broadcasts on.
+It runs in **LP mode** specifically: the reporter uses ONE endpoint list for both reads
+and broadcasts, so a fixture endpoint cannot also accept transactions. LP reads come
+from the indexer and touch Hive only for the head block, which the devnet's real node
+answers on the same endpoint it accepts broadcasts on. Content mode has no such split.
 
 **RC budgeting:** [`docs/rc-costs.md`](docs/rc-costs.md) — measured RC cost of every
 function, the scaling curves for `submitShares` / `distributeEpoch` / `airdropBatch`,

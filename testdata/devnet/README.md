@@ -81,12 +81,13 @@ Three things are needed, and only doing the first is not enough:
 1. Deposit in **repeated descending rounds**, so an account moves as much L1 balance
    as it has rather than stopping at the first amount that happens to succeed.
 2. **Poll until the deposits credit the L2 ledger.** They are L1 transfers to the
-   gateway and settle asynchronously — a 25s sleep produced `hbd=0` for every
-   account. The suites poll for up to 4 minutes and fail if it never lands.
+   gateway and settle asynchronously; a fixed sleep is not enough, and a 25s one
+   leaves `hbd=0` on every account. The suites poll for up to 4 minutes and fail if
+   it never lands.
 3. **Assert the resulting headroom.** The tests log
    `ledger balance hive:X hbd=N -> RC ~N+10000` for every actor and fail if the
-   attacker is not funded well past the free tier. A recent run had the attacker at
-   `hbd=100000` → RC ~110,000, against ~48,000 needed for the 34-attack sweep.
+   attacker is not funded well past the free tier. The 34-attack sweep needs roughly
+   48,000 RC; a healthy run puts the attacker near `hbd=100000` → RC ~110,000.
 
 `N/N attacks reached the chain` is also logged, so a regression in any of this is
 visible rather than silent.
@@ -117,43 +118,42 @@ raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
 deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
 would make the refill impossible. The test therefore fails if anyone reintroduces it.
 
-## Verification status against the allowance model
+## Verification status
 
-C2 changed from minting each epoch to drawing from an approved pool. Every suite
-had to be re-run, because a suite that never mints a pool now funds nothing and
-fails several minutes later with a misleading message. Where each one stands:
+Every suite here has been run to completion on a real devnet, not merely compiled.
+Keep this table honest as the code moves: a suite that stops funding a pool now funds
+nothing and fails several minutes later with a misleading message, so a stale "yes"
+is worse than no entry at all.
 
-| suite | run against the pool model | runtime |
+| suite | run green on devnet | runtime |
 |---|---|---|
-| `magi_full_devnet_test.go` | yes | 1869s, re-run 2433s with PHASE 9 |
-| `magi_multiepoch_devnet_test.go` | yes | 1903s, re-run 1928s after the refill change |
+| `magi_full_devnet_test.go` | yes | 2433s |
+| `magi_multiepoch_devnet_test.go` | yes | 2025s |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
-| `magi_c5c6c7_devnet_test.go` | yes | 1106s |
+| `magi_c5c6c7_devnet_test.go` | yes | 1140s |
 | `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1415s, re-run 1205s after the audit fixes |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s |
 | `magi_reporter_devnet_test.go` | yes | 721s |
 | `magi_realbroadcast_devnet_test.go` | yes | 692s |
 | `magi_cosigned_devnet_test.go` | yes | 755s |
 
-**Correction.** This table previously recorded `magi_reporter_devnet_test.go` as
-unaffected, on the grounds that it never calls `distributeEpoch` or `pullFunding`.
-That was wrong, and wrong in an instructive way: those calls do not appear in the
-test source because they come from the **reporter's generated plan** at runtime, so
-grepping the file finds nothing. Running it showed it had been broken all along by
-the pool change — it minted no pool, so emission funded nothing and the run died
-minutes later at `epoch 0 was never finalized on chain`.
+**Do not mark a suite verified by reasoning about its source. Run it.**
 
-It now mints and approves before the ownership handover, and the funding half is
-confirmed on chain (`funded=10000`, epoch finalized, reporter and chain agreeing on
-`totalShares`). A second defect surfaced behind it: the deployer holds the pool AND
-earns a share, so the claim check's absolute-balance assertion read 973286 for a 3286
-payout — the other 970000 being undrawn pool. That is the trap documented below, and
-it is now measured as a delta — which the passing run shows plainly:
-`magi.test1 claimed exactly 3286 (balance 970000 -> 973286)` beside
-`magi.test2 claimed exactly 537 (balance 0 -> 537)`.
+Two traps make source-reading unreliable here — either will leave a suite looking
+fine while it proves nothing:
 
-Do not mark a suite verified from reasoning about its source. Run it.
+- **A suite's calls are not all in its source.** `magi_reporter_devnet_test.go` never
+  writes `distributeEpoch` or `pullFunding` — they come from the **reporter's
+  generated plan** at runtime. Grepping the file for them finds nothing and proves
+  nothing. Every suite must mint and approve a pool before the ownership handover, or
+  emission funds nothing and the run dies minutes in at `epoch 0 was never finalized
+  on chain`.
+- **Assert balance DELTAS, never absolutes.** The deployer holds the pool *and* earns
+  a share, so an absolute check reads 973286 for a 3286 payout — the other 970000
+  being undrawn pool. A passing run states both halves plainly:
+  `magi.test1 claimed exactly 3286 (balance 970000 -> 973286)` beside
+  `magi.test2 claimed exactly 537 (balance 0 -> 537)`.
 
 Keep this table honest as the code moves on: "patched and compiles" is not
 "verified", and this table is the only place that distinction is recorded.
@@ -226,8 +226,9 @@ Get this wrong and `distributeEpoch` funds nothing — the symptom is
 
 Two knock-on effects when writing assertions:
 
-- **`totalSupply` no longer tracks emission.** It is constant once the pool is
-  minted. Measure the pool holder's falling balance, or C2's rising one, instead.
+- **`totalSupply` does not track emission.** It is constant once the pool is minted,
+  because C2 draws from the pool rather than minting. Measure the pool holder's
+  falling balance, or C2's rising one, instead.
 - **Keep the pool holder separate from any participant**, or its balance mixes
   undrawn pool with earned rewards. The full-system suite conflates them (the
   deployer holds the pool and also stakes), which is why its conservation check

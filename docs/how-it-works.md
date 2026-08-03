@@ -89,37 +89,29 @@ there's nothing to report and nothing to challenge.
 ### Nothing you earn ever expires
 
 **Claim whenever you like — content, LP and staking yield alike.** Come back after a
-month, or a year. Your share waits for you.
+month, or a year. Your share waits for you. There is no deadline anywhere in the
+system.
 
-This was not always true. Staking yield used to have a roughly ten-day deadline, and
-the story of why is worth a paragraph, because it shows how one small inaccuracy
-turns into a rule that punishes users.
+For staking yield that takes a little machinery, and it is worth knowing it is there.
+You are paid on the *smaller* of your stake at the start and end of the day, so that
+only people who held throughout earn. To turn that into your share, the contract
+divides by the total everyone earned on — and it cannot simply add that up, because
+summing each person's smaller-of-two-numbers means going through every staker one by
+one, which a contract cannot do.
 
-Staking yield pays you on the *smaller* of your stake at the start and end of the day,
-so that only people who held throughout get paid. Fine. But to work out your share the
-contract has to divide by the total everyone earned on — and it couldn't count that.
-Adding up each person's smaller-of-two-numbers means going through every staker one by
-one, which a contract cannot do. So it divided by the total staked instead, which is a
-slightly bigger number whenever some people added and others removed on the same day.
+So the staking contract keeps a running number instead: how far people have dropped
+below where they started that day. Subtract it from the day's opening total and you
+have the exact figure, without counting through anybody. The division is therefore
+exact, the pot is paid out in full, and nothing is left over for anyone to reclaim —
+which is why claims never need to close.
 
-Dividing by too big a number means paying out less than the full pot. The remainder
-belonged to nobody. To stop it piling up forever, a guardian was allowed to sweep it —
-but a sweep can't tell leftover money from money you simply haven't collected yet. So
-claims had to be closed first. **That deadline existed only to make the sweep safe.**
+The only money left behind is rounding: fractions of a token too small to divide.
+That is the same in all three reward contracts.
 
-It's fixed now, at the source. The staking contract keeps one running number per day:
-how far people have dropped below where they started. Subtract it from the day's
-opening total and you have the exact figure, with no counting through stakers. The
-division is now correct, the pot is paid out in full, there's nothing left to sweep,
-and so there's nothing to close claims for.
-
-The only money still left behind is rounding — fractions of a token too small to
-divide. That's the same in all three contracts.
-
-One narrow exception exists: if a day passes with *nobody staked at all*, that day's
-yield can never be claimed by anyone, and the guardian can recover it to the treasury.
-That needs no deadline, because whether anyone was staked is settled history and no
-amount of waiting could change it.
+One narrow exception: if a day passes with *nobody staked at all*, that day's yield
+can never reach anyone, and the guardian can recover it to the treasury. That needs no
+deadline either, because whether anyone was staked is settled history and no amount of
+waiting could change it. A day with even one staker can never be touched.
 
 ## Who can do what
 

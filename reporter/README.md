@@ -202,10 +202,9 @@ someone else's, and so the aggregation stays in the reporter. Do not "optimise" 
 moving the aggregation into SQL: a view that differs between deployments turns a
 quorum into a silent byte-mismatch.
 
-**But reporters sharing an Attest quorum should point at the SAME indexer.** An
-earlier version of this document claimed different indexers were safe, on the grounds
-that the reporter pins its arithmetic to explicit heights. That was wrong — the
-heights are the indexer's, not ours. Its ingestion falls back between a transaction's
+**Reporters sharing an Attest quorum must point at the SAME indexer.** Pinning the
+arithmetic to explicit heights is not enough to make different indexers safe, because
+the heights are the indexer's, not ours. Its ingestion falls back between a transaction's
 L1 anchored height and the state-output height when the `transaction_pool` lookup
 misses, and that height is part of the per-event dedupe key. Two instances can
 therefore assign different heights to the same event, place it either side of an epoch
@@ -354,12 +353,11 @@ agree). The cutoff is what makes a report reproducible forever.
 These are properties of Hive and the VSC node, all verified against live
 infrastructure — not assumptions.
 
-- **There is NO reporting deadline.** Vote detail is kept indefinitely: a post
-  created 2023-03-09 and paid out 2023-03-16 still returns all 287 votes with
-  `time`/`percent`/`rshares` 1234 days later. (An earlier version of this package
-  claimed a 7-day pruning window and refused to score paid-out posts. That was
-  wrong — the "Post ... does not exist" error came from querying with a permlink
-  that had been truncated in a debug print.)
+- **There is NO reporting deadline, and no 7-day pruning window.** Vote detail is
+  kept indefinitely: a post created 2023-03-09 and paid out 2023-03-16 still returns
+  all 287 votes with `time`/`percent`/`rshares` 1234 days later. Paid-out posts are
+  scored normally. If you meet `Post ... does not exist`, suspect a truncated
+  permlink before you suspect pruning.
 - **`bridge.get_ranked_posts` caps `limit` at 20.** Asking for more is a hard
   `Assert Exception: limit = N outside valid range [1:20]`, not a silent clamp, so
   every epoch is paged.
