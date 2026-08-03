@@ -130,7 +130,7 @@ against everyone else — outsiders, and token holders who aren't the owner.
 |---|---|---|
 | anyone | poke the schedule, pull funding, claim their own share | anything else |
 | reporter | submit share lists, close an epoch | mint, move funds, pay itself |
-| guardian | cancel a bad report during the challenge window; sweep genuinely unclaimable leftovers to a **fixed** treasury | redirect the treasury, take funds |
+| guardian | cancel a bad report during the challenge window; sweep a day that **nobody could ever claim** to a **fixed** treasury | redirect the treasury, take funds, touch a day that had any staker |
 | owner | queue token operations (pause, change owner) on a **time delay** | act instantly, or bypass the veto |
 
 Two rules are enforced by the contracts, not by convention:

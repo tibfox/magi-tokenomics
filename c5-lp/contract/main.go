@@ -254,7 +254,10 @@ func CancelEpoch(payload *string) *string {
 			sdk.Abort("epoch not funded")
 		}
 		// Anchor on the LATER of the schedule and the block the funding actually
-		// arrived — the same rule as C7.deadlineOf.
+		// arrived. C7 used the same rule for its claim deadline until that deadline
+		// was removed entirely (its denominator is now exact, so it has no residue to
+		// sweep and no reason to close claims); this stale-rescue anchor is unrelated
+		// and stays.
 		//
 		// Anchoring on epochEnd alone broke once C2 stopped latching on exhaustion.
 		// Backlog funding is now a designed mode: a starved schedule resumes when the
