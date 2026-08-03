@@ -322,8 +322,7 @@ Override with `-epoch N`. An epoch that has not closed yet is refused.
 
 **A post is scored in the epoch its Hive payout falls in** — 7 days after posting,
 once voting has closed. Every vote is counted exactly once, by its weight. Rewards
-lag one payout period behind posting, exactly as they do natively on Hive and in
-SCOT.
+therefore lag one payout period behind posting, the same lag Hive itself has.
 
 This is not configurable. A config carrying an `attribution` key is rejected at load
 rather than ignored.

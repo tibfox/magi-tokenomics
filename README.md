@@ -1,8 +1,14 @@
 # MAGI Tokenomics Framework
 
-Reusable, deploy-per-project contract framework recreating Hive-Engine outpost/SCOT
-tokenomics on MAGI/VSC. Any project deploys its own instances and configures the
-economics entirely through `init` — **no numbers are hardcoded**.
+Reusable, deploy-per-project contract framework for community token economics on
+MAGI/VSC: scheduled emission split across reward pools, with content, LP and staking
+payouts that each holder claims for themselves. Any project deploys its own instances
+and configures the economics entirely through `init` — **no numbers are hardcoded**.
+
+Hive-Engine's tribes (SCOT/outposts) were the reference point for *what problem to
+solve*, not a specification. This is an independent implementation and it does not
+reproduce their behaviour — do not assume a rule carries over because it held there.
+Where a number or a policy matters to you, read it here.
 
 New here? Read [`docs/how-it-works.md`](docs/how-it-works.md) first — it explains the
 whole system in plain language. This file is the build-and-deploy reference.
@@ -59,8 +65,9 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + repo
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
-   the deploy fee (`get_hbd_balance() >= -delta` assert). RC = ledger HBD + a
-   10,000 free allowance, so deposit *after* deploying to cover the init calls.
+   the deploy fee (`get_hbd_balance() >= -delta` assert). RC capacity comes from that
+   same ledger balance, so deposit *after* deploying to cover the init calls — see
+   [`docs/rc-costs.md`](docs/rc-costs.md).
 2. **A contract must be initialised by the account that deployed it.** The deployer
    becomes `contract.owner`, and every `init` aborts unless `msg.caller == owner`.
 3. **Fund C6 and stake into C1 BEFORE initialising C2.** Two separate reasons:
@@ -290,11 +297,12 @@ Staked funds sit in C1 and no role — owner, guardian or reporter — can touch
 Two failure modes make an attack suite look green while proving nothing, and both are
 guarded against explicitly:
 
-- **An attack that aborts for the wrong reason.** The attacker is funded well past
-  the 10,000-RC free tier (deposits polled until credited, then asserted — a recent
-  run had the attacker at RC ~110,000 against ~48,000 needed), and every run logs
-  `N/N attacks reached the chain`. A malformed payload that aborts on parsing proves
-  the parser works, not the authority gate.
+- **An attack that aborts for the wrong reason.** The attacker's deposits are polled
+  until credited and then asserted, so it runs with RC capacity well past what the
+  sweep needs (~110,000 against ~48,000), and every run logs
+  `N/N attacks reached the chain`. An attack that dies of insufficient RC proves
+  nothing about authority, and neither does a malformed payload that aborts on
+  parsing.
 - **A vacuous assertion.** The pre-attack state snapshot is rejected if any baseline
   value is empty, since an empty baseline compares equal to anything.
 

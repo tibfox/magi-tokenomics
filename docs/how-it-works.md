@@ -11,12 +11,14 @@ person comes and collects their share.
 
 ## Why it exists
 
-On Hive-Engine, "tribes" ran on SCOT and outposts: you post with a tag, people vote,
-and a token gets handed out. That was closed software you rented.
+Communities have long wanted their own token: you post with a tag, people vote, and
+the token gets handed out. On Hive-Engine that meant renting closed software.
 
-This is the same idea rebuilt as contracts you deploy and own. Nothing is
-hardcoded — every number is a setting you choose when you set it up. Two projects
-running this can have completely different economics.
+This is that idea built as contracts you deploy and own. It is not a copy of
+Hive-Engine and does not behave like it in the details — it was written from scratch,
+so treat any rule you know from there as something to check here rather than assume.
+Nothing is hardcoded: every number is a setting you choose when you set it up, and two
+projects running this can have completely different economics.
 
 ## The moving parts
 

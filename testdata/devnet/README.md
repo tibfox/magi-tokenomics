@@ -71,9 +71,10 @@ Attest mode (2-of-3) it proves a single rogue cannot reach threshold, cannot
 equivocate (one vote per authority per action, so backing a second payload is
 refused), and cannot stop the two honest reporters committing *their* payload.
 
-**The attacker account must be funded, and the funding must be PROVEN.** RC is
-`ledger HBD + 10,000 free` — about seven transactions. Past that, attacks fail with
-*insufficient RC* instead of *not authorised*: a false pass, green while proving
+**The attacker account must be funded, and the funding must be PROVEN.** RC capacity
+comes from the account's VSC-ledger HBD balance, and a spend only thaws back over
+~5 days — so an unfunded attacker runs out mid-sweep and the remaining attacks fail
+with *insufficient RC* instead of *not authorised*: a false pass, green while proving
 nothing.
 
 Three things are needed, and only doing the first is not enough:
@@ -86,8 +87,9 @@ Three things are needed, and only doing the first is not enough:
    it never lands.
 3. **Assert the resulting headroom.** The tests log
    `ledger balance hive:X hbd=N -> RC ~N+10000` for every actor and fail if the
-   attacker is not funded well past the free tier. The 34-attack sweep needs roughly
-   48,000 RC; a healthy run puts the attacker near `hbd=100000` → RC ~110,000.
+   attacker lacks the capacity for the whole sweep. The 34 attacks need roughly
+   48,000 RC back to back, with no time to thaw; a healthy run puts the attacker near
+   `hbd=100000` → RC ~110,000.
 
 `N/N attacks reached the chain` is also logged, so a regression in any of this is
 visible rather than silent.

@@ -38,11 +38,19 @@
 //     place. R16 additionally requires rejecting soulbound ids: the NFT refuses
 //     safeTransferFrom when isSoulbound(id) && from != owner, so editions pulled
 //     into C1 custody could never be returned. No such guard exists either.
+//  5. The DEX does not trade editions. `vsc-eco/dex-contracts` pools fungible
+//     balances, so an editioned NFT cannot be an AMM asset there and no pool can
+//     exist for it. That breaks the C5 bucket outright rather than merely making it
+//     inaccurate: an LP-reward distributor for an asset with no liquidity pool has
+//     no providers to pay, and the reporter's `lp` mode has no add_liq/rem_liq
+//     events to replay. This one is not fixable inside this repo — it needs the DEX
+//     to support the asset first — so it bounds when NFT mode could be revisited
+//     at all, independently of the arithmetic above.
 //
-// Until R4/R16 are implemented across C2/C3/C5/C7 and C2's supply reads are made
-// kind-aware, the only safe behaviour is to fail closed: RequireFungible rejects
-// kind "1" at init in every contract, and the movement functions below keep an
-// unconditional abort as a second line of defence.
+// Until R4/R16 are implemented across C2/C3/C5/C7, C2's supply reads are made
+// kind-aware, and the DEX can pool the asset, the only safe behaviour is to fail
+// closed: RequireFungible rejects kind "1" at init in every contract, and the
+// movement functions below keep an unconditional abort as a second line of defence.
 package adapter
 
 import (

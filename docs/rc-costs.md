@@ -11,48 +11,61 @@ GOTOOLCHAIN=go1.25.3 go test ./itest/ -run TestRC_ProfileAllFunctions -count=1 -
 GOTOOLCHAIN=go1.25.3 go test ./itest/ -run TestRC_DistributeEpochCatchUpCost -count=1 -v
 ```
 
-## The budget you are spending against
+## What you are spending against
 
-**RC = the account's VSC-ledger HBD balance + a 10,000 free allowance.**
+**RC is a regenerating capacity, not a balance you burn down.** Three things decide
+what an account can do (`modules/rc-system` in go-vsc-node):
 
-The 10,000 is a standing allowance for Hive accounts, *not* a per-execution budget
-and not a per-day quota. An account holding no HBD on the VSC ledger has exactly
-10,000 RC to work with; depositing HBD raises it one-for-one. So "fits the free
-tier" below means *an unfunded account can do this*; anything larger needs a
-deposit.
+```
+capacity   = the account's VSC-ledger HBD balance   (+10,000 for hive: accounts)
+spending   freezes RC, which then thaws linearly back to zero over ~5 days
+available  = capacity − currently frozen
+```
 
-Measured on a devnet run: depositing 100 HBD gave an account ~110,000 RC.
+Two consequences worth having straight before reading any number below:
+
+- **Capacity is set by your HBD balance.** Depositing raises it one-for-one — 100 HBD
+  measured at ~110,000 RC on devnet. Holding more HBD does not "buy" transactions; it
+  raises the ceiling you can be mid-flight against.
+- **It refills on its own.** A spend is returned over roughly five days, so the
+  sustainable throughput of an account is about *capacity per five days*. An operation
+  that costs more RC than you have capacity for cannot be made to fit by waiting; one
+  that merely costs a lot can be repeated as the frozen amount thaws.
+
+So the question a cost below answers is **"what capacity does this need?"**, not "does
+it fit in an allowance". Size the account for the largest single call it must make,
+then check the per-day total against capacity ÷ 5.
 
 ---
 
 ## Fixed-cost functions
 
-| contract | action | RC | free tier |
-|---|---|---:|---|
-| C0 token | `init` | 642 | ok |
-| C0 token | `mint` | 273 | ok |
-| C0 token | `transfer` (to contract) | 340 | ok |
-| C0 token | `transfer` (to account) | 214 | ok |
-| C0 token | `approve` | 243 | ok |
-| C0 token | `changeOwner` | 863 | ok |
-| C1 staking | `init` | 970 | ok |
-| C1 staking | `stake` (first, creates history) | 1,204 | ok |
-| C1 staking | `stake` (subsequent) | 1,043 | ok |
-| C1 staking | `stakeFor` | 1,090 | ok |
-| C1 staking | `unstake` | 628 | ok |
-| C1 staking | `claimUnstaked` | 502 | ok |
-| C2 emission | `init` (3 buckets) | 5,725 | ok |
-| C2 emission | `queueTokenOp` | 163 | ok |
-| C2 emission | `cancelTokenOp` | 100 | ok |
-| C2 emission | `executeTokenOp` (calls token.pause) | 333 | ok |
-| C3 / C5 | `init` | 2,683 | ok |
-| C3 / C5 | `pullFunding` (cross-contract) | 889 | ok |
-| C3 / C5 | `finalizeEpoch` | 343–347 | ok |
-| C3 / C5 | `claim` | 497–529 | ok |
-| C6 migration | `init` | 1,175 | ok |
-| C7 yield | `init` | 3,102 | ok |
-| C7 yield | `pullFunding` | 822 | ok |
-| C7 yield | `claim` (reads C1 history) | 980 | ok |
+| contract | action | RC |
+|---|---|---:|
+| C0 token | `init` | 642 |
+| C0 token | `mint` | 273 |
+| C0 token | `transfer` (to contract) | 340 |
+| C0 token | `transfer` (to account) | 214 |
+| C0 token | `approve` | 243 |
+| C0 token | `changeOwner` | 863 |
+| C1 staking | `init` | 970 |
+| C1 staking | `stake` (first, creates history) | 1,204 |
+| C1 staking | `stake` (subsequent) | 1,043 |
+| C1 staking | `stakeFor` | 1,090 |
+| C1 staking | `unstake` | 628 |
+| C1 staking | `claimUnstaked` | 502 |
+| C2 emission | `init` (3 buckets) | 5,725 |
+| C2 emission | `queueTokenOp` | 163 |
+| C2 emission | `cancelTokenOp` | 100 |
+| C2 emission | `executeTokenOp` (calls token.pause) | 333 |
+| C3 / C5 | `init` | 2,683 |
+| C3 / C5 | `pullFunding` (cross-contract) | 889 |
+| C3 / C5 | `finalizeEpoch` | 343–347 |
+| C3 / C5 | `claim` | 497–529 |
+| C6 migration | `init` | 1,175 |
+| C7 yield | `init` | 3,102 |
+| C7 yield | `pullFunding` | 822 |
+| C7 yield | `claim` (reads C1 history) | 980 |
 
 Read-only queries (`stakeOf`, `stakeAtHeight`, `scheduleInfo`, `owedOf`, `shareOf`,
 `fundedOf`, `minStakeSum`) all land at the **100 RC floor**.
@@ -67,9 +80,10 @@ cross-contract call for the denominator, which is cheaper than deriving one from
 `totalStakedAtHeight` reads — so the exact denominator is not merely affordable, it is
 net cheaper for the operation users perform most.
 
-Every fixed-cost call fits the free tier comfortably. The whole deployment sequence
-— seven `init`s plus the token handover — totals roughly **18,000 RC**, so a
-deployer needs a funded account (about 10 HBD deposited is ample).
+No single fixed-cost call is large. The whole deployment sequence — seven `init`s
+plus the token handover — totals roughly **18,000 RC**, and it happens back to back
+with no time for anything to thaw, so the deployer needs capacity for the lot at
+once. About 10 HBD deposited is ample.
 
 ---
 
@@ -85,24 +99,25 @@ deployer needs a funded account (about 10 HBD deposited is ample).
 | 60 | 4,897 | ~82 |
 
 Roughly **~80–95 RC per entry** plus ~200 fixed. The default page size of 60
-entries costs ~4,900 RC — inside the free tier, but only just, and the 4096-byte
-payload cap usually binds first anyway.
+entries costs ~4,900 RC; the 4096-byte payload cap usually binds before RC does.
 
-**Sizing a real epoch:** 500 earners at 60/page = 9 pages ≈ **44,000 RC**, so a
-reporter serving a busy tribe needs a funded account, not the free tier.
+**Sizing a real epoch:** 500 earners at 60/page = 9 pages ≈ **44,000 RC**, sent within
+minutes of each other. A reporter serving a tribe that size needs capacity for the
+whole epoch at once, and enough headroom that the next epoch is not waiting on the
+thaw — so roughly 40 HBD or more on the ledger.
 
 ### `distributeEpoch` — scales with epochs caught up × buckets
 
-| epochs | buckets | RC | free tier |
-|---:|---:|---:|---|
-| 1 | 1 | 1,279 | ok |
-| 5 | 1 | 5,242 | ok |
-| 10 | 1 | 10,196 | **exceeds** |
-| 25 | 1 | 25,134 | **exceeds** |
-| 50 | 1 | 50,004 | **exceeds** |
-| 1 | 3 | 1,718 | ok |
-| 10 | 3 | 14,587 | **exceeds** |
-| 50 | 3 | 72,122 | **exceeds** |
+| epochs | buckets | RC |
+|---:|---:|---:|
+| 1 | 1 | 1,279 |
+| 5 | 1 | 5,242 |
+| 10 | 1 | 10,196 |
+| 25 | 1 | 25,134 |
+| 50 | 1 | 50,004 |
+| 1 | 3 | 1,718 |
+| 10 | 3 | 14,587 |
+| 50 | 3 | 72,122 |
 
 About **~995 RC per epoch** with one bucket and **~1,437** with three, over a fixed
 base of ~280. This is the cost that catches operators out: a keeper that stops for a
@@ -119,10 +134,11 @@ transaction.
 > `ret=` column shows a non-zero `distributed` before believing them.
 
 **This is what `maxCatch` is for.** It caps how many epochs one poke will process
-(1..1000, default 50). The free tier now covers only **~9 epochs of catch-up with one
-bucket and ~6 with three** — so either keep the keeper running, fund it, or set
-`maxCatch` low enough that a poke always fits your keeper's RC and simply poke
-repeatedly until caught up.
+(1..1000, default 50). Because the whole catch-up lands in ONE transaction, it is
+bounded by capacity rather than by throughput — waiting does not help, since the RC
+has to be available simultaneously. Either keep the keeper running, give it capacity
+for the worst catch-up you would tolerate, or set `maxCatch` low enough that a poke
+always fits and simply poke repeatedly until caught up.
 
 **`submit.rc_limit` must cover a FULL page**, and the reporter now refuses a config
 where it does not. The two settings validate fine in isolation and are incoherent
@@ -133,37 +149,40 @@ headroom.
 
 ### `airdropBatch` — scales with recipients
 
-| recipients | RC | free tier |
-|---:|---:|---|
-| 1 | 499 | ok |
-| 10 | 3,848 | ok |
-| 25 | 9,289 | ok (barely) |
-| 50 | 18,383 | **exceeds** |
+| recipients | RC |
+|---:|---:|
+| 1 | 499 |
+| 10 | 3,848 |
+| 25 | 9,289 |
+| 50 | 18,383 |
 
-About **~370 RC per recipient**. **Keep batches at or below 25 recipients** to stay
-inside the free tier; ~10 is a comfortable default. A migration of 1,000 holders is
-~40 batches and ~370,000 RC total, so budget the deposit accordingly.
+About **~370 RC per recipient**. ~10–25 per batch is a comfortable size: batches are
+idempotent per `batchId`, so there is no penalty for splitting. A migration of 1,000
+holders is ~370,000 RC in total, which is the number to size the deposit against — a
+run of back-to-back batches gives the earlier ones no time to thaw.
 
 ---
 
 ## Practical guidance
 
-| role | typical per-epoch cost | needs funding? |
+| role | typical per-epoch cost | capacity to hold |
 |---|---|---|
-| keeper (`distributeEpoch` + 3 `pullFunding`) | ~4,100 RC | free tier is fine **if** it never falls behind |
-| reporter (pages + `finalizeEpoch`) | ~5,200 RC for 60 earners; ~44,000 for 500 | **yes**, past a small tribe |
-| claimant | ~500–1,100 RC per claim | free tier is fine |
-| deployer (one-off) | ~18,000 RC | **yes** |
-| migration (per 25-holder batch) | ~9,300 RC | yes for anything beyond a few batches |
+| keeper (`distributeEpoch` + 3 `pullFunding`) | ~4,100 RC | small, **provided it never falls behind** — a long catch-up lands in one transaction |
+| reporter (pages + `finalizeEpoch`) | ~5,200 RC for 60 earners; ~44,000 for 500 | size to a full epoch's pages, sent together |
+| claimant | ~500–1,100 RC per claim | negligible, one call at a time |
+| deployer (one-off) | ~18,000 RC | the whole sequence at once; ~10 HBD is ample |
+| migration (per 25-holder batch) | ~9,300 RC | the run, not the batch — back-to-back batches do not thaw in between |
 
 Three rules follow from the numbers:
 
-1. **Fund the reporter and the deployer.** Everything else fits the free tier.
+1. **Size for the burst, not the average.** Everything expensive here happens in
+   bursts — a deploy sequence, an epoch's worth of pages, a batch run — and a burst
+   gets no benefit from the five-day thaw.
 2. **Don't let the keeper fall behind**, or cap `maxCatch` so a poke always fits.
    Emission is not lost by poking repeatedly — `distributeEpoch` is idempotent and
    catches up in bounded chunks.
-3. **Keep airdrop batches ≤ 25.** Batches are idempotent per `batchId`, so splitting
-   a migration into many small batches costs nothing but transactions.
+3. **Keep airdrop batches small** (~10–25). Batches are idempotent per `batchId`, so
+   splitting a migration costs nothing but transactions.
 
 ## Caveats
 
