@@ -78,8 +78,9 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	call(t, &ct, advC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"%s","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`,
 		advTok, advGuardian, advVeto, advC3, advC1), owner, 0, true)
 	call(t, &ct, advC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, advTok), owner, 0, true)
-	call(t, &ct, advC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"%s","reporterThreshold":"1","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
-		advTok, advC2, advReporter, advTreasury, advGuardian), owner, 0, true)
+	call(t, &ct, advC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
+		advTok, advC2, advTreasury, advGuardian), owner, 0, true)
+	call(t, &ct, advC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"`+advReporter+`","reporterThreshold":"1"}`, owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, advC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, advC2), owner, 0, true)
@@ -103,15 +104,15 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	call(t, &ct, advC6, "airdropBatch", fmt.Sprintf(`{"batchId":"genesis","entries":"%s:700,%s:300"}`, advAlice, advBob), owner, 1, true)
 
 	call(t, &ct, advC2, "distributeEpoch", ``, advKeeper, 10, true)
-	call(t, &ct, advC3, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true) // 60000
-	call(t, &ct, advC1, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true) // 40000
-	call(t, &ct, advC3, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"0","entries":"%s:75,%s:25"}`, advAlice, advBob), advReporter, 10, true)
-	call(t, &ct, advC3, "finalizeEpoch", `{"epoch":"0"}`, advReporter, 10, true)
+	call(t, &ct, advC3, "pullFunding", `{"channel":"author","epoch":"0"}`, advKeeper, 10, true) // 60000
+	call(t, &ct, advC1, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true)                    // 40000
+	call(t, &ct, advC3, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"0","page":"0","entries":"%s:75,%s:25"}`, advAlice, advBob), advReporter, 10, true)
+	call(t, &ct, advC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, advReporter, 10, true)
 
-	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advAlice, 11, true)      // 45000
-	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advBob, 11, true)        // 15000
-	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advAlice, 11, true) // 24000
-	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advBob, 11, true)   // 16000
+	call(t, &ct, advC3, "claim", `{"channel":"author","epoch":"0"}`, advAlice, 11, true) // 45000
+	call(t, &ct, advC3, "claim", `{"channel":"author","epoch":"0"}`, advBob, 11, true)   // 15000
+	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advAlice, 11, true)               // 24000
+	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advBob, 11, true)                 // 16000
 
 	// airdrop 700 + author 45000 + yield 24000 = 69700 (600 is staked in C1)
 	assert.Equal(t, "69700", advBal(t, &ct, advAlice, 11).String(), "alice honest total")
@@ -132,21 +133,21 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	F(advC1, "init", `{"token":"x"}`, advMal, 12)
 	F(advC3, "init", `{"token":"x"}`, advMal, 12)
 	// 5. push fraudulent reward shares
-	F(advC3, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"%s:999999"}`, advMal), advMal, 12)
+	F(advC3, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"1","page":"0","entries":"%s:999999"}`, advMal), advMal, 12)
 	// 6. finalize / veto without the role
-	F(advC3, "finalizeEpoch", `{"epoch":"1"}`, advMal, 12)
-	F(advC3, "cancelEpoch", `{"epoch":"0"}`, advMal, 12)
+	F(advC3, "finalizeEpoch", `{"channel":"author","epoch":"1"}`, advMal, 12)
+	F(advC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, advMal, 12)
 	// 7. sweep the distributor to himself
-	F(advC3, "sweepUnallocated", fmt.Sprintf(`{"nonce":"1","to":"%s"}`, advMal), advMal, 12)
+	F(advC3, "sweepUnallocated", fmt.Sprintf(`{"channel":"author","nonce":"1","to":"%s"}`, advMal), advMal, 12)
 	F(advC1, "sweepResidual", `{"epoch":"0"}`, advMal, 12)
 	// 8. claim rewards he has no share of / double-claim
-	F(advC3, "claim", `{"epoch":"0"}`, advMal, 12)
-	F(advC3, "claim", `{"epoch":"0"}`, advAlice, 12) // alice already claimed
+	F(advC3, "claim", `{"channel":"author","epoch":"0"}`, advMal, 12)
+	F(advC3, "claim", `{"channel":"author","epoch":"0"}`, advAlice, 12) // alice already claimed
 	F(advC1, "claimYield", `{"epoch":"0"}`, advMal, 12)
 	F(advC1, "claimYield", `{"epoch":"0"}`, advBob, 12) // bob already claimed
 	// 9. non-canonical epoch aliasing (strand/divert funding)
-	F(advC3, "pullFunding", `{"epoch":"00"}`, advMal, 12)
-	F(advC3, "pullFunding", `{"epoch":"18446744073709551616"}`, advMal, 12)
+	F(advC3, "pullFunding", `{"channel":"author","epoch":"00"}`, advMal, 12)
+	F(advC3, "pullFunding", `{"channel":"author","epoch":"18446744073709551616"}`, advMal, 12)
 	// 10. steal another user's stake
 	F(advC1, "unstake", `{"amount":"600"}`, advMal, 12)
 	F(advC1, "stakeFor", fmt.Sprintf(`{"acct":"%s","amount":"500"}`, advMal), advMal, 12)
@@ -204,6 +205,6 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	assert.Equal(t, "10003000", pickJSON(sup.Ret, "totalSupply"), "no unscheduled minting occurred (3000 bootstrap + the 10000000 pool; epoch emission now comes OUT of that pool rather than adding to supply)")
 
 	// C3 never paid out more than it was funded
-	si := call(t, &ct, advC3, "shareOf", fmt.Sprintf(`{"epoch":"0","account":"%s"}`, advAlice), "hive:anyone", 31, true)
+	si := call(t, &ct, advC3, "shareOf", fmt.Sprintf(`{"channel":"author","epoch":"0","account":"%s"}`, advAlice), "hive:anyone", 31, true)
 	assert.Equal(t, "60000", pickJSON(si.Ret, "funded"), "C3 epoch-0 funding untouched by the attack")
 }

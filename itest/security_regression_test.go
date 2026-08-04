@@ -114,27 +114,45 @@ func TestSec_StaleEpochRescuable(t *testing.T) {
 }
 
 // R2/MED-3: window must be > 0, else the guardian veto is silently disabled.
+// R2/MED-3: the challenge window must be > 0, else the guardian veto is silently
+// disabled. The window is per-channel now, so the check lives at addChannel.
 func TestSec_ZeroWindowRejected(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
-	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
-	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
+	ct := rgBootDist(t)
+	rgAddChannel(t, ct, "0", "hive:reporter", false) // zero disables the veto
+	rgAddChannel(t, ct, "", "hive:reporter", false)  // absent is not "unlimited"
+	rgAddChannel(t, ct, "1", "hive:reporter", true)  // a real window is accepted
 }
 
 // R2/HIGH-3: reporter and guardian authority sets must be disjoint.
+// One coalition must not be able to BOTH finalize a fraudulent report and refuse to
+// cancel it. The reporter is per-channel now, so the disjointness check moved with it.
 func TestSec_ReporterGuardianOverlapRejected(t *testing.T) {
+	ct := rgBootDist(t)
+	rgAddChannel(t, ct, "1", "hive:guardian", false) // same party as the guardian
+	rgAddChannel(t, ct, "1", "hive:reporter", true)  // a disjoint one is fine
+}
+
+// rgBootDist brings up token + C2 + an initialised distributor with no channels yet.
+func rgBootDist(t *testing.T) *test_utils.ContractTest {
+	t.Helper()
 	os.RemoveAll("data/badger")
 	ct := test_utils.NewContractTest()
 	t.Cleanup(func() { ct.DataLayer.Stop() })
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
+	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:same","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
-	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
+	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
+	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:c2guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	return &ct
+}
+
+func rgAddChannel(t *testing.T, ct *test_utils.ContractTest, window, reporter string, ok bool) {
+	t.Helper()
+	call(t, ct, rgC3, "addChannel", fmt.Sprintf(
+		`{"channel":"author","bucket":"author","window":"%s","reporterMode":"0",`+
+			`"reporterAuth":"%s","reporterThreshold":"1"}`, window, reporter), owner, 0, ok)
 }
 
 // R3/HIGH-1: the stale-rescue must be measured from the EPOCH END with a grace of

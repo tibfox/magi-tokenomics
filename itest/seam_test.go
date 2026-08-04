@@ -186,7 +186,8 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 			`"treasury":"hive:treasury",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 		seamToken, seamC2), owner, 0, true)
-	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
+	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0",`+
+		`"reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 
 	// ---- 3. execute the reporter's plan VERBATIM ----------------------------
 
@@ -312,7 +313,8 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 			`"treasury":"hive:treasury",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 		seamToken, seamC2), owner, 0, true)
-	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
+	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0",`+
+		`"reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 
 	call(t, &ct, seamC2, "distributeEpoch", `{}`, "hive:keeper", 2, true)
 	call(t, &ct, seamC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:keeper", 2, true)

@@ -78,22 +78,23 @@ func TestVerticalSlice(t *testing.T) {
 	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, c3ID)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", c2init, owner, 0, true)
-	c3init := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID)
+	c3init := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID)
 	call(t, &ct, c3ID, "init", c3init, owner, 0, true)
 
 	// hand token ownership to C2 so it can mint
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, c3ID, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 
 	// keeper pokes epoch 0 at height 1 → emission = 1000000*1/10 = 100000, all to C3
 	r := call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
 	assert.Contains(t, r.Ret, `"1"`) // distributed 1 epoch
 
 	// C3 pulls funding, reporter submits shares + finalizes, alice/bob claim
-	call(t, &ct, c3ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, &ct, c3ID, "submitShares", `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
-	call(t, &ct, c3ID, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 1, true)
-	call(t, &ct, c3ID, "claim", `{"epoch":"0"}`, "hive:alice", 2, true)
-	call(t, &ct, c3ID, "claim", `{"epoch":"0"}`, "hive:bob", 2, true)
+	call(t, &ct, c3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
+	call(t, &ct, c3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
+	call(t, &ct, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1, true)
+	call(t, &ct, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 2, true)
+	call(t, &ct, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 2, true)
 
 	a := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:alice"}`, "hive:x", 2, true)
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:bob"}`, "hive:x", 2, true)

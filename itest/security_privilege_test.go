@@ -69,7 +69,7 @@ func TestPriv_PostingKeyCannotUsePrivilegedPaths(t *testing.T) {
 		`{"op":"changeOwner","nonce":"1","newOwner":"hive:evil"}`, "hive:guardian", 10, true)
 
 	// C6 owner's posting key must NOT be able to move the bootstrap balance
-	call(t, &ct, pvC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, pvTok), owner, 0, true)
+	call(t, &ct, pvC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":"","maxAirdrop":"1000"}`, pvTok), owner, 0, true)
 	pvCallPosting(t, &ct, pvC6, "airdropBatch",
 		`{"batchId":"b1","entries":"hive:evil:500"}`, owner, 0, false)
 }
@@ -127,12 +127,12 @@ func TestPriv_TreasuryMustBeDisjointFromGuardian(t *testing.T) {
 	ct.RegisterContract(pvC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	pvInitC2(t, &ct, pvC3)
 
-	bad := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:guardian","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2)
+	bad := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:guardian","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2)
 	call(t, &ct, pvC3, "init", bad, owner, 0, false) // treasury == guardian
 
-	self := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"contract:%s","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2, pvC3)
+	self := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"contract:%s","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2, pvC3)
 	call(t, &ct, pvC3, "init", self, owner, 0, false) // treasury == self
 
-	good := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2)
+	good := fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, pvTok, pvC2)
 	call(t, &ct, pvC3, "init", good, owner, 0, true)
 }
