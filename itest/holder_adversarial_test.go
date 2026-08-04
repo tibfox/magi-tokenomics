@@ -98,7 +98,7 @@ func TestHolder_SybilSplitNeverBeatsSingleAccount(t *testing.T) {
 	// honest whale holds 300 shares in ONE account; sybil holds 300 split 3 ways.
 	// funded=25000, totalShares=600 → each share unit is worth 41.66…
 	call(t, &ct, hdC3, "submitShares",
-		`{"epoch":"0","page":"0","entries":"hive:hdwhale:300,hive:hdsyb1:100,hive:hdsyb2:100,hive:hdsyb3:100"}`,
+		`{"channel":"author","epoch":"0","page":"0","entries":"hive:hdwhale:300,hive:hdsyb1:100,hive:hdsyb2:100,hive:hdsyb3:100"}`,
 		"hive:hdreporter", 10, true)
 	call(t, &ct, hdC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:hdreporter", 10, true)
 

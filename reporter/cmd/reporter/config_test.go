@@ -104,6 +104,7 @@ func TestValidate_RequiredAndBoundedFields(t *testing.T) {
 		{"no vsc api", func(c *Config) { c.VSC.API = "" }, "vsc.api"},
 		{"no net id", func(c *Config) { c.VSC.NetID = "" }, "net_id"},
 		{"no distributor", func(c *Config) { c.Contracts.Distributor = "" }, "distributor"},
+		{"no channel", func(c *Config) { c.Contracts.Channel = "" }, "channel"},
 		{"zero epoch len", func(c *Config) { c.Epoch.Len = 0 }, "epoch.len"},
 		{"no tag", func(c *Config) { c.Source.Tag = "" }, "source.tag"},
 		{"bad weight mode", func(c *Config) { c.Source.Weight = "vibes" }, "source.weight"},
@@ -151,7 +152,7 @@ func TestValidate_TokenStakeWithC1IsAccepted(t *testing.T) {
 func TestApplyDefaults_StayWithinChainLimits(t *testing.T) {
 	minimal := `{
 	  "vsc":       { "api": "http://localhost:8080/graphql", "net_id": "vsc-testnet" },
-	  "contracts": { "distributor": "vsc1abc" },
+	  "contracts": { "distributor": "vsc1abc", "channel": "content" },
 	  "epoch":     { "genesis": 10, "len": 100 },
 	  "source":    { "tag": "t" }
 	}`
@@ -347,7 +348,7 @@ func TestValidate_PageMustFitTheRcLimit(t *testing.T) {
 func TestConfig_AttributionIsNotConfigurable(t *testing.T) {
 	raw := `{
 	  "vsc":       {"api":"http://x","net_id":"vsc-testnet"},
-	  "contracts": {"distributor":"vsc1c3"},
+	  "contracts": {"distributor":"vsc1c3","channel":"content"},
 	  "epoch":     {"len":100},
 	  "source":    {"tag":"t","attribution":"created"},
 	  "submit":    {"rc_limit":60000}

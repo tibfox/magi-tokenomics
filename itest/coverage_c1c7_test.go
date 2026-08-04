@@ -576,8 +576,10 @@ func TestCovStake_ContractCallerCanStillUnstake(t *testing.T) {
 	call(t, &ct, c17C1, "init",
 		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), c17Owner, 0, true)
 
-	// a contract holds tokens and approves C1, exactly as a hive account would
-	holder := "contract:" + c17C1 // any contract id; it never executes here
+	// A contract holds tokens and approves C1, exactly as a hive account would. It must
+	// be a DIFFERENT id from C1 itself — the token refuses a self-approval, and since
+	// yield merged into C1 the old stand-in id is now this very contract.
+	holder := "contract:" + c17C2 // any other contract id; it never executes here
 	call(t, &ct, tokenID, "mint", `{"amount":"500"}`, owner, 0, true)
 	call(t, &ct, tokenID, "transfer", fmt.Sprintf(`{"to":"%s","amount":"500"}`, holder), owner, 0, true)
 	call(t, &ct, tokenID, "approve",

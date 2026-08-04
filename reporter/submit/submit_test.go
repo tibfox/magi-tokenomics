@@ -19,7 +19,7 @@ func pages() []sharecore.Page {
 // finalizeEpoch MUST be the last call: the distributor rejects shares once an
 // epoch is finalized, so finalizing early would strand the remaining pages.
 func TestBuildPlan_FinalizeComesLast(t *testing.T) {
-	pl := BuildPlan("vsc1abc", "7", pages(), 90000, true)
+	pl := BuildPlan("vsc1abc", "content", "7", pages(), 90000, true)
 	if len(pl.Calls) != 3 {
 		t.Fatalf("want 3 calls, got %d", len(pl.Calls))
 	}
@@ -38,7 +38,7 @@ func TestBuildPlan_FinalizeComesLast(t *testing.T) {
 }
 
 func TestBuildPlan_CanSkipFinalize(t *testing.T) {
-	pl := BuildPlan("vsc1abc", "7", pages(), 90000, false)
+	pl := BuildPlan("vsc1abc", "content", "7", pages(), 90000, false)
 	for _, c := range pl.Calls {
 		if c.Action == "finalizeEpoch" {
 			t.Fatal("finalize should be omitted")
@@ -55,7 +55,7 @@ func TestProgress_ResumeSkipsCompletedCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pl := BuildPlan("vsc1abc", "7", pages(), 90000, true)
+	pl := BuildPlan("vsc1abc", "content", "7", pages(), 90000, true)
 
 	if got := len(Remaining(pl, pr)); got != 3 {
 		t.Fatalf("fresh progress: want 3 remaining, got %d", got)
@@ -86,7 +86,7 @@ func TestProgress_ResumeSkipsCompletedCalls(t *testing.T) {
 		t.Fatalf("all done: want 0 remaining, got %d", got)
 	}
 	// a different epoch is unaffected
-	pl8 := BuildPlan("vsc1abc", "8", pages(), 90000, true)
+	pl8 := BuildPlan("vsc1abc", "content", "8", pages(), 90000, true)
 	if got := len(Remaining(pl8, pr3)); got != 3 {
 		t.Fatalf("epoch 8 should be untouched, got %d remaining", got)
 	}

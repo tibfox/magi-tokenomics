@@ -11,7 +11,8 @@ import (
 // before finalize. Pulling first spends the whole rescue window paginating.
 func TestBuildFullPlan_PagesPrecedeFundingAndFinalizeIsLast(t *testing.T) {
 	pl := BuildFullPlan(PlanOpts{
-		Epoch: "7", DistributorID: "vsc1C3", FunderID: "vsc1C2",
+		Channel: "content",
+		Epoch:   "7", DistributorID: "vsc1C3", FunderID: "vsc1C2",
 		PullFunding: true, Finalize: true, RcLimit: 10000,
 		Pages: []sharecore.Page{
 			{Index: 0, Entries: "hive:a:1", Count: 1},
@@ -36,7 +37,8 @@ func TestBuildFullPlan_PagesPrecedeFundingAndFinalizeIsLast(t *testing.T) {
 // With finalize off, pullFunding must still land after the pages and stay last.
 func TestBuildFullPlan_OrderingHoldsWithoutFinalize(t *testing.T) {
 	pl := BuildFullPlan(PlanOpts{
-		Epoch: "7", DistributorID: "vsc1C3", PullFunding: true, Finalize: false,
+		Channel: "content",
+		Epoch:   "7", DistributorID: "vsc1C3", PullFunding: true, Finalize: false,
 		Pages: []sharecore.Page{{Index: 0, Entries: "hive:a:1", Count: 1}},
 	})
 	if n := len(pl.Calls); n < 2 || pl.Calls[n-1].Action != "pullFunding" {

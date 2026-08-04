@@ -84,7 +84,9 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, advC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, advC2), owner, 0, true)
-	call(t, &ct, advC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, advTok), owner, 0, true)
+	call(t, &ct, advC6, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":"","maxAirdrop":"1000"}`,
+		advTok), owner, 0, true)
 
 	// bootstrap supply, then hand the token to C2 (the ONLY minter from here on)
 	call(t, &ct, advTok, "mint", `{"amount":"3000"}`, owner, 0, true)

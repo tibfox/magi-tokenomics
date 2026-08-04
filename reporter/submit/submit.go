@@ -41,14 +41,17 @@ type Plan struct {
 // has no shares, and refuses shares once finalized — so finalize MUST come last.
 // It also refuses to finalize an unfunded epoch, so a keeper must have pulled
 // funding first (that is the keeper's job, not the reporter's).
-func BuildPlan(contractID, epoch string, pages []sharecore.Page, rcLimit int, finalize bool) Plan {
+// `channel` names the distributor's reward channel these shares belong to. One
+// distributor now serves several channels, each with its own share book and its own
+// reporter authority, so every call has to say which one it is writing.
+func BuildPlan(contractID, channel, epoch string, pages []sharecore.Page, rcLimit int, finalize bool) Plan {
 	p := Plan{Epoch: epoch}
 	for _, pg := range pages {
 		p.Calls = append(p.Calls, Call{
 			ContractID: contractID,
 			Action:     "submitShares",
-			Payload: fmt.Sprintf(`{"epoch":"%s","page":"%d","entries":"%s"}`,
-				epoch, pg.Index, pg.Entries),
+			Payload: fmt.Sprintf(`{"channel":"%s","epoch":"%s","page":"%d","entries":"%s"}`,
+				channel, epoch, pg.Index, pg.Entries),
 			RcLimit: rcLimit,
 			Note:    fmt.Sprintf("page %d (%d entries)", pg.Index, pg.Count),
 		})
@@ -57,7 +60,7 @@ func BuildPlan(contractID, epoch string, pages []sharecore.Page, rcLimit int, fi
 		p.Calls = append(p.Calls, Call{
 			ContractID: contractID,
 			Action:     "finalizeEpoch",
-			Payload:    fmt.Sprintf(`{"epoch":"%s"}`, epoch),
+			Payload:    fmt.Sprintf(`{"channel":"%s","epoch":"%s"}`, channel, epoch),
 			RcLimit:    rcLimit,
 			Note:       "freeze epoch + open challenge window",
 		})

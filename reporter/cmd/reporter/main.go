@@ -587,6 +587,7 @@ func (a *app) buildPlan(epochFlag string) (*computed, submit.Plan, error) {
 	pl := submit.BuildFullPlan(submit.PlanOpts{
 		Epoch:         eps,
 		DistributorID: a.cfg.Contracts.Distributor,
+		Channel:       a.cfg.Contracts.Channel,
 		FunderID:      funder,
 		PullFunding:   a.cfg.Submit.PullFunding,
 		Finalize:      a.cfg.Submit.Finalize,

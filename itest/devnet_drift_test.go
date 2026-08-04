@@ -59,7 +59,7 @@ func devnetSources(t *testing.T) map[string]string {
 func contractSources(t *testing.T) string {
 	t.Helper()
 	var sb strings.Builder
-	for _, c := range []string{"c1-staking", "c2-emission", "c3-distributor", "c5-lp", "c6-migration", "c7-yield"} {
+	for _, c := range []string{"c1-staking", "c2-emission", "c3-distributor"} {
 		b, err := os.ReadFile(filepath.Join(contractDir, c, "contract", "main.go"))
 		if err != nil {
 			t.Fatalf("read %s: %v", c, err)
@@ -177,7 +177,7 @@ func TestDevnetDrift_ArtifactsAreNewerThanSources(t *testing.T) {
 	}
 
 	for _, c := range []string{
-		"c1-staking", "c2-emission", "c3-distributor", "c5-lp", "c6-migration", "c7-yield",
+		"c1-staking", "c2-emission", "c3-distributor",
 	} {
 		srcPath := filepath.Join("..", c, "contract", "main.go")
 		artPath := filepath.Join("..", c, "artifacts", "main.wasm")
@@ -202,26 +202,10 @@ func TestDevnetDrift_ArtifactsAreNewerThanSources(t *testing.T) {
 	}
 }
 
-// C3 and C5 are the same contract deployed twice and MUST stay byte-identical apart
-// from the package line. A change applied to one and not the other diverges them
-// silently: both compile, both deploy, and only the untouched instance misbehaves.
-func TestDevnetDrift_C3AndC5StayIdentical(t *testing.T) {
-	read := func(p string) []string {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		return strings.Split(string(b), "\n")
-	}
-	c3 := read("../c3-distributor/contract/main.go")
-	c5 := read("../c5-lp/contract/main.go")
-	if len(c3) != len(c5) {
-		t.Fatalf("C3 has %d lines, C5 has %d — the twins have diverged", len(c3), len(c5))
-	}
-	for i := 1; i < len(c3); i++ { // line 0 is the package clause
-		if c3[i] != c5[i] {
-			t.Fatalf("C3 and C5 diverge at line %d:\n  C3: %s\n  C5: %s\n"+
-				"a change to one twin must always be mirrored to the other", i+1, c3[i], c5[i])
-		}
-	}
-}
+// C3 and C5 used to be the same contract deployed twice, and this guard existed to
+// catch them diverging — a change applied to one twin and not the other left both
+// compiling, both deploying, and only the untouched instance misbehaving.
+//
+// The merge removed the twin: one distributor serves every reward channel, so there
+// is nothing left to keep in sync and the whole class of bug is gone. Deleting the
+// guard rather than leaving it passing vacuously, which would read as coverage.

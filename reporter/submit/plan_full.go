@@ -19,7 +19,10 @@ import "magi_token/reporter/sharecore"
 // totalShares>0, and submitShares aborts once the epoch is finalized. So
 // funding must precede shares, and finalize must come dead last.
 type PlanOpts struct {
-	Epoch string
+	// Channel is the distributor reward channel these shares belong to. One
+	// distributor serves several, each with its own share book and reporter.
+	Channel string
+	Epoch   string
 
 	// DistributorID is C3/C5 — the contract that takes shares and pays claims.
 	DistributorID string
@@ -68,7 +71,7 @@ func BuildFullPlan(o PlanOpts) Plan {
 	// open (c3-distributor/contract/main.go:126) — so the pages can go first and the
 	// clock starts as late as possible. finalizeEpoch still requires funded>0, so
 	// pullFunding simply has to precede it, which it does.
-	inner := BuildPlan(o.DistributorID, o.Epoch, o.Pages, o.RcLimit, o.Finalize)
+	inner := BuildPlan(o.DistributorID, o.Channel, o.Epoch, o.Pages, o.RcLimit, o.Finalize)
 	pages, finalize := inner.Calls, []Call(nil)
 	if n := len(pages); n > 0 && pages[n-1].Action == "finalizeEpoch" {
 		pages, finalize = pages[:n-1], pages[n-1:]
@@ -79,7 +82,7 @@ func BuildFullPlan(o PlanOpts) Plan {
 		pl.Calls = append(pl.Calls, Call{
 			ContractID: o.DistributorID,
 			Action:     "pullFunding",
-			Payload:    `{"epoch":"` + o.Epoch + `"}`,
+			Payload:    `{"channel":"` + o.Channel + `","epoch":"` + o.Epoch + `"}`,
 			RcLimit:    o.RcLimit,
 			Note:       "pull epoch slice from funder (after the pages, so the stale clock starts late)",
 		})

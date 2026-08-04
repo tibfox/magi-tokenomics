@@ -74,9 +74,14 @@ type Config struct {
 	} `json:"indexer"`
 
 	Contracts struct {
-		Distributor string `json:"distributor"` // C3 (content) or C5 (LP)
-		Funder      string `json:"funder"`      // C2; empty = a separate keeper pokes it
-		Stake       string `json:"stake"`       // C1; required only for token_stake weighting
+		Distributor string `json:"distributor"` // the distributor contract
+		// Channel names the reward channel on that distributor. One deployed
+		// distributor serves several — content, LP, whatever a tenant adds — each with
+		// its own share book, funding bucket and reporter authority, so a reporter has
+		// to say which one it is writing. Required.
+		Channel string `json:"channel"`
+		Funder  string `json:"funder"` // C2; empty = a separate keeper pokes it
+		Stake   string `json:"stake"`  // C1; required only for token_stake weighting
 	} `json:"contracts"`
 
 	Epoch struct {
@@ -202,6 +207,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Contracts.Distributor == "" {
 		return fmt.Errorf("contracts.distributor is required")
+	}
+	if c.Contracts.Channel == "" {
+		return fmt.Errorf("contracts.channel is required — the distributor's reward channel this reporter writes")
 	}
 	if c.Epoch.Len == 0 {
 		return fmt.Errorf("epoch.len is required and must be > 0")
@@ -340,7 +348,8 @@ const ExampleConfig = `{
   "hive":      { "api": ["https://api.hive.blog"] },
   "vsc":       { "api": "https://api.vsc.eco/api/v1/graphql", "net_id": "vsc-mainnet" },
   "contracts": {
-    "distributor": "vsc1...C3",
+    "distributor": "vsc1...DIST",
+    "channel":     "content",
     "funder":      "vsc1...C2",
     "stake":       ""
   },
@@ -389,7 +398,8 @@ const ExampleLPConfig = `{
     "page_size": 1000
   },
   "contracts": {
-    "distributor": "vsc1...C5",
+    "distributor": "vsc1...DIST",
+    "channel":     "lp",
     "funder":      "vsc1...C2",
     "stake":       ""
   },

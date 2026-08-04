@@ -159,6 +159,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 	assert.NotContains(t, canon, "flagger", "a downvoter earned shares")
 
 	plan := submit.BuildFullPlan(submit.PlanOpts{
+		Channel:       "author",
 		Epoch:         "0",
 		DistributorID: seamC3,
 		FunderID:      seamC2,
@@ -206,12 +207,12 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	// ---- 4. the contract must agree with the reporter -----------------------
 
-	funded := stateBig(t, &ct, seamC3, "funded|0")
-	onChainTotal := stateBig(t, &ct, seamC3, "totalShares|0")
+	funded := stateBig(t, &ct, seamC3, "funded|author|0")
+	onChainTotal := stateBig(t, &ct, seamC3, "totalShares|author|0")
 	require.Equal(t, res.Total.String(), onChainTotal.String(),
 		"contract's totalShares disagrees with the reporter's — the seam is broken")
 	require.Positive(t, funded.Sign(), "epoch was never funded")
-	assert.Equal(t, "finalized", stateStr(t, &ct, seamC3, "status|0"))
+	assert.Equal(t, "finalized", stateStr(t, &ct, seamC3, "status|author|0"))
 	t.Logf("on-chain: funded=%s totalShares=%s (reporter total %s)", funded, onChainTotal, res.Total)
 
 	// every account the reporter named must be able to claim exactly
@@ -323,8 +324,8 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 	// every other malformed entry is handled, and enough to close the stranding bug
 	// because nothing uncountable ever enters totalShares.
 	call(t, &ct, seamC3, "submitShares",
-		`{"epoch":"0","page":"0","entries":"alice:100,hive:bob:100"}`, "hive:reporter", 2, true)
-	assert.Equal(t, "100", stateStr(t, &ct, seamC3, "totalShares|0"),
+		`{"channel":"author","epoch":"0","page":"0","entries":"alice:100,hive:bob:100"}`, "hive:reporter", 2, true)
+	assert.Equal(t, "100", stateStr(t, &ct, seamC3, "totalShares|author|0"),
 		"a domain-less account must not be counted into totalShares")
 	call(t, &ct, seamC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 2, true)
 
