@@ -77,7 +77,6 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// aborts otherwise. (Deploying these two from node 2 and initialising from node 1
 	// is what failed the first run.)
 	c3ID := deploy("me-c3", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 1)
-	c7ID := deploy("me-c7", magiWasm(t, "c7-yield/artifacts/main.wasm"), 1)
 
 	for _, n := range []int{1, 2} {
 		for round := 0; round < 4; round++ {
@@ -190,25 +189,30 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
 			`"buckets":"content:contract:%s:6000,yield:contract:%s:4000"}`,
-		tokenID, epochLen, guardian, treasury, c3ID, c7ID), "C2 init")
+		tokenID, epochLen, guardian, treasury, c3ID, c1ID), "C2 init")
 	genesis, _ := strconv.ParseUint(waitKey(c2ID, "cfg_genesis", "genesis"), 10, 64)
 	t.Logf("genesis=%d epochLen=%d -> epoch N spans [%d+%dN .. +%d]", genesis, epochLen, genesis, epochLen, epochLen-1)
 
 	call(c3ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
-			`"reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:%s",`+
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
-		tokenID, c2ID, owner, treasury, guardian), "C3 init")
-	waitKey(c3ID, "cfg_funder", "C3 ready")
+		tokenID, c2ID, treasury, guardian), "distributor init")
+	waitKey(c3ID, "cfg_funder", "distributor ready")
+	// The content channel: bucket, window and reporter are per-channel now.
+	call(c3ID, "addChannel", fmt.Sprintf(
+		`{"channel":"content","bucket":"content","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"content"}`,
+		owner), "distributor addChannel content")
+	waitKey(c3ID, "ch_bucket|content", "content channel registered")
 	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
 	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
 	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
 	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
-	call(c7ID, "init", fmt.Sprintf(
+	call(c1ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
 		tokenID, c2ID, c1ID, treasury, guardian), "C7 init")
-	waitKey(c7ID, "cfg_funder", "C7 ready")
+	waitKey(c1ID, "cfg_funder", "C7 ready")
 
 	// emission = baseAnnual * epochLen / blocksPerYear = 1000000 * 30 / 1000 = 30000
 	// per epoch; split 6000bps content / 4000bps yield.
@@ -232,13 +236,13 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	waitValue(c1ID, "total_staked", "1500", "C1 total_staked after B tops up")
 	callN(1, c1ID, "unstake", `{"amount":"100"}`, "A unstakes 100 in epoch 1")
 	waitValue(c1ID, "total_staked", "1400", "C1 total_staked after A unstakes")
-	call(c3ID, "pullFunding", `{"epoch":"0"}`, "C3 pull e0")
-	call(c7ID, "pullFunding", `{"epoch":"0"}`, "C7 pull e0")
+	call(c3ID, "pullFunding", `{"channel":"content","epoch":"0"}`, "C3 pull e0")
+	call(c1ID, "pullFunding", `{"epoch":"0"}`, "C7 pull e0")
 	call(c3ID, "submitShares", fmt.Sprintf(
 		`{"epoch":"0","page":"0","entries":"hive:%s:50,hive:%s:50"}`, owner, holderB), "C3 shares e0")
-	call(c3ID, "finalizeEpoch", `{"epoch":"0"}`, "C3 finalize e0")
-	waitValue(c3ID, "funded|0", contentSlice, "C3 funded e0")
-	waitValue(c7ID, "funded|0", yieldSlice, "C7 funded e0")
+	call(c3ID, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "C3 finalize e0")
+	waitValue(c3ID, "funded|content|0", contentSlice, "C3 funded e0")
+	waitValue(c1ID, "y_funded|0", yieldSlice, "C7 funded e0")
 
 	// ================= EPOCH 1: keeper deliberately silent =================
 	waitEpochClosed(1)
@@ -249,21 +253,21 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	call(c2ID, "distributeEpoch", `{}`, "single poke — must catch up epochs 1 and 2")
 	waitValue(c2ID, "owed|contract:"+c3ID+"|1", contentSlice, "epoch1 content owed (caught up)")
 	waitValue(c2ID, "owed|contract:"+c3ID+"|2", contentSlice, "epoch2 content owed (caught up)")
-	waitValue(c2ID, "owed|contract:"+c7ID+"|1", yieldSlice, "epoch1 yield owed (caught up)")
-	waitValue(c2ID, "owed|contract:"+c7ID+"|2", yieldSlice, "epoch2 yield owed (caught up)")
+	waitValue(c2ID, "owed|contract:"+c1ID+"|1", yieldSlice, "epoch1 yield owed (caught up)")
+	waitValue(c2ID, "owed|contract:"+c1ID+"|2", yieldSlice, "epoch2 yield owed (caught up)")
 	t.Logf("CATCH-UP OK: one poke funded both missed epochs at the flat rate")
 
 	for _, ep := range []string{"1", "2"} {
-		call(c3ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C3 pull e"+ep)
-		call(c7ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
+		call(c3ID, "pullFunding", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 pull e"+ep)
+		call(c1ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
 		call(c3ID, "submitShares", fmt.Sprintf(
 			`{"epoch":"%s","page":"0","entries":"hive:%s:50,hive:%s:50"}`, ep, owner, holderB),
 			"C3 shares e"+ep)
-		call(c3ID, "finalizeEpoch", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C3 finalize e"+ep)
+		call(c3ID, "finalizeEpoch", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 finalize e"+ep)
 	}
 	for _, ep := range []string{"1", "2"} {
-		waitValue(c3ID, "funded|"+ep, contentSlice, "C3 funded e"+ep)
-		waitValue(c7ID, "funded|"+ep, yieldSlice, "C7 funded e"+ep)
+		waitValue(c3ID, "funded|content|"+ep, contentSlice, "C3 funded e"+ep)
+		waitValue(c1ID, "y_funded|"+ep, yieldSlice, "C7 funded e"+ep)
 	}
 	// Pull two MORE yield epochs. Exactly which epoch B's top-up landed in cannot be
 	// controlled — placing a call inside a chosen epoch means predicting block
@@ -271,16 +275,16 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// epoch 3/4 the larger stake is unambiguously present across the whole epoch, so
 	// comparing a late epoch against epoch 0 is timing-independent.
 	for _, ep := range []string{"3", "4"} {
-		call(c7ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
-		waitValue(c7ID, "funded|"+ep, yieldSlice, "C7 funded e"+ep)
+		call(c1ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
+		waitValue(c1ID, "y_funded|"+ep, yieldSlice, "C7 funded e"+ep)
 	}
 
 	// ---- flat emission: every epoch minted exactly the same ----------------
 	for _, ep := range []string{"0", "1", "2"} {
-		if got := stateOf(c3ID, "funded|"+ep); got != contentSlice {
+		if got := stateOf(c3ID, "funded|content|"+ep); got != contentSlice {
 			t.Fatalf("epoch %s content funded %s, want %s — emission is not flat", ep, got, contentSlice)
 		}
-		if got := stateOf(c7ID, "funded|"+ep); got != yieldSlice {
+		if got := stateOf(c1ID, "y_funded|"+ep); got != yieldSlice {
 			t.Fatalf("epoch %s yield funded %s, want %s", ep, got, yieldSlice)
 		}
 	}
@@ -335,12 +339,12 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	time.Sleep(20 * time.Second) // challenge windows
 	before := bal(owner)
 	for _, ep := range []string{"0", "1", "2"} {
-		callN(1, c3ID, "claim", fmt.Sprintf(`{"epoch":"%s"}`, ep), "A claims content e"+ep)
-		callN(2, c3ID, "claim", fmt.Sprintf(`{"epoch":"%s"}`, ep), "B claims content e"+ep)
+		callN(1, c3ID, "claim", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "A claims content e"+ep)
+		callN(2, c3ID, "claim", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "B claims content e"+ep)
 	}
 	for _, ep := range []string{"0", "1", "2"} {
 		for _, a := range []string{owner, holderB} {
-			if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|"+ep+"|hive:"+a, 3*time.Minute) {
+			if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|content|"+ep+"|hive:"+a, 3*time.Minute) {
 				t.Fatalf("%s never claimed content epoch %s", a, ep)
 			}
 		}
@@ -353,7 +357,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	t.Logf("PER-EPOCH ISOLATION OK: three independent claims paid 3 x 9000 = 27000")
 
 	// re-claiming a settled epoch must still fail
-	callN(1, c3ID, "claim", `{"epoch":"0"}`, "A re-claims epoch 0 (must abort)")
+	callN(1, c3ID, "claim", `{"channel":"content","epoch":"0"}`, "A re-claims epoch 0 (must abort)")
 	time.Sleep(15 * time.Second)
 	if again := new(big.Int).Sub(bal(owner), before); again.String() != "27000" {
 		t.Fatalf("re-claiming epoch 0 paid again: %s", again)
@@ -368,8 +372,8 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	yield := map[string]*big.Int{}
 	for _, ep := range []string{"0", "1", "2", "3", "4"} {
 		pre := bal(holderB)
-		callN(2, c7ID, "claim", fmt.Sprintf(`{"epoch":"%s"}`, ep), "B claims yield e"+ep)
-		if !waitStateKeyPresent(t, d, ctx, 1, c7ID, "claimed|"+ep+"|hive:"+holderB, 3*time.Minute) {
+		callN(2, c1ID, "claimYield", fmt.Sprintf(`{"epoch":"%s"}`, ep), "B claims yield e"+ep)
+		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "claimed|"+ep+"|hive:"+holderB, 3*time.Minute) {
 			t.Fatalf("B never claimed yield epoch %s", ep)
 		}
 		time.Sleep(10 * time.Second) // let the transfer settle before measuring
@@ -388,8 +392,8 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 		if yield[ep].Sign() <= 0 {
 			t.Fatalf("B earned nothing in epoch %s", ep)
 		}
-		paid, _ := new(big.Int).SetString(stateOf(c7ID, "paid|"+ep), 10)
-		fundedN, _ := new(big.Int).SetString(stateOf(c7ID, "funded|"+ep), 10)
+		paid, _ := new(big.Int).SetString(stateOf(c1ID, "y_paid|"+ep), 10)
+		fundedN, _ := new(big.Int).SetString(stateOf(c1ID, "y_funded|"+ep), 10)
 		if paid != nil && fundedN != nil && paid.Cmp(fundedN) > 0 {
 			t.Fatalf("epoch %s paid %s > funded %s", ep, paid, fundedN)
 		}
@@ -436,15 +440,15 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// which then withdrew 0 and failed for a reason that had nothing to do with what
 	// it tests. New assertions go after the existing lifecycle, not through it.
 	for _, ep := range []string{"0", "1", "2", "3", "4"} {
-		callN(1, c7ID, "claim", fmt.Sprintf(`{"epoch":"%s"}`, ep), "A claims yield e"+ep)
-		if !waitStateKeyPresent(t, d, ctx, 1, c7ID, "claimed|"+ep+"|hive:"+owner, 3*time.Minute) {
+		callN(1, c1ID, "claimYield", fmt.Sprintf(`{"epoch":"%s"}`, ep), "A claims yield e"+ep)
+		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "claimed|"+ep+"|hive:"+owner, 3*time.Minute) {
 			t.Fatalf("A never claimed yield epoch %s — out of RC, or the claim was rejected", ep)
 		}
 	}
 	time.Sleep(15 * time.Second) // let the last transfers settle
 	for _, ep := range []string{"0", "1", "2", "3", "4"} {
-		paid, ok1 := new(big.Int).SetString(stateOf(c7ID, "paid|"+ep), 10)
-		fundedN, ok2 := new(big.Int).SetString(stateOf(c7ID, "funded|"+ep), 10)
+		paid, ok1 := new(big.Int).SetString(stateOf(c1ID, "y_paid|"+ep), 10)
+		fundedN, ok2 := new(big.Int).SetString(stateOf(c1ID, "y_funded|"+ep), 10)
 		if !ok1 || !ok2 {
 			t.Fatalf("epoch %s: could not read paid/funded", ep)
 		}

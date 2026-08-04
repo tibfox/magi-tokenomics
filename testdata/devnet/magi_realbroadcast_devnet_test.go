@@ -76,7 +76,7 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 	}
 	tokenID := deploy("rb-token", magiTokenWasm)
 	c2ID := deploy("rb-c2", magiWasm(t, "c2-emission/artifacts/main.wasm"))
-	c5ID := deploy("rb-c5", magiWasm(t, "c5-lp/artifacts/main.wasm"))
+	c5ID := deploy("rb-c5", magiWasm(t, "c3-distributor/artifacts/main.wasm"))
 
 	for round := 0; round < 4; round++ {
 		ok := false
@@ -143,11 +143,15 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 		tokenID, epochLen, guardian, treasury, c5ID), "C2 init")
 	genesis, _ := strconv.ParseUint(waitKey(c2ID, "cfg_genesis", "genesis"), 10, 64)
 	call(c5ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
-			`"reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:%s",`+
-			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","role":"lp"}`,
-		tokenID, c2ID, owner, treasury, guardian), "C5 init")
-	waitKey(c5ID, "cfg_funder", "C5 ready")
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s",`+
+			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+		tokenID, c2ID, treasury, guardian), "distributor init")
+	waitKey(c5ID, "cfg_funder", "distributor ready")
+	call(c5ID, "addChannel", fmt.Sprintf(
+		`{"channel":"lp","bucket":"lp","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"lp"}`,
+		owner), "distributor addChannel lp")
+	waitKey(c5ID, "ch_bucket|lp", "lp channel registered")
 
 	// LP fixture: two providers in from the start, so epoch 0 has a real report.
 	fx := &lpFixture{pool: "vsc1rbpool"}

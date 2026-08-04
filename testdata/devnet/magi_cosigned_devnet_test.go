@@ -159,18 +159,23 @@ func TestDevnetMagiCosigned(t *testing.T) {
 		tokenID, epochLen, guardian, treasury, c3ID), "C2 init")
 	waitKey(c2ID, "cfg_genesis", "genesis")
 
-	// COSIGNED reporter: 2-of-2, both signatures required in ONE transaction.
 	call(c3ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1",`+
-			`"reporterMode":"1","reporterAuth":"hive:%s,hive:%s","reporterThreshold":"2",`+
-			`"treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
-		tokenID, c2ID, rep1, rep2, treasury, guardian), "C3 init (Cosigned 2-of-2)")
-	waitKey(c3ID, "cfg_funder", "C3 ready")
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s",`+
+			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+		tokenID, c2ID, treasury, guardian), "distributor init")
+	waitKey(c3ID, "cfg_funder", "distributor ready")
+	// COSIGNED reporter: 2-of-2, both signatures required in ONE transaction. The
+	// policy belongs to the channel, so this is what mode 1 is configured on.
+	call(c3ID, "addChannel", fmt.Sprintf(
+		`{"channel":"author","bucket":"author","window":"1",`+
+			`"reporterMode":"1","reporterAuth":"hive:%s,hive:%s","reporterThreshold":"2"}`,
+		rep1, rep2), "addChannel author (Cosigned 2-of-2)")
+	waitKey(c3ID, "ch_bucket|author", "author channel registered")
 
 	time.Sleep(time.Duration(epochLen+6) * 3 * time.Second)
 	call(c2ID, "distributeEpoch", `{}`, "poke epoch 0")
-	call(c3ID, "pullFunding", `{"epoch":"0"}`, "C3 pull e0")
-	waitKey(c3ID, "funded|0", "C3 funded")
+	call(c3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "C3 pull e0")
+	waitKey(c3ID, "funded|author|0", "C3 funded")
 
 	const shares = `{"epoch":"0","page":"0","entries":"hive:coa:60,hive:cob:40"}`
 
@@ -180,10 +185,10 @@ func TestDevnetMagiCosigned(t *testing.T) {
 		t.Logf("single-auth submitShares rejected at broadcast: %v", e)
 	}
 	time.Sleep(12 * time.Second)
-	if v := stateOf(c3ID, "totalShares|0"); v != "" && v != "0" {
+	if v := stateOf(c3ID, "totalShares|author|0"); v != "" && v != "0" {
 		t.Fatalf("COSIGNED BYPASSED: one authority applied shares to a 2-of-2 contract (totalShares=%s)", v)
 	}
-	t.Logf("one-of-two correctly applied nothing (totalShares=%q)", stateOf(c3ID, "totalShares|0"))
+	t.Logf("one-of-two correctly applied nothing (totalShares=%q)", stateOf(c3ID, "totalShares|author|0"))
 
 	// BOTH authorities in one transaction must apply it.
 	txid, e := coCall(c3ID, "submitShares", shares, []string{rep1, rep2})
@@ -194,14 +199,14 @@ func TestDevnetMagiCosigned(t *testing.T) {
 
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
-		if v := stateOf(c3ID, "totalShares|0"); v == "100" {
+		if v := stateOf(c3ID, "totalShares|author|0"); v == "100" {
 			t.Logf("COSIGNED OK: two authorities in ONE transaction applied the page (totalShares=100)")
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("cosigned submitShares never applied — totalShares is %q. The tx was accepted "+
 				"(%s), so the contract did not count the second required auth toward the threshold",
-				stateOf(c3ID, "totalShares|0"), txid)
+				stateOf(c3ID, "totalShares|author|0"), txid)
 		}
 		time.Sleep(6 * time.Second)
 	}

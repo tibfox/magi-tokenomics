@@ -230,7 +230,7 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 	}
 	tokenID := deploy("lp-token", magiTokenWasm)
 	c2ID := deploy("lp-c2", magiWasm(t, "c2-emission/artifacts/main.wasm"))
-	c5ID := deploy("lp-c5", magiWasm(t, "c5-lp/artifacts/main.wasm"))
+	c5ID := deploy("lp-c5", magiWasm(t, "c3-distributor/artifacts/main.wasm"))
 
 	// Node 2 claims three times of its own, so it needs RC too — not just node 1.
 	for _, n := range []int{1, 2} {
@@ -320,11 +320,15 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 	t.Logf("genesis=%d epochLen=%d emission=%d/epoch -> all of it to C5", genesis, epochLen, emission)
 
 	call(c5ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
-			`"reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:%s",`+
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
-		tokenID, c2ID, owner, treasury, guardian), "C5 init")
-	waitKey(c5ID, "cfg_funder", "C5 ready")
+		tokenID, c2ID, treasury, guardian), "distributor init")
+	waitKey(c5ID, "cfg_funder", "distributor ready")
+	call(c5ID, "addChannel", fmt.Sprintf(
+		`{"channel":"lp","bucket":"lp","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"lp"}`,
+		owner), "distributor addChannel lp")
+	waitKey(c5ID, "ch_bucket|lp", "lp channel registered")
 
 	// ---------------- fixture: heights are relative to the real genesis ----------
 	// Epoch e spans [genesis+e*epochLen, genesis+(e+1)*epochLen-1], so events can be
@@ -439,23 +443,23 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 			time.Sleep(9 * time.Second)
 		}
 
-		waitValue(c5ID, fmt.Sprintf("funded|%d", ep), strconv.Itoa(emission),
+		waitValue(c5ID, fmt.Sprintf("funded|lp|%d", ep), strconv.Itoa(emission),
 			fmt.Sprintf("C5 funded epoch %d", ep))
-		waitValue(c5ID, fmt.Sprintf("totalShares|%d", ep), want[ep].total,
+		waitValue(c5ID, fmt.Sprintf("totalShares|lp|%d", ep), want[ep].total,
 			fmt.Sprintf("C5 totalShares epoch %d", ep))
 
 		// Per-provider shares must match, AND the forfeiting providers must be absent
 		// rather than present-with-zero: a zero share would still dilute nothing but
 		// would mean the rule was applied at the wrong place.
 		for who, share := range want[ep].shares {
-			waitValue(c5ID, "share|"+strconv.FormatUint(ep, 10)+"|"+who, share,
+			waitValue(c5ID, "share|lp|"+strconv.FormatUint(ep, 10)+"|"+who, share,
 				fmt.Sprintf("epoch %d share for %s", ep, who))
 		}
 		for _, who := range []string{exiter, flash} {
 			if _, ok := want[ep].shares[who]; ok {
 				continue
 			}
-			if v := stateOf(c5ID, "share|"+strconv.FormatUint(ep, 10)+"|"+who); v != "" && v != "0" {
+			if v := stateOf(c5ID, "share|lp|"+strconv.FormatUint(ep, 10)+"|"+who); v != "" && v != "0" {
 				t.Fatalf("epoch %d: %s must earn nothing, got %q", ep, who, v)
 			}
 		}
@@ -487,7 +491,7 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 				t.Fatalf("%s claim epoch %d failed to broadcast: %v", cl.acct, ep, err)
 			}
 			if !waitStateKeyPresent(t, d, ctx, 1, c5ID,
-				fmt.Sprintf("claimed|%d|%s", ep, cl.acct), 3*time.Minute) {
+				fmt.Sprintf("claimed|lp|%d|%s", ep, cl.acct), 3*time.Minute) {
 				t.Fatalf("%s claim for epoch %d never landed", cl.acct, ep)
 			}
 		}

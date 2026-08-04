@@ -104,13 +104,9 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	tokenID := dep("magi-token", magiTokenWasm, 1)
 	c2ID := dep("magi-c2-emission", magiWasm(t, "c2-emission/artifacts/main.wasm"), 1)
-	c3ID := dep("magi-c3-content", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 1)
-	c6ID := dep("magi-c6-migration", magiWasm(t, "c6-migration/artifacts/main.wasm"), 1)
+	c3ID := dep("magi-distributor", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 1)
 	c1ID := dep("magi-c1-staking", magiWasm(t, "c1-staking/artifacts/main.wasm"), 2)
-	c5ID := dep("magi-c5-lp", magiWasm(t, "c5-lp/artifacts/main.wasm"), 2)
-	c7ID := dep("magi-c7-yield", magiWasm(t, "c7-yield/artifacts/main.wasm"), 2)
-	t.Logf("all 7 deployed: token=%s c1=%s c2=%s c3=%s c5=%s c6=%s c7=%s",
-		tokenID, c1ID, c2ID, c3ID, c5ID, c6ID, c7ID)
+	t.Logf("all 4 deployed: token=%s c1=%s c2=%s distributor=%s", tokenID, c1ID, c2ID, c3ID)
 
 	// Deposit AFTER deploying — depositing first drains the L1 balance the deploy
 	// fee comes out of.
@@ -270,9 +266,9 @@ func TestDevnetMagiFull(t *testing.T) {
 	// while the deployer still owns the token.
 	callOwner(tokenID, "mint", `{"amount":"1000"}`, "mint 1000 to owner")
 	callOwner(tokenID, "transfer",
-		fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c6ID), "fund C6 with the airdrop float")
-	initAs(c6ID, fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "cfg_token", "C6 init")
-	callOwner(c6ID, "airdropBatch", fmt.Sprintf(
+		fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c1ID), "fund C6 with the airdrop float")
+	initAs(c1ID, fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "cfg_token", "C6 init")
+	callOwner(c1ID, "airdropBatch", fmt.Sprintf(
 		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C6 airdrop")
 	// C2 no longer mints — it PULLS each epoch's emission from an account that has
 	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
@@ -309,27 +305,32 @@ func TestDevnetMagiFull(t *testing.T) {
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
 			`"buckets":"content:contract:%s:5000,lp:contract:%s:3000,yield:contract:%s:2000"}`,
-		tokenID, epochLen, guardian, treasury, c3ID, c5ID, c7ID), "cfg_genesis", "C2 init")
+		tokenID, epochLen, guardian, treasury, c3ID, c3ID, c1ID), "cfg_genesis", "C2 init")
 	genesis := bigOf(waitKey(c2ID, "cfg_genesis", "C2 genesis")).Uint64()
 	t.Logf("C2 genesis=%d epochLen=%d -> epoch 0 = blocks %d..%d",
 		genesis, epochLen, genesis, genesis+epochLen-1)
 
-	distInit := func(id, what string) {
-		initAs(id, fmt.Sprintf(
-			`{"token":"%s","kind":"0","funder":"%s","genesis":"%d","epochLen":"%d","window":"1",`+
-				`"reporterMode":"0","reporterAuth":"hive:%s","reporterThreshold":"1",`+
-				`"treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
-			tokenID, c2ID, genesis, epochLen, owner, treasury, guardian), "cfg_funder", what)
+	// ONE distributor, TWO channels. Content and LP used to be two deployed copies of
+	// the same contract; they are now two channels on one, each with its own funding
+	// bucket, share book and reporter authority.
+	initAs(c3ID, fmt.Sprintf(
+		`{"token":"%s","kind":"0","funder":"%s","genesis":"%d","epochLen":"%d",`+
+			`"treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+		tokenID, c2ID, genesis, epochLen, treasury, guardian), "cfg_funder", "distributor init")
+	for _, ch := range []struct{ name, role string }{{"content", "content"}, {"lp", "lp"}} {
+		call(c3ID, "addChannel", fmt.Sprintf(
+			`{"channel":"%s","bucket":"%s","window":"1","reporterMode":"0",`+
+				`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"%s"}`,
+			ch.name, ch.name, owner, ch.role), "distributor addChannel "+ch.name)
+		waitKey(c3ID, "ch_bucket|"+ch.name, ch.name+" channel registered")
 	}
-	distInit(c3ID, "C3 init (content)")
-	distInit(c5ID, "C5 init (LP)")
 	// C1 adopts the emission schedule now that C2 exists. This is what arms the
 	// per-epoch drawdown accumulator that gives C7 an EXACT yield denominator; C7's
 	// init refuses a stakeSource without it, because dividing by min(Σa,Σb) instead
 	// strands part of every epoch and is what forced the old claim deadline.
 	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
 	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
-	initAs(c7ID, fmt.Sprintf(
+	initAs(c1ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
 		tokenID, c2ID, c1ID, treasury, guardian), "cfg_funder", "C7 init (yield)")
@@ -345,15 +346,15 @@ func TestDevnetMagiFull(t *testing.T) {
 	// NB: C2 keys allocations by bucket TARGET, not bucket name (addOwed uses the
 	// target string), so the key is owed|contract:<id>|<epoch>.
 	for _, b := range []struct{ name, id, want string }{
-		{"content", c3ID, "5000"}, {"lp", c5ID, "3000"}, {"yield", c7ID, "2000"},
+		{"content", c3ID, "5000"}, {"lp", c3ID, "3000"}, {"yield", c1ID, "2000"},
 	} {
 		waitValue(c2ID, "owed|contract:"+b.id+"|0", b.want, "C2 owed["+b.name+"]")
 	}
 
 	// ---------------- PHASE 6: three distributors, three mechanisms ----------
-	call(c3ID, "pullFunding", `{"epoch":"0"}`, "C3 pull")
-	call(c5ID, "pullFunding", `{"epoch":"0"}`, "C5 pull")
-	call(c7ID, "pullFunding", `{"epoch":"0"}`, "C7 pull")
+	call(c3ID, "pullFunding", `{"channel":"content","epoch":"0"}`, "C3 pull")
+	call(c3ID, "pullFunding", `{"channel":"lp","epoch":"0"}`, "C5 pull")
+	call(c1ID, "pullFunding", `{"epoch":"0"}`, "C7 pull")
 
 	// -- content: driven by the REAL reporter binary over injected Hive data --
 	fixture := buildHiveFixture(genesis, epochLen, time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC), holderA, holderB)
@@ -401,30 +402,30 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	// -- LP: shares pushed directly (C5 is byte-identical to C3; the reporter
 	//    path is already proven above, so this covers the direct-push mode) --
-	call(c5ID, "submitShares", fmt.Sprintf(
+	call(c3ID, "submitShares", fmt.Sprintf(
 		`{"epoch":"0","page":"0","entries":"hive:%s:70,hive:%s:30"}`, holderA, holderB), "C5 LP shares")
-	call(c5ID, "finalizeEpoch", `{"epoch":"0"}`, "C5 finalize")
+	call(c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "C5 finalize")
 
 	// ---------------- PHASE 7: claims, invariants, outsider ----------------
-	if st := waitKey(c3ID, "status|0", "C3 status"); st != "finalized" {
+	if st := waitKey(c3ID, "status|content|0", "C3 status"); st != "finalized" {
 		t.Fatalf("C3 status=%q", st)
 	}
-	if st := waitKey(c5ID, "status|0", "C5 status"); st != "finalized" {
+	if st := waitKey(c3ID, "status|lp|0", "C5 status"); st != "finalized" {
 		t.Fatalf("C5 status=%q", st)
 	}
 	// each bucket's slice must have fully arrived before anything is compared
-	waitValue(c3ID, "funded|0", "5000", "C3 funded")
-	waitValue(c5ID, "funded|0", "3000", "C5 funded")
-	waitValue(c7ID, "funded|0", "2000", "C7 funded")
-	c3Funded, c3Total := stateOf(c3ID, "funded|0"), waitKey(c3ID, "totalShares|0", "C3 totalShares")
-	c5Funded := stateOf(c5ID, "funded|0")
-	c7Funded := stateOf(c7ID, "funded|0")
+	waitValue(c3ID, "funded|content|0", "5000", "C3 funded")
+	waitValue(c3ID, "funded|lp|0", "3000", "C5 funded")
+	waitValue(c1ID, "y_funded|0", "2000", "C7 funded")
+	c3Funded, c3Total := stateOf(c3ID, "funded|content|0"), waitKey(c3ID, "totalShares|content|0", "C3 totalShares")
+	c5Funded := stateOf(c3ID, "funded|lp|0")
+	c7Funded := stateOf(c1ID, "y_funded|0")
 	t.Logf("funded: content=%s lp=%s yield=%s", c3Funded, c5Funded, c7Funded)
 
 	// the reporter and the chain must agree — the seam, on a live chain.
 	// totalShares grows per page, so wait for the final value first.
-	waitValue(c3ID, "totalShares|0", expected.TotalShares, "C3 totalShares")
-	c3Total = stateOf(c3ID, "totalShares|0")
+	waitValue(c3ID, "totalShares|content|0", expected.TotalShares, "C3 totalShares")
+	c3Total = stateOf(c3ID, "totalShares|content|0")
 	if expected.TotalShares != c3Total {
 		t.Fatalf("SEAM BROKEN: reporter totalShares=%s, chain=%s", expected.TotalShares, c3Total)
 	}
@@ -440,17 +441,17 @@ func TestDevnetMagiFull(t *testing.T) {
 	claim := func(node int, id, what string) { callN(node, id, "claim", `{"epoch":"0"}`, what) }
 	claim(1, c3ID, "A claims content")
 	claim(2, c3ID, "B claims content")
-	claim(1, c5ID, "A claims LP")
-	claim(2, c5ID, "B claims LP")
-	claim(1, c7ID, "A claims yield")
-	claim(2, c7ID, "B claims yield")
+	claim(1, c3ID, "A claims LP")
+	claim(2, c3ID, "B claims LP")
+	claim(1, c1ID, "A claims yield")
+	claim(2, c1ID, "B claims yield")
 
 	// Every claim must be CONFIRMED on chain before anything is compared. A single
 	// immediate read here is what failed run 4: the last claim had been broadcast
 	// only ~9s earlier and its state was not queryable yet, which looked identical
 	// to "the claim was rejected".
 	for _, c := range []struct{ id, name string }{
-		{c3ID, "content"}, {c5ID, "LP"}, {c7ID, "yield"},
+		{c3ID, "content"}, {c3ID, "LP"}, {c1ID, "yield"},
 	} {
 		for _, acct := range []string{holderA, holderB} {
 			if !waitStateKeyPresent(t, d, ctx, 1, c.id, "claimed|0|hive:"+acct, 3*time.Minute) {
@@ -466,7 +467,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// only honest measure is the holder's actual token balance — as a DELTA across
 	// the claims, since holderA also holds the undrawn emission pool.
 	c3TotalN := bigOf(c3Total)
-	c5TotalN := bigOf(waitKey(c5ID, "totalShares|0", "C5 totalShares"))
+	c5TotalN := bigOf(waitKey(c3ID, "totalShares|lp|0", "C5 totalShares"))
 	share := func(id, acct string) *big.Int { return bigOf(stateOf(id, "share|0|hive:"+acct)) }
 	payout := func(funded string, sh, total *big.Int) *big.Int {
 		if total.Sign() == 0 {
@@ -477,7 +478,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	stakeOf := map[string]*big.Int{holderA: big.NewInt(600), holderB: big.NewInt(400)}
 	for _, acct := range []string{holderA, holderB} {
 		content := payout(c3Funded, share(c3ID, acct), c3TotalN)
-		lp := payout(c5Funded, share(c5ID, acct), c5TotalN)
+		lp := payout(c5Funded, share(c3ID, acct), c5TotalN)
 		// C7 is trustless pro-rata over C1 stake, not over submitted shares
 		yield := payout(c7Funded, stakeOf[acct], big.NewInt(1000))
 		want := new(big.Int).Add(content, new(big.Int).Add(lp, yield))
@@ -499,7 +500,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		name   string
 	}{
 		{c3Funded, payout(c3Funded, share(c3ID, holderA), c3TotalN), payout(c3Funded, share(c3ID, holderB), c3TotalN), "content"},
-		{c5Funded, payout(c5Funded, share(c5ID, holderA), c5TotalN), payout(c5Funded, share(c5ID, holderB), c5TotalN), "lp"},
+		{c5Funded, payout(c5Funded, share(c3ID, holderA), c5TotalN), payout(c5Funded, share(c3ID, holderB), c5TotalN), "lp"},
 		{c7Funded, payout(c7Funded, big.NewInt(600), big.NewInt(1000)), payout(c7Funded, big.NewInt(400), big.NewInt(1000)), "yield"},
 	} {
 		paid := new(big.Int).Add(c.a, c.b)
@@ -533,25 +534,25 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	holderAttacks := []struct{ id, action, payload, what string }{
 		// they DID have a valid share and already claimed it — the second must fail
-		{c3ID, "claim", `{"epoch":"0"}`, "double-claim content (has a real share)"},
-		{c5ID, "claim", `{"epoch":"0"}`, "double-claim LP (has a real share)"},
-		{c7ID, "claim", `{"epoch":"0"}`, "double-claim yield (is really staked)"},
+		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "double-claim content (has a real share)"},
+		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "double-claim LP (has a real share)"},
+		{c1ID, "claimYield", `{"epoch":"0"}`, "double-claim yield (is really staked)"},
 		// canonicalisation: "00" must not alias epoch 0 into a second payout
-		{c3ID, "claim", `{"epoch":"00"}`, "re-claim content via a non-canonical epoch alias"},
-		{c7ID, "claim", `{"epoch":"00"}`, "re-claim yield via a non-canonical epoch alias"},
+		{c3ID, "claim", `{"channel":"content","epoch":"00"}`, "re-claim content via a non-canonical epoch alias"},
+		{c1ID, "claimYield", `{"epoch":"00"}`, "re-claim yield via a non-canonical epoch alias"},
 		// an epoch they have no share in
-		{c3ID, "claim", `{"epoch":"1"}`, "claim an epoch with no share"},
+		{c3ID, "claim", `{"channel":"content","epoch":"1"}`, "claim an epoch with no share"},
 		// funding is write-once, and a future epoch owes nothing
-		{c3ID, "pullFunding", `{"epoch":"0"}`, "pull epoch-0 funding a second time"},
-		{c7ID, "pullFunding", `{"epoch":"5"}`, "pull funding for a future/unfunded epoch"},
+		{c3ID, "pullFunding", `{"channel":"content","epoch":"0"}`, "pull epoch-0 funding a second time"},
+		{c1ID, "pullFunding", `{"epoch":"5"}`, "pull funding for a future/unfunded epoch"},
 		// staking: they have stake, so these get past the "no position" checks
 		{c1ID, "unstake", `{"amount":"999999"}`, "unstake far more than they staked"},
 		{c1ID, "claimUnstaked", `{}`, "withdraw an unstake before cooldown"},
 		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, holderB), "stakeFor while not allowlisted"},
 		// roles they do not hold
-		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "finalize as a mere shareholder"},
-		{c3ID, "sweepUnallocated", `{"nonce":"2"}`, "sweep the content pot (valid nonce)"},
-		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "sweep a yield epoch that has stakers (refused on that, before auth)"},
+		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "finalize as a mere shareholder"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"2"}`, "sweep the content pot (valid nonce)"},
+		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "sweep a yield epoch that has stakers (refused on that, before auth)"},
 	}
 	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
 	hsent := 0
@@ -588,13 +589,13 @@ func TestDevnetMagiFull(t *testing.T) {
 		"token.supply":    stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "supply").String(),
 		"c1.total_staked": stateOf(c1ID, "total_staked"),
 		"c2.lastEpoch":    stateOf(c2ID, "cfg_lastEpoch_v"),
-		"c3.totalShares":  stateOf(c3ID, "totalShares|0"),
-		"c3.funded":       stateOf(c3ID, "funded|0"),
-		"c3.status":       stateOf(c3ID, "status|0"),
-		"c5.totalShares":  stateOf(c5ID, "totalShares|0"),
-		"c5.funded":       stateOf(c5ID, "funded|0"),
-		"c7.funded":       stateOf(c7ID, "funded|0"),
-		"c6.airdropTotal": stateOf(c6ID, "airdrop_total"),
+		"c3.totalShares":  stateOf(c3ID, "totalShares|content|0"),
+		"c3.funded":       stateOf(c3ID, "funded|content|0"),
+		"c3.status":       stateOf(c3ID, "status|content|0"),
+		"c5.totalShares":  stateOf(c3ID, "totalShares|lp|0"),
+		"c5.funded":       stateOf(c3ID, "funded|lp|0"),
+		"c7.funded":       stateOf(c1ID, "y_funded|0"),
+		"c6.airdropTotal": stateOf(c1ID, "airdrop_total"),
 	}
 	readBack := func(k string) string {
 		switch k {
@@ -607,19 +608,19 @@ func TestDevnetMagiFull(t *testing.T) {
 		case "c2.lastEpoch":
 			return stateOf(c2ID, "cfg_lastEpoch_v")
 		case "c3.totalShares":
-			return stateOf(c3ID, "totalShares|0")
+			return stateOf(c3ID, "totalShares|content|0")
 		case "c3.funded":
-			return stateOf(c3ID, "funded|0")
+			return stateOf(c3ID, "funded|content|0")
 		case "c3.status":
-			return stateOf(c3ID, "status|0")
+			return stateOf(c3ID, "status|content|0")
 		case "c5.totalShares":
-			return stateOf(c5ID, "totalShares|0")
+			return stateOf(c3ID, "totalShares|lp|0")
 		case "c5.funded":
-			return stateOf(c5ID, "funded|0")
+			return stateOf(c3ID, "funded|lp|0")
 		case "c7.funded":
-			return stateOf(c7ID, "funded|0")
+			return stateOf(c1ID, "y_funded|0")
 		case "c6.airdropTotal":
-			return stateOf(c6ID, "airdrop_total")
+			return stateOf(c1ID, "airdrop_total")
 		}
 		return ""
 	}
@@ -668,30 +669,30 @@ func TestDevnetMagiFull(t *testing.T) {
 
 		// --- C3 content distributor ---
 		{c3ID, "init", distInitPayload, "C3 re-init (would repoint reporter+treasury)"},
-		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C3 push fraudulent shares"},
-		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
-		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "C3 finalize an epoch they do not control"},
-		{c3ID, "cancelEpoch", `{"epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
-		{c3ID, "sweepUnallocated", `{"nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
-		{c3ID, "claim", `{"epoch":"0"}`, "C3 claim with no share"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C3 push fraudulent shares"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
+		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "C3 finalize an epoch they do not control"},
+		{c3ID, "cancelEpoch", `{"channel":"content","epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "C3 claim with no share"},
 
 		// --- C5 LP distributor: same surface, separate instance ---
-		{c5ID, "init", distInitPayload, "C5 re-init"},
-		{c5ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C5 push fraudulent shares"},
-		{c5ID, "finalizeEpoch", `{"epoch":"1"}`, "C5 finalize"},
-		{c5ID, "cancelEpoch", `{"epoch":"0"}`, "C5 veto a legitimate epoch"},
-		{c5ID, "sweepUnallocated", `{"nonce":"1"}`, "C5 sweep the pot (valid nonce, so this reaches the guardian gate)"},
-		{c5ID, "claim", `{"epoch":"0"}`, "C5 claim with no share"},
+		{c3ID, "init", distInitPayload, "C5 re-init"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C5 push fraudulent shares"},
+		{c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "C5 finalize"},
+		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "C5 veto a legitimate epoch"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "C5 sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "C5 claim with no share"},
 
 		// --- C6 migration ---
-		{c6ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"99999999"}`, tokenID), "C6 re-init (would raise the airdrop cap)"},
-		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "C6 airdrop to self"},
-		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"1","entries":"hive:%s:1000"}`, outsider), "C6 replay the already-applied batch 1"},
+		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"99999999"}`, tokenID), "C6 re-init (would raise the airdrop cap)"},
+		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "C6 airdrop to self"},
+		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"1","entries":"hive:%s:1000"}`, outsider), "C6 replay the already-applied batch 1"},
 
 		// --- C7 yield ---
-		{c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
-		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "C7 sweep an epoch with stakers (aborts on the stakers check, not on auth)"},
-		{c7ID, "claim", `{"epoch":"0"}`, "C7 claim yield with no stake"},
+		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
+		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "C7 sweep an epoch with stakers (aborts on the stakers check, not on auth)"},
+		{c1ID, "claimYield", `{"epoch":"0"}`, "C7 claim yield with no stake"},
 	}
 
 	t.Logf("adversarial sweep: %d attacks from outsider hive:%s", len(attacks), outsider)
@@ -714,7 +715,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 
 	// nothing may have been created for the attacker anywhere
-	for _, c := range []struct{ id, name string }{{c3ID, "C3"}, {c5ID, "C5"}, {c7ID, "C7"}} {
+	for _, c := range []struct{ id, name string }{{c3ID, "C3"}, {c3ID, "C5"}, {c1ID, "C7"}} {
 		if v := stateOf(c.id, "share|0|hive:"+outsider); v != "" && v != "0" {
 			t.Fatalf("%s granted the outsider a share: %s", c.name, v)
 		}

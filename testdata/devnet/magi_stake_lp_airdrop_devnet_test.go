@@ -9,17 +9,19 @@ import (
 	"time"
 )
 
-// TestDevnetMagiC5C6C7 gives the remaining framework contracts real-chain
-// coverage: C1 staking, C5 LP-distributor, C6 migration/airdrop and C7
-// staking-yield, deployed on a docker multi-node devnet.
+// TestDevnetMagiStakeLPAirdrop covers staking, staking yield, the launch airdrop and
+// an LP reward channel on a docker multi-node devnet.
 //
-//	PHASE 1  deploy token + C1 + C2 + C5 + C6 + C7 and wire them
+// Staking, yield and the airdrop are one contract (C1) and LP is a channel on the
+// distributor, so this deploys four contracts where it once needed six.
+//
+//	PHASE 1  deploy token + C1 + C2 + distributor and wire them
 //	PHASE 2  honest: airdrop, stake, emit, pull, LP shares + claim, yield claim
-//	PHASE 3  outsider attacks against C5/C6/C7
+//	PHASE 3  outsider attacks against every privileged path
 //	PHASE 4  on-chain state proves nothing was stolen
 //
-// Run: go test -v -run TestDevnetMagiC5C6C7 -timeout 50m ./tests/devnet/
-func TestDevnetMagiC5C6C7(t *testing.T) {
+// Run: go test -v -run TestDevnetMagiStakeLPAirdrop -timeout 50m ./tests/devnet/
+func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping devnet test in short mode")
 	}
@@ -64,9 +66,7 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	tokenID := deploy("m2-token", magiTokenWasm, 1)
 	c1ID := deploy("m2-c1-staking", magiWasm(t, "c1-staking/artifacts/main.wasm"), 1)
 	c2ID := deploy("m2-c2-emission", magiWasm(t, "c2-emission/artifacts/main.wasm"), 1)
-	c5ID := deploy("m2-c5-lp", magiWasm(t, "c5-lp/artifacts/main.wasm"), 1)
-	c6ID := deploy("m2-c6-migration", magiWasm(t, "c6-migration/artifacts/main.wasm"), 1)
-	c7ID := deploy("m2-c7-yield", magiWasm(t, "c7-yield/artifacts/main.wasm"), 1)
+	c5ID := deploy("m2-distributor", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 1)
 
 	// RC = VSC-ledger HBD balance + RC_HIVE_FREE_AMOUNT(10_000)  [rc-system.go:33-37].
 	// With hbd=0 an account has EXACTLY 10k RC, which ~7 init txs exhaust — that is
@@ -153,7 +153,7 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	// bootstrap supply BEFORE handing the token to C2 (owner can still mint)
 	send(1, tokenID, "mint", `{"amount":"5000"}`, "token.mint bootstrap")
 	send(1, tokenID, "transfer", fmt.Sprintf(`{"to":"hive:%s","amount":"2000"}`, holder), "fund holder")
-	send(1, tokenID, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c6ID), "fund C6 for airdrop")
+	send(1, tokenID, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c1ID), "fund C6 for airdrop")
 	waitVal(tokenID, "bal|hive:"+holder, "", "holder funded")
 
 	// The holder stakes BEFORE C2 init so their stake predates genesis (C2's genesis
@@ -166,35 +166,40 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	// C2: genesis omitted -> defaults to this init block. lp 50% -> C5, yield 50% -> C7
 	send(1, c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"5","maxCatch":"2","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"lp","timelock":"5","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s3","vetoThreshold":"1","buckets":"lp:contract:%s:5000,yield:contract:%s:5000"}`,
-		tokenID, ownerAcct, d.cfg.WitnessPrefix, c5ID, c7ID), "c2.init")
+		tokenID, ownerAcct, d.cfg.WitnessPrefix, c5ID, c1ID), "c2.init")
 	genesis := waitKey(c2ID, "cfg_genesis", "c2 auto-genesis")
 	t.Logf("C2 auto-genesis resolved to block %s", genesis)
 
 	// C5 pulls the schedule from C2 itself; C7 must be given the SAME genesis and is
 	// cross-checked against C2's scheduleInfo — this is the real deploy sequence.
 	send(1, c5ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:%s1","reporterThreshold":"1","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
-		tokenID, c2ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c5.init")
-	waitKey(c5ID, "init", "c5 init")
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
+		tokenID, c2ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "distributor.init")
+	waitKey(c5ID, "init", "distributor init")
+	send(1, c5ID, "addChannel", fmt.Sprintf(
+		`{"channel":"lp","bucket":"lp","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s1","reporterThreshold":"1","role":"lp"}`,
+		d.cfg.WitnessPrefix), "distributor.addChannel lp")
+	waitKey(c5ID, "ch_bucket|lp", "lp channel registered")
 
 	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
 	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
 	send(1, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "c1.adoptSchedule")
 	waitKey(c1ID, "cfg_genesis", "c1 schedule adopted")
 
-	c7tx := send(1, c7ID, "init", fmt.Sprintf(
+	c7tx := send(1, c1ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
 		tokenID, c2ID, c1ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c7.init")
-	c7ok := waitStateKeyPresent(t, d, ctx, 1, c7ID, "init", 90*time.Second)
+	c7ok := waitStateKeyPresent(t, d, ctx, 1, c1ID, "init", 90*time.Second)
 	if !c7ok {
-		diag(c7tx, c7ID, "c7.init", []string{"init", "cfg_token", "cfg_funder", "cfg_genesis", "cfg_epochLen", "cfg_treasury"})
+		diag(c7tx, c1ID, "c7.init", []string{"init", "cfg_token", "cfg_funder", "cfg_genesis", "cfg_epochLen", "cfg_treasury"})
 		t.Errorf("C7 init did not take effect — continuing so C5/C6 still get coverage")
 	} else {
 		t.Logf("c7 init OK (schedule adopted from funder)")
 	}
 
-	send(1, c6ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "c6.init")
-	waitKey(c6ID, "init", "c6 init")
+	send(1, c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "c6.init")
+	waitKey(c1ID, "init", "c6 init")
 
 	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
 	// and approve C2 BEFORE handing the token over — only the owner may mint.
@@ -206,8 +211,8 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 
 	// ---------------- PHASE 2: honest operation ----------------
 	// C6 airdrop (owner only)
-	send(1, c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"genesis","entries":"hive:%s:600,hive:%s3:400"}`, holder, d.cfg.WitnessPrefix), "c6.airdropBatch")
-	waitKey(c6ID, "done|genesis", "c6 airdrop batch applied")
+	send(1, c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"genesis","entries":"hive:%s:600,hive:%s3:400"}`, holder, d.cfg.WitnessPrefix), "c6.airdropBatch")
+	waitKey(c1ID, "ad_done|genesis", "c6 airdrop batch applied")
 
 	// wait until an epoch has fully elapsed past genesis, then emit
 	var g uint64
@@ -240,45 +245,45 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	}
 	t.Logf("emission distributed (lastEpoch=%s)", waitKey(c2ID, "cfg_lastEpoch_v", "last epoch"))
 
-	send(2, c5ID, "pullFunding", `{"epoch":"0"}`, "c5.pullFunding")
-	c5Funded := waitKey(c5ID, "funded|0", "c5 epoch-0 funding")
+	send(2, c5ID, "pullFunding", `{"channel":"lp","epoch":"0"}`, "c5.pullFunding")
+	c5Funded := waitKey(c5ID, "funded|lp|0", "c5 epoch-0 funding")
 	c7Funded := "<c7 not initialised>"
 	if c7ok {
-		send(2, c7ID, "pullFunding", `{"epoch":"0"}`, "c7.pullFunding")
-		c7Funded = waitKey(c7ID, "funded|0", "c7 epoch-0 funding")
+		send(2, c1ID, "pullFunding", `{"epoch":"0"}`, "c7.pullFunding")
+		c7Funded = waitKey(c1ID, "y_funded|0", "c7 epoch-0 funding")
 	}
 	t.Logf("C5 funded=%s  C7 funded=%s", c5Funded, c7Funded)
 
 	// C5: LP reporter pushes provider shares, finalizes; the holder claims
-	send(1, c5ID, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"0","entries":"hive:%s:100"}`, holder), "c5.submitShares")
-	waitKey(c5ID, "totalShares|0", "c5 shares recorded")
-	send(1, c5ID, "finalizeEpoch", `{"epoch":"0"}`, "c5.finalizeEpoch")
-	waitVal(c5ID, "status|0", "finalized", "c5 finalize")
-	send(2, c5ID, "claim", `{"epoch":"0"}`, "c5.claim (holder's LP share)")
-	waitKey(c5ID, "claimed|0|hive:"+holder, "c5 claim recorded")
+	send(1, c5ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:100"}`, holder), "c5.submitShares")
+	waitKey(c5ID, "totalShares|lp|0", "c5 shares recorded")
+	send(1, c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "c5.finalizeEpoch")
+	waitVal(c5ID, "status|lp|0", "finalized", "c5 finalize")
+	send(2, c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "c5.claim (holder's LP share)")
+	waitKey(c5ID, "claimed|lp|0|hive:"+holder, "c5 claim recorded")
 
 	// C7: the holder claims pro-rata yield for the stake they held all epoch
 	if c7ok {
-		send(2, c7ID, "claim", `{"epoch":"0"}`, "c7.claim (staking yield)")
-		waitKey(c7ID, "claimed|0|hive:"+holder, "c7 claim recorded")
+		send(2, c1ID, "claimYield", `{"epoch":"0"}`, "c7.claim (staking yield)")
+		waitKey(c1ID, "claimed|0|hive:"+holder, "c7 claim recorded")
 	}
 
 	// ---------------- PHASE 3: outsider attacks on C5/C6/C7 ----------------
 	type atk struct{ id, action, payload, what string }
 	for _, a := range []atk{
-		{c6ID, "airdropBatch", fmt.Sprintf(`{"batchId":"steal","entries":"hive:%s:1000"}`, holder), "non-owner airdrop"},
-		{c5ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, holder), "fake LP shares"},
-		{c5ID, "finalizeEpoch", `{"epoch":"1"}`, "attacker finalizes C5"},
-		{c5ID, "cancelEpoch", `{"epoch":"0"}`, "attacker vetoes C5"},
-		{c5ID, "sweepUnallocated", `{"nonce":"1"}`, "attacker sweeps C5"},
-		{c5ID, "claim", `{"epoch":"0"}`, "attacker double-claims C5"},
-		{c7ID, "claim", `{"epoch":"0"}`, "attacker double-claims C7"},
-		{c7ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "attacker sweeps a C7 epoch that HAS stakers"},
+		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"steal","entries":"hive:%s:1000"}`, holder), "non-owner airdrop"},
+		{c5ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, holder), "fake LP shares"},
+		{c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "attacker finalizes C5"},
+		{c5ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "attacker vetoes C5"},
+		{c5ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "attacker sweeps C5"},
+		{c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "attacker double-claims C5"},
+		{c1ID, "claimYield", `{"epoch":"0"}`, "attacker double-claims C7"},
+		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "attacker sweeps a C7 epoch that HAS stakers"},
 		{c1ID, "stakeFor", fmt.Sprintf(`{"acct":"hive:%s","amount":"500"}`, holder), "attacker stakeFor (not allowlisted)"},
 		{c1ID, "unstake", `{"amount":"999999"}`, "attacker unstakes more than staked"},
 		{c5ID, "init", `{"token":"x"}`, "attacker re-inits C5"},
-		{c6ID, "init", `{"token":"x"}`, "attacker re-inits C6"},
-		{c7ID, "init", `{"token":"x"}`, "attacker re-inits C7"},
+		{c1ID, "init", `{"token":"x"}`, "attacker re-inits C6"},
+		{c1ID, "init", `{"token":"x"}`, "attacker re-inits C7"},
 	} {
 		if _, cerr := d.CallContract(ctx, 2, a.id, a.action, a.payload); cerr != nil {
 			t.Logf("attack %-40s broadcast error (fine): %v", a.what, cerr)
@@ -289,7 +294,7 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	time.Sleep(20 * time.Second)
 
 	// ---------------- PHASE 4: nothing was stolen ----------------
-	c5after, err := d.GetStateByKeys(ctx, 1, c5ID, []string{"funded|0", "totalShares|0", "status|0", "totalShares|1", "unallocated"})
+	c5after, err := d.GetStateByKeys(ctx, 1, c5ID, []string{"funded|lp|0", "totalShares|lp|0", "status|lp|0", "totalShares|1", "unallocated"})
 	if err != nil {
 		t.Fatalf("read c5 after attacks: %v", err)
 	}
@@ -304,19 +309,19 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	if !c7ok {
 		t.Log("skipping C7 post-attack assertions (C7 never initialised)")
 	}
-	c7after, err := d.GetStateByKeys(ctx, 1, c7ID, []string{"funded|0", "swept|0"})
+	c7after, err := d.GetStateByKeys(ctx, 1, c1ID, []string{"y_funded|0", "y_swept|0"})
 	if err != nil {
 		t.Fatalf("read c7 after attacks: %v", err)
 	}
 	t.Logf("C7 after attacks: %v", c7after)
-	if c7ok && fmt.Sprintf("%v", c7after["funded|0"]) != c7Funded {
-		t.Fatalf("SECURITY FAILURE: C7 epoch-0 funding changed %q -> %v", c7Funded, c7after["funded|0"])
+	if c7ok && fmt.Sprintf("%v", c7after["y_funded|0"]) != c7Funded {
+		t.Fatalf("SECURITY FAILURE: C7 epoch-0 funding changed %q -> %v", c7Funded, c7after["y_funded|0"])
 	}
-	if v := fmt.Sprintf("%v", c7after["swept|0"]); v == "1" {
+	if v := fmt.Sprintf("%v", c7after["y_swept|0"]); v == "1" {
 		t.Fatalf("SECURITY FAILURE: attacker swept C7 residual before maturity")
 	}
 
-	c6after, err := d.GetStateByKeys(ctx, 1, c6ID, []string{"airdrop_total", "done|steal"})
+	c6after, err := d.GetStateByKeys(ctx, 1, c1ID, []string{"airdrop_total", "ad_done|steal"})
 	if err != nil {
 		t.Fatalf("read c6 after attacks: %v", err)
 	}
@@ -324,7 +329,7 @@ func TestDevnetMagiC5C6C7(t *testing.T) {
 	if fmt.Sprintf("%v", c6after["airdrop_total"]) != "1000" {
 		t.Fatalf("SECURITY FAILURE: C6 airdrop total changed: %v", c6after["airdrop_total"])
 	}
-	if v := fmt.Sprintf("%v", c6after["done|steal"]); v == "1" {
+	if v := fmt.Sprintf("%v", c6after["ad_done|steal"]); v == "1" {
 		t.Fatalf("SECURITY FAILURE: attacker's airdrop batch was applied")
 	}
 

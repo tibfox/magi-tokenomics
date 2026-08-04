@@ -148,10 +148,16 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		tokenID, owner, d.cfg.WitnessPrefix, c3ID), "c2.init")
 	waitKey(c2ID, "init", "c2 init")
 	mustCall(1, c3ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
-		tokenID, c2ID, owner, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c3.init")
-
+		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
+		tokenID, c2ID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c3.init")
 	waitKey(c3ID, "init", "c3 init")
+	// The reward channel: its funding bucket, challenge window and reporter authority
+	// are per-channel now, because one distributor serves several of them.
+	mustCall(1, c3ID, "addChannel", fmt.Sprintf(
+		`{"channel":"author","bucket":"author","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"content"}`,
+		owner), "c3.addChannel author")
+	waitKey(c3ID, "ch_bucket|author", "author channel registered")
 
 	// hand the token to C2 — from here C2 is the only minter
 	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
@@ -182,20 +188,20 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	}
 	mustCall(2, c2ID, "distributeEpoch", ``, "c2.distributeEpoch (permissionless)")
 	waitKey(c2ID, "cfg_lastEpoch", "c2 first epoch distributed")
-	mustCall(2, c3ID, "pullFunding", `{"epoch":"0"}`, "c3.pullFunding (permissionless)")
-	funded := waitKey(c3ID, "funded|0", "c3 epoch-0 funding")
+	mustCall(2, c3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "c3.pullFunding (permissionless)")
+	funded := waitKey(c3ID, "funded|author|0", "c3 epoch-0 funding")
 	t.Logf("C3 epoch-0 funded = %s", funded)
 
 	// reporter (owner acct) pushes shares to the attacker + a third party, then finalizes
 	mustCall(1, c3ID, "submitShares", fmt.Sprintf(
 		`{"epoch":"0","page":"0","entries":"hive:%s:75,hive:%s3:25"}`, attacker, d.cfg.WitnessPrefix), "c3.submitShares")
-	shares := waitKey(c3ID, "totalShares|0", "c3 shares recorded")
+	shares := waitKey(c3ID, "totalShares|author|0", "c3 shares recorded")
 	t.Logf("C3 epoch-0 totalShares = %s", shares)
-	mustCall(1, c3ID, "finalizeEpoch", `{"epoch":"0"}`, "c3.finalizeEpoch")
-	waitKeyValue(c3ID, "status|0", "finalized", "c3 epoch-0 finalize")
+	mustCall(1, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "c3.finalizeEpoch")
+	waitKeyValue(c3ID, "status|author|0", "finalized", "c3 epoch-0 finalize")
 
 	// the attacker legitimately claims the share the reporter assigned them
-	mustCall(2, c3ID, "claim", `{"epoch":"0"}`, "c3.claim (legit share)")
+	mustCall(2, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "c3.claim (legit share)")
 
 	// ---------------- PHASE 3: outsider attacks ----------------
 	// Each must FAIL on-chain. We broadcast and then assert state is unchanged;
@@ -207,12 +213,12 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		{c2ID, "claimBucket", `{"epoch":"0"}`, "attacker impersonates bucket target"},
 		{c2ID, "init", `{"token":"x"}`, "attacker re-inits C2"},
 		{c3ID, "init", `{"token":"x"}`, "attacker re-inits C3"},
-		{c3ID, "submitShares", fmt.Sprintf(`{"epoch":"1","page":"0","entries":"hive:%s:999999"}`, attacker), "attacker pushes fake shares"},
-		{c3ID, "finalizeEpoch", `{"epoch":"1"}`, "attacker finalizes"},
-		{c3ID, "cancelEpoch", `{"epoch":"0"}`, "attacker vetoes"},
-		{c3ID, "sweepUnallocated", `{"nonce":"1"}`, "attacker sweeps"},
-		{c3ID, "claim", `{"epoch":"0"}`, "attacker double-claims"},
-		{c3ID, "pullFunding", `{"epoch":"00"}`, "attacker non-canonical epoch"},
+		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"1","page":"0","entries":"hive:%s:999999"}`, attacker), "attacker pushes fake shares"},
+		{c3ID, "finalizeEpoch", `{"channel":"author","epoch":"1"}`, "attacker finalizes"},
+		{c3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "attacker vetoes"},
+		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "attacker sweeps"},
+		{c3ID, "claim", `{"channel":"author","epoch":"0"}`, "attacker double-claims"},
+		{c3ID, "pullFunding", `{"channel":"author","epoch":"00"}`, "attacker non-canonical epoch"},
 		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker queues token takeover"},
 		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker executes token takeover"},
 	}
@@ -236,7 +242,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	}
 
 	c3after, err := d.GetStateByKeys(ctx, 1, c3ID,
-		[]string{"funded|0", "totalShares|0", "status|0", "funded|1", "totalShares|1"})
+		[]string{"funded|author|0", "totalShares|author|0", "status|author|0", "funded|1", "totalShares|1"})
 	if err != nil {
 		t.Fatalf("read c3 after attacks: %v", err)
 	}

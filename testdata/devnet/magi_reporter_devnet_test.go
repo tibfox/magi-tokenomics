@@ -349,11 +349,15 @@ func TestDevnetMagiReporter(t *testing.T) {
 	t.Logf("C2 adopted genesis=%d epochLen=%d", genesis, epochLen)
 
 	mustCall(c3ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","genesis":"%d","epochLen":"%d","window":"1",`+
-			`"reporterMode":"0","reporterAuth":"hive:%s","reporterThreshold":"1","treasury":"hive:treasury",`+
+		`{"token":"%s","kind":"0","funder":"%s","genesis":"%d","epochLen":"%d","treasury":"hive:treasury",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
-		tokenID, c2ID, genesis, epochLen, owner), "C3 init")
-	waitKey(c3ID, "cfg_funder", "C3 funder")
+		tokenID, c2ID, genesis, epochLen), "distributor init")
+	waitKey(c3ID, "cfg_funder", "distributor funder")
+	mustCall(c3ID, "addChannel", fmt.Sprintf(
+		`{"channel":"author","bucket":"author","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"content"}`,
+		owner), "distributor addChannel author")
+	waitKey(c3ID, "ch_bucket|author", "author channel registered")
 
 	// ---------------- PHASE 2: inject Hive data ----------------
 	w2 := d.cfg.WitnessPrefix + "2"
@@ -455,14 +459,14 @@ func TestDevnetMagiReporter(t *testing.T) {
 	// the last page). status|0 is written by finalizeEpoch, the last call in the
 	// plan — and because L1 transaction order is preserved, its presence proves
 	// every preceding page has already been processed.
-	if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "status|0", 5*time.Minute) {
+	if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "status|author|0", 5*time.Minute) {
 		t.Fatal("epoch 0 was never finalized on chain")
 	}
-	if st := waitKey(c3ID, "status|0", "C3 epoch status"); st != "finalized" {
+	if st := waitKey(c3ID, "status|author|0", "C3 epoch status"); st != "finalized" {
 		t.Fatalf("epoch 0 status = %q, want finalized", st)
 	}
-	total := waitKey(c3ID, "totalShares|0", "C3 totalShares")
-	funded := waitKey(c3ID, "funded|0", "C3 funded")
+	total := waitKey(c3ID, "totalShares|author|0", "C3 totalShares")
+	funded := waitKey(c3ID, "funded|author|0", "C3 funded")
 	t.Logf("on-chain (finalized): funded=%s totalShares=%s", funded, total)
 
 	// Recompute with the epoch PINNED. Without -epoch the reporter would correctly
@@ -482,12 +486,12 @@ func TestDevnetMagiReporter(t *testing.T) {
 		computeAfter.TotalShares, computeAfter.Accounts)
 
 	// the post-payout vote must never have reached the chain
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|0|hive:toolate"}); st != nil {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:toolate"}); st != nil {
 		if v, ok := st["share|0|hive:toolate"]; ok && v != nil && v != "" {
 			t.Fatalf("a vote cast AFTER payout earned shares on-chain: %v", v)
 		}
 	}
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|0|hive:flagger"}); st != nil {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:flagger"}); st != nil {
 		if v, ok := st["share|0|hive:flagger"]; ok && v != nil && v != "" {
 			t.Fatalf("a downvoter earned shares on-chain: %v", v)
 		}
@@ -527,10 +531,10 @@ func TestDevnetMagiReporter(t *testing.T) {
 		// either way.
 		before := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
 
-		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", `{"epoch":"0"}`); err != nil {
+		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", `{"channel":"author","epoch":"0"}`); err != nil {
 			t.Fatalf("claim for %s failed to broadcast: %v", cl.acct, err)
 		}
-		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|0|hive:"+cl.acct, 3*time.Minute) {
+		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|author|0|hive:"+cl.acct, 3*time.Minute) {
 			t.Fatalf("claim by %s never landed on chain", cl.acct)
 		}
 		// the token contract must show exactly that payout arriving
