@@ -15,23 +15,24 @@ import (
 
 // TestDevnetMagiFull exercises EVERY current component in ONE devnet run.
 //
-// The three existing devnet suites each cover a slice (C0+C2+C3, C1+C2+C5+C6+C7,
-// and the reporter), so nothing had ever proven the whole system works together:
-// one token, one emission controller splitting into three different distributor
-// types simultaneously, with staking underneath and the real reporter driving the
-// content bucket.
+// The other suites each cover a slice, so this is the one that proves the whole system
+// works together: one token, one emission controller splitting three ways, staking
+// underneath it, and the real reporter driving the content channel.
 //
-//	PHASE 1  deploy all 7 contracts (spread across nodes so no single account
-//	         carries every 10 HBD deploy fee)
-//	PHASE 2  bootstrap: mint+transfer to C6, airdrop to holders, hand token to C2
-//	PHASE 3  init C1, then STAKE, then init C2/C3/C5/C7 — the stake must exist
-//	         before C2 sets genesis, or C7's epoch-0 yield is unclaimable
+// Four contracts now, not seven — yield and the airdrop live inside C1, and content
+// and LP are two CHANNELS on one distributor rather than two deployments.
+//
+//	PHASE 1  deploy token + C1 + C2 + distributor (spread across nodes so no single
+//	         account carries every 10 HBD deploy fee)
+//	PHASE 2  bootstrap: mint, fund C1's airdrop float, airdrop to holders, hand token to C2
+//	PHASE 3  init C1, then STAKE, then init C2 and the distributor — the stake must
+//	         exist before C2 sets genesis, or epoch-0 yield is unclaimable
 //	PHASE 4  C2 splits 50/30/20 into content/LP/yield
 //	PHASE 5  one keeper poke funds all three buckets from a single emission
 //	PHASE 6  content via the REAL reporter binary; LP direct; yield trustless
 //	PHASE 7  claims + conservation invariants
 //	PHASE 7b a malicious STAKED HOLDER (real stake, real share, already claimed)
-//	PHASE 8  a pure outsider sweeps every privileged action on all 7 contracts
+//	PHASE 8  a pure outsider sweeps every privileged action on all of them
 //
 // Run: go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 func TestDevnetMagiFull(t *testing.T) {
@@ -366,7 +367,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	blob, _ := json.MarshalIndent(map[string]any{
 		"hive":      map[string]any{"api": []string{hive.URL}},
 		"vsc":       map[string]any{"api": d.GQLEndpoint(1), "net_id": "vsc-devnet"},
-		"contracts": map[string]any{"distributor": c3ID, "funder": c2ID, "stake": c1ID},
+		"contracts": map[string]any{"distributor": c3ID, "channel": "content", "funder": c2ID, "stake": c1ID},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{"tag": "magitribe", "limit": 100,
 			"attribution": "cashout", "weight": "hive_rshares", "exclude": []string{}},

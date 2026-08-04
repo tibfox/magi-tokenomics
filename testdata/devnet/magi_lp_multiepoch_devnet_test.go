@@ -364,7 +364,7 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		"indexer": map[string]any{
 			"api": idx.URL, "secret": "", "pool": fx.pool, "page_size": 2, // tiny: forces paging
 		},
-		"contracts": map[string]any{"distributor": c5ID, "funder": c2ID, "stake": ""},
+		"contracts": map[string]any{"distributor": c5ID, "channel": "lp", "funder": c2ID, "stake": ""},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source":    map[string]any{"kind": "lp"},
 		"page":      map[string]any{"max_entries": 12, "max_bytes": 3500},

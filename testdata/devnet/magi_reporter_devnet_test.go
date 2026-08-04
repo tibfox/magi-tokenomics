@@ -375,7 +375,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 			"api":    d.GQLEndpoint(1),
 			"net_id": "vsc-devnet",
 		},
-		"contracts": map[string]any{"distributor": c3ID, "funder": c2ID, "stake": ""},
+		"contracts": map[string]any{"distributor": c3ID, "channel": "author", "funder": c2ID, "stake": ""},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{
 			"tag": "magitribe", "limit": 100,
