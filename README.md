@@ -15,17 +15,33 @@ whole system in plain language. This file is the build-and-deploy reference.
 
 ## The pieces
 
+**Three contracts of ours, plus the token.** Each deploy and each update costs a real
+fee, so roles that share a balance and a history share a contract.
+
 | | contract | what it does |
 |---|---|---|
 | C0 | *(external)* `magi_token-contract` | the token itself. **Unmodified** — the framework drives it through its existing allowance interface, it does not fork it. |
-| C1 | `c1-staking` | staking with height checkpoints, so any epoch's stake can be proven after the fact |
+| C1 | `c1-staking` | **staking + staking yield + the launch airdrop.** Staking keeps height checkpoints so any epoch's stake is provable after the fact; yield pays stakers pro-rata straight from that history, with no reporter; the airdrop imports a launch snapshot and can credit stake directly. |
 | C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
-| C3 | `c3-distributor` | content/author rewards — accepts share lists, pays claims |
-| C5 | `c5-lp` | LP rewards — same mechanism as C3, separate instance. Fed by the reporter in `source.kind: "lp"` mode, which replays the indexer's liquidity events. |
-| C6 | `c6-migration` | one-off snapshot import / airdrop |
-| C7 | `c7-yield` | staking yield — **trustless**, reads C1 directly, needs no reporter. Claims **never expire**, same as C3/C5. |
+| C3 | `c3-distributor` | reward **channels** — content, LP, or anything else a tenant adds. Each channel has its own funding bucket, share book, challenge window and reporter authority, so one deployed contract serves them all. |
 | — | `reporter/` | off-chain service that turns Hive activity (or DEX liquidity history) into share lists ([README](reporter/README.md)) |
 | — | `auth/`, `adapter/` | shared modules: multi-party authorisation, value-asset abstraction |
+
+**Why yield and the airdrop live in C1.** Yield never read anything except C1 — stake
+at two heights, and the exact `Σ min(aᵢ,bᵢ)` denominator from its drawdown
+accumulator. Merged, those are local reads instead of three cross-contract calls per
+claim. The airdrop runs a handful of times at launch and is then dead, which is
+exactly why it did not warrant a fee of its own.
+
+That does mean **three pools share one balance**, so C1 holds to a stated envelope:
+
+```
+balance >= total_staked + (yield funded but unclaimed) + airdrop float
+```
+
+Only the airdrop may spend the unobligated remainder, and it checks before paying.
+Yield pays from its own funded pool; principal is only ever returned to the staker who
+put it in.
 
 `sdk/` and `runtime/` are copied verbatim from `magi_token-contract` and **must never
 be edited**. The Go module is named `magi_token` so those copied imports resolve.
@@ -34,7 +50,7 @@ be edited**. The Go module is named `magi_token` so those copied imports resolve
 
 ```bash
 cd /home/dockeruser/okinoko/magi-tokenomics
-for c in c1-staking c2-emission c3-distributor c5-lp c6-migration c7-yield; do
+for c in c1-staking c2-emission c3-distributor; do
   GOTOOLCHAIN=go1.25.3 tinygo build -gc=custom -scheduler=none -panic=trap \
     -no-debug -target=wasm-unknown -o $c/artifacts/main.wasm ./$c/contract
 done
@@ -46,7 +62,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 97 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 103 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 120 reporter tests, no network
 ```
 
@@ -54,14 +70,14 @@ Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devn
 
 ```bash
 # from a go-vsc-node checkout, after copying in testdata/devnet/*.go
-go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + reporter, ~30 min
+go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system + reporter, ~40 min
 ```
 
 ---
 
 # Deployment
 
-## Order matters — four constraints that are easy to get wrong
+## Order matters — five constraints that are easy to get wrong
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
@@ -70,48 +86,51 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # all 7 + repo
    [`docs/rc-costs.md`](docs/rc-costs.md).
 2. **A contract must be initialised by the account that deployed it.** The deployer
    becomes `contract.owner`, and every `init` aborts unless `msg.caller == owner`.
-3. **Fund C6 and stake into C1 BEFORE initialising C2.** Two separate reasons:
-   - C6 pays airdrops out of *its own* balance, so it must be topped up while the
-     deployer still owns the token — i.e. before `changeOwner` hands it to C2.
-   - C2's `genesis` defaults to the block it is initialised at. C7 credits
+3. **Fund C1's airdrop float and stake into C1 BEFORE initialising C2.** Two reasons:
+   - the airdrop pays out of C1's *own* balance, so the float must be transferred in
+     while the deployer still owns the token — i.e. before `changeOwner` hands it to C2.
+   - C2's `genesis` defaults to the block it is initialised at, and yield credits
      `min(stakeAt(epochStart), stakeAt(epochEnd))`, so stake that arrives *after*
      C2's init is zero at both boundaries of epoch 0 — that epoch's yield bucket
      ends up **funded but permanently unclaimable**.
-4. **Call `C1.adoptSchedule` after `C2.init`, before `C7.init`.** C1 has to know where
-   epoch boundaries fall in order to accumulate the per-epoch drawdown that gives C7
-   an exact yield denominator, and it cannot be told at its own init: the deploy order
-   puts C1 first (constraint 3), while C2's `genesis` defaults to a block that does not
-   exist yet. So it is adopted from C2 afterwards, owner-only and once. C7's init
-   refuses a `stakeSource` that skipped this, rather than silently paying against an
-   over-counting denominator — see [C7](#c7--staking-yield-trustless).
+4. **Call `C1.adoptSchedule` after `C2.init`.** It arms two things at once: the
+   per-epoch drawdown accumulator behind the exact yield denominator, and the bucket
+   C1 pulls yield funding from. Neither can be configured at C1's own init, because
+   the deploy order puts C1 first (constraint 3) while C2's `genesis` and buckets do
+   not exist yet. Owner-only and once. `pullFunding` refuses until it has run.
+5. **Register a channel per reward stream** with `C3.addChannel`, after `C2.init` —
+   verifying a channel's bucket means calling the funder. Channels are append-only.
 
 ## Recommended sequence
 
 ```
-deploy all contracts                    # 10 HBD each, from the account that will init
-deposit HBD                             # for RC
+deploy 4 contracts                      # token + C1 + C2 + C3. 10 HBD each.
+deposit HBD                             # for RC capacity
 token.init                              # deployer owns it at this point
 token.mint  {amount}                    # credits the OWNER (mint has no `to` field)
-token.transfer -> contract:<C6>         # fund the airdrop float
+token.transfer -> contract:<C1>         # fund the airdrop float
 token.transfer -> <source>              # move the emission pool to its holder
-C6.init ; C6.airdropBatch               # seed holders
-C1.init                                 # staking must be live before anyone stakes
+C1.init                                 # staking + yield + airdrop, in one
+C1.airdropBatch                         # seed holders (optionally straight into stake)
   holders: token.approve -> C1 ; C1.stake
 <source>: token.approve -> contract:<C2>  # let C2 draw the pool
 C2.init  {"source": "<source>"}         # <- sets `genesis`; the clock starts here
-C1.adoptSchedule {"funder":"<C2>"}      # arms C1's exact-denominator accumulator
-C3.init / C5.init / C7.init             # they adopt C2's schedule automatically
+C1.adoptSchedule {"funder":"<C2>","bucket":"yield"}   # accumulator + yield funding
+C3.init                                 # adopts C2's schedule automatically
+C3.addChannel {"channel":"content", ...}              # one per reward stream
+C3.addChannel {"channel":"lp", ...}
 
 # token ownership is now OPTIONAL: C2 does not need it. Hand it over only if you
 # want C2's timelocked guardian pause/changeOwner passthrough; otherwise renounce
 # it or give it to a DAO.
 ```
 
-After this, each epoch runs: `C2.distributeEpoch` → `<dist>.pullFunding` →
-`submitShares` pages → `finalizeEpoch` → holders `claim`. The reporter does all of
-that **for C3 only**; C7 needs just `pullFunding` and then holders claim.
+After this, each epoch runs: `C2.distributeEpoch` → `C3.pullFunding` →
+`submitShares` pages → `finalizeEpoch` → holders `claim`, once **per channel**. The
+reporter does all of that for the channel it is configured against; C1's yield needs
+only `pullFunding`, then stakers claim.
 
-> **C5 is fed from the indexer, not the DEX.** Run a second reporter instance with
+> **The LP channel is fed from the indexer, not the DEX.** Run a second reporter with
 > `source.kind: "lp"` and an `indexer` block (`reporter init-config lp`). It replays
 > `add_liq`/`rem_liq` events to reconstruct each provider's LP balance at a height,
 > and credits `min(LP(epochStart), LP(epochEnd))`.
@@ -120,7 +139,7 @@ that **for C3 only**; C7 needs just `pullFunding` and then holders claim.
 > (`lp-{address}`, total at `tlp`) with **no height checkpoints**, so a finished epoch
 > cannot be priced from it, and paying against live balances would be
 > flash-liquidity gameable — add just before the snapshot, remove just after. The
-> `min(start, end)` rule mirrors C7's anti-flash-stake rule for exactly that reason.
+> `min(start, end)` rule mirrors the yield anti-flash-stake rule for the same reason.
 >
 > LP rewards therefore inherit a trust assumption on the indexer operator. It is not
 > a new one: the reporter was already trusted to submit an honest list, the events
@@ -128,99 +147,120 @@ that **for C3 only**; C7 needs just `pullFunding` and then holders claim.
 > recompute independently and a guardian can still veto in the challenge window.
 > Details in [`reporter/README.md`](reporter/README.md).
 
-### C3 / C5 — distributors (content, LP)
+### C3 — the distributor
 
 ```json
 {"token":"vsc1...", "kind":"0", "tokenId":"",
- "funder":"vsc1C2", "window":"1200", "treasury":"hive:treasury",
- "reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1",
+ "funder":"vsc1C2", "treasury":"hive:treasury",
  "guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}
 ```
 
 | field | meaning |
 |---|---|
-| `funder` | the C2 instance this pulls its slice from |
-| `window` | challenge window in blocks. After `finalizeEpoch`, the guardian has this long to cancel a bad report before claims open. Must be > 0. |
+| `funder` | the C2 instance channels pull their slices from |
 | `treasury` | fixed destination for `sweepUnallocated`. Pinned at init so a sweep cannot be redirected. |
-| `reporter*` | who may push shares and finalize |
+| `guardian*` | who may cancel a bad report, contract-wide |
 
-`genesis` and `epochLen` are **not** configured here — C3/C5 read them from the
-funder at init and abort if C2 is not initialised yet. If you do supply them they are
-cross-checked, and a mismatch aborts.
+`genesis` and `epochLen` are **not** configured here — they are read from the funder
+at init, and a supplied mismatch aborts.
 
-### C6 — migration / airdrop
+#### Channels
+
+Everything per-reward-stream is registered afterwards, one call per stream:
 
 ```json
-{"token":"vsc1...", "kind":"0", "tokenId":"", "maxAirdrop":"1000000",
- "treasury":"hive:treasury"}
+{"channel":"content", "bucket":"content", "window":"1200",
+ "reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1",
+ "role":"content"}
 ```
 
-`maxAirdrop` caps the total this contract can ever distribute. Batches are
-idempotent per `batchId`, so a retried batch cannot double-pay. **C6 must hold the
-tokens it airdrops** — transfer them in before ownership moves to C2.
+| field | meaning |
+|---|---|
+| `bucket` | the C2 bucket that funds this channel. Verified against the funder at registration, so a typo fails here rather than at the first `pullFunding` — by which time the epoch it should have funded has elapsed. One bucket may fund only one channel. |
+| `window` | challenge window in blocks, per channel. Must be > 0 and ≤ 10 epochs. |
+| `reporter*` | who may push shares and finalize **this channel**. A content reporter and an LP reporter are different services holding different keys; neither can write the other's book. |
+| `role` | optional `content`/`lp` label a reporter cross-checks itself against |
 
-`treasury` is **optional** and pins the destination for `sweepResidual`, which moves
-only `balance - (maxAirdrop - airdropped)`: the excess that no remaining airdrop
-capacity could ever pay. It can never touch tokens a pending batch needs.
+Channels are **append-only** and owner-only. Re-pointing a live channel's bucket or
+reporter would rewrite the rules under an epoch already in flight.
 
-Decide deliberately. Omitting it means any excess — tokens above the cap, tokens the
-snapshot did not need, and entries the ledger-address filter skipped — is **locked in
-the contract permanently**. Setting it gives the owner an exit, which is also a
-clawback capability; a launch that wants the stronger "nothing can ever be reclaimed"
-promise should leave it unset.
+Every epoch call — `pullFunding`, `submitShares`, `finalizeEpoch`, `cancelEpoch`,
+`claim`, `shareOf`, `sweepUnallocated` — takes a `channel`.
 
-### C7 — staking yield (trustless)
+### C1 — staking, yield and the airdrop
 
 ```json
-{"token":"vsc1...", "kind":"0", "tokenId":"",
- "funder":"vsc1C2", "stakeSource":"vsc1C1", "treasury":"hive:treasury",
+{"token":"vsc1...", "kind":"0", "tokenId":"", "cooldown":"57600", "epochLen":"28800",
+ "allow":"", "treasury":"hive:treasury", "maxAirdrop":"1000000", "airdropStaked":"0",
  "guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}
 ```
 
-No reporter — C7 reads stake from `stakeSource` itself and pays strictly pro-rata,
-so nobody can influence the split. It adopts `genesis`/`epochLen` from the funder.
+Staking needs only `token`, `cooldown`, `epochLen` and `allow`. **Everything else is
+optional, and absent means the capability is absent** rather than half-wired:
 
-It credits `min(stakeAt(epochStart), stakeAt(epochEnd))`, so only stake held for the
-**whole** epoch earns. That is deliberate: it defeats flash-staking a single block
-around the snapshot.
+| field | enables |
+|---|---|
+| `treasury` + `guardian*` | `sweepEmptyEpoch` (an epoch nobody could ever claim) and `sweepUnobligated` (leftover airdrop float). Without them both refuse. |
+| `maxAirdrop` | the airdrop, capped at that total. Without it `airdropBatch` refuses. |
+| `airdropStaked` | `"1"` credits stake **directly** instead of transferring: nothing leaves the contract, recipients earn from the first epoch, and they must serve the unstake cooldown before selling. |
 
-**`stakeSource` must have adopted the emission schedule first** — `C1.adoptSchedule`,
-after C2 is initialised. C7 refuses otherwise, and the reason is the one design point
-worth understanding here.
+`cooldown` must exceed `epochLen` (R15), so a one-block stake cannot capture a whole
+epoch of yield. That check is made against an operator-supplied `epochLen` and
+re-verified against the real schedule at `adoptSchedule`.
 
-The numerator is each staker's `min(aᵢ,bᵢ)`, so the denominator must be
-`Σ min(aᵢ,bᵢ)` — which no contract can evaluate directly, because summing a
-per-account minimum means iterating every staker. The obvious substitute,
-`min(Σa, Σb)`, is *larger* whenever stakers move in both directions during an epoch
-(by roughly `min(gross stake-ins, gross stake-outs)`), and dividing by too large a
-figure pays out less than `funded` and strands the difference where no account can
-claim it.
+**Then, after `C2.init`:**
 
-C1 therefore maintains the exact value. It keeps one running number per epoch — the
-total by which accounts have fallen below their epoch-start level — giving
+```json
+adoptSchedule {"funder":"vsc1C2", "bucket":"yield"}
+```
+
+Owner-only and once. It arms the drawdown accumulator (below) and the bucket yield is
+funded from. `pullFunding` refuses until it has run.
+
+#### Why the yield denominator needs an accumulator
+
+Yield credits each staker `min(stakeAt(epochStart), stakeAt(epochEnd))`, so only stake
+held for the **whole** epoch earns — that defeats flash-staking a single block around
+either boundary. The matching denominator is therefore `Σ min(aᵢ,bᵢ)`, and no contract
+can evaluate that directly: summing a per-account minimum means iterating every staker.
+
+The obvious substitute, `min(Σa, Σb)`, is *larger* whenever stakers move in both
+directions during an epoch, and dividing by too large a figure pays out less than
+`funded` and strands the difference where nobody can claim it.
+
+So C1 keeps one running number per epoch — the total by which accounts have fallen
+below their epoch-start level — giving
 
 ```
 Σ min(aᵢ,bᵢ) = totalStakedAtHeight(epochStart) − drawdown(epoch)
 ```
 
-in O(1) per stake change, with no iteration. Updates telescope, so an account's many
-moves within an epoch collapse to its final `max(0, aᵢ−bᵢ)`.
+in O(1) per stake change. Updates telescope, so many moves inside one epoch collapse
+to the final `max(0, aᵢ−bᵢ)`. The denominator is exact, payouts sum to `funded` less
+truncation dust, and two things follow:
 
-Only C7 needs this. C3 and C5 are *handed* their denominator, accumulating
-`totalShares` from the entries as they are submitted, so theirs is the sum of its own
-numerators by construction. C7 has no reporter and must derive it from aggregate state.
-
-Two properties follow from the denominator being exact:
-
-- **claims never expire** — content, LP and yield are identical in this respect. An
-  epoch is paid out in full, so there is no residue for anyone to reclaim and no
-  reason to ever close claims.
+- **claims never expire** — content, LP and yield are identical in this respect;
 - **`sweepEmptyEpoch` fires only when the denominator is zero** — nobody held stake
   across the epoch, so no claim can ever succeed and the funding would otherwise be
-  locked forever. That condition is settled by history, needs no maturity wait, and
-  cannot strand a slow claimant. An epoch with even one staker is never sweepable.
+  locked forever. Settled by history, so it needs no maturity wait and cannot strand a
+  slow claimant. An epoch with even one staker is never sweepable.
 
-`treasury` pins where `sweepEmptyEpoch` sends a stakerless epoch.
+C3's channels do not need any of this: they are *handed* their denominator,
+accumulating `totalShares` from the entries as they are submitted.
+
+#### The airdrop, and the balance envelope
+
+`maxAirdrop` caps the total ever distributed. Batches are idempotent per `batchId`.
+The contract **must hold the float** — transfer it in before ownership moves to C2.
+
+Because staked principal, funded-but-unclaimed yield and airdrop float now share one
+balance, `airdropBatch` may only spend the **unobligated remainder** and checks that
+before paying. Without it an oversized batch would pay itself out of stakers'
+principal, surfacing only when someone tried to withdraw.
+
+`sweepUnobligated` (owner-only, to the pinned treasury) recovers leftover float, and
+reserves whatever airdrop capacity is still unspent so a mid-migration sweep cannot
+starve the batches still to come.
 
 ## Devnet tests
 
@@ -232,7 +272,7 @@ checkout to run; `testdata/` keeps them versioned here without breaking the buil
 | test | covers | ~time |
 |---|---|---|
 | `magi_tokenomics_devnet_test.go` | C0+C2+C3 + 13 outsider attacks | 10 min |
-| `magi_c5c6c7_devnet_test.go` | C1+C2+C5+C6+C7 + 11 outsider attacks | 18 min |
+| `magi_stake_lp_airdrop_devnet_test.go` | staking+yield+airdrop and an LP channel + outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real reporter binary driving C3 | 12 min |
 | `magi_full_devnet_test.go` | **all 7 contracts + reporter**, then 14 staked-holder + 34 outsider attacks | 30 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
@@ -280,7 +320,7 @@ In **Attest** mode (M-of-N) a single rogue additionally cannot reach threshold,
 cannot equivocate (one vote per authority per action, so backing a second payload is
 refused), and cannot stop an honest majority committing a different payload.
 
-C7 (staking yield) has none of this exposure: it reads C1 directly and pays strictly
+Staking yield has none of this exposure: it reads the stake history directly and pays
 pro-rata, so there is nothing to report and nothing to challenge.
 
 ### Two rules the contracts enforce, not convention
@@ -306,7 +346,7 @@ guarded against explicitly:
 - **A vacuous assertion.** The pre-attack state snapshot is rejected if any baseline
   value is empty, since an empty baseline compares equal to anything.
 
-One honest limit: C7's `sweepEmptyEpoch` refuses any epoch that has stakers, and it
+One honest limit: `sweepEmptyEpoch` refuses any epoch that has stakers, and it
 checks that before authority — so a devnet run, where stakers exist by construction,
 cannot reach its authority gate. That gate is proven in-process instead, on a
 genuinely stakerless epoch where a non-guardian moves nothing and the guardian
@@ -315,7 +355,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All 6 contracts + reporter are complete, audited, and green: **97 contract tests, 120
+All 6 contracts + reporter are complete, audited, and green: **103 contract tests, 120
 reporter tests, and ten devnet suites** — the full-system run, the adversarial
 suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
 passthrough.

@@ -39,21 +39,23 @@ You decide the buckets and how the flow splits, e.g. 50% content / 30% liquidity
 20% stakers. A bucket can point at one of the payout contracts below, at a DAO, or
 at a plain treasury wallet. It's your call.
 
-**The payout contracts — who actually gets paid.**
+**The payout contract — who actually gets paid.**
+One contract handles every reward stream you define, as separate **channels**:
 
-- **Content rewards (C3)** — for posting and voting on Hive.
-- **LP rewards (C5)** — for providing liquidity. Same machinery, separate instance;
-  you run a second copy of the reporter in "lp" mode to feed it.
-- **Staking yield (C7)** — for locking tokens up.
+- a **content** channel — for posting and voting on Hive;
+- an **lp** channel — for providing liquidity;
+- anything else you add later, with no new deployment.
 
-**Staking (C1).**
-People lock tokens here. It records a history, so the system can prove later
-"this person had 600 tokens staked on day 12" — which is how yield is calculated
-fairly after the fact.
+Each channel keeps its own pot, its own list of who earned what, and its own reporter.
+They share code and a treasury, and nothing else.
 
-**Airdrop (C6).**
-A one-off tool for launch: import a snapshot of existing holders and pay them out.
-Used once, then it just sits there.
+**Staking, yield and the airdrop — all in one contract.**
+People lock tokens here, and it records a history, so the system can prove later
+"this person had 600 tokens staked on day 12" — which is how yield is worked out
+fairly after the fact. Yield is paid from that same history, so it needs no reporter
+at all. And the launch airdrop lives here too: it runs a handful of times to import a
+snapshot of existing holders, and can pay them **straight into stake** so they start
+earning immediately and cannot dump on day one.
 
 **The reporter — a program you run, not a contract.**
 Contracts cannot read the outside world. So a small service works out who earned what
@@ -108,7 +110,7 @@ exact, the pot is paid out in full, and nothing is left over for anyone to recla
 which is why claims never need to close.
 
 The only money left behind is rounding: fractions of a token too small to divide.
-That is the same in all three reward contracts.
+That is the same everywhere rewards are paid.
 
 ## Who can do what
 
@@ -236,13 +238,16 @@ talking to each other — so no single machine, or single key, is trusted.
 You don't need all of it.
 
 - **Just an emission schedule into a treasury?** Token + C2. Two contracts.
-- **Add trustless staking rewards?** + C1 + C7. Still no reporter, still nothing to
-  trust.
-- **Add content rewards?** + C3 and the reporter. This is the first piece that
-  needs an honest operator — which is exactly why the challenge window and the
-  multi-machine mode exist.
-- **Add LP rewards?** + C5.
-- **Migrating from Hive-Engine?** + C6 for the initial snapshot, used once.
+- **Add trustless staking rewards?** + the staking contract. Still no reporter, still
+  nothing to trust.
+- **Add content rewards?** + the distributor, a `content` channel, and a reporter.
+  This is the first piece that needs an honest operator — which is exactly why the
+  challenge window and the multi-machine mode exist.
+- **Add LP rewards?** another channel on the same distributor. No new deployment.
+- **Importing a snapshot at launch?** already there — it is part of the staking
+  contract, and can pay straight into stake.
+
+Four contracts covers all of it, including the token.
 
 ## The honest limitations
 

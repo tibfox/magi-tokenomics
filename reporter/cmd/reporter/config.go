@@ -233,9 +233,18 @@ func (c *Config) Validate() error {
 	// whoever happened to be on the last page; now it produces a loud refusal, but
 	// only after burning RC on every failed page. Catch it at config load instead.
 	//
-	// Measured cost is ~95 RC per entry over a ~200 fixed base (docs/rc-costs.md). The
-	// 20% headroom covers metering variance between pages of different byte lengths.
-	const perEntryRC, baseRC = 95, 200
+	// Measured at ~91 RC per entry over a ~465 fixed base (docs/rc-costs.md); the
+	// constants below round both up, because the FIRST entry costs more than the
+	// marginal rate and a base of exactly 465 still under-covers a one-entry page. The 20% headroom covers metering variance between pages of different
+	// byte lengths.
+	//
+	// The BASE is the part to keep honest. It was ~200 while each share key was
+	// `share|<epoch>|<acct>`; channel-scoping added a component to every key the call
+	// writes and pushed the fixed cost to ~465. Leaving 200 in place made this check
+	// UNDER-estimate small pages — a one-entry page validated against 354 RC while
+	// really costing ~697, so a config could pass load and then revert every single
+	// page, which is precisely the failure this check exists to prevent.
+	const perEntryRC, baseRC = 95, 500
 	if want := (baseRC + perEntryRC*c.Page.MaxEntries) * 12 / 10; c.Submit.RcLimit < want {
 		return fmt.Errorf("submit.rc_limit %d cannot fit a full page of %d entries (needs ~%d: "+
 			"~%d RC/entry over a ~%d base, plus headroom). Every full page would revert while the "+

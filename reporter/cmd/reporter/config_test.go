@@ -365,3 +365,47 @@ func TestConfig_AttributionIsNotConfigurable(t *testing.T) {
 		t.Fatalf("the error must name the offending key so it is fixable, got: %v", err)
 	}
 }
+
+// The rc_limit/max_entries coherence check must cover EVERY page size, not just the
+// default one. It is sized from measurement (docs/rc-costs.md), and the measurement
+// moved when share keys became channel-scoped: the fixed base went from ~200 to ~465,
+// so a base left at 200 demanded 354 RC for a one-entry page that really costs ~697.
+// A config could then pass load and revert every single page — precisely the failure
+// this check exists to catch.
+//
+// Pinned against the measured costs so a future change to the key layout that raises
+// the base has to update the constant rather than silently under-covering small pages.
+func TestConfig_RcLimitCheckCoversEveryPageSize(t *testing.T) {
+	measured := map[int]int{1: 697, 10: 1376, 30: 3310, 60: 5942}
+	for entries, cost := range measured {
+		// the largest rc_limit the validator still rejects
+		lo := 0
+		for n := 1; n <= 20000; n++ {
+			c := baseValidCfg(t)
+			c.Page.MaxEntries = entries
+			c.Submit.RcLimit = n
+			if c.Validate() == nil {
+				lo = n
+				break
+			}
+		}
+		if lo == 0 {
+			t.Fatalf("%d entries: no rc_limit was ever accepted", entries)
+		}
+		if lo < cost {
+			t.Fatalf("%d entries: the smallest ACCEPTED rc_limit is %d, but a page really "+
+				"costs %d — the check under-covers this page size, so a config would load "+
+				"and then revert every page", entries, lo, cost)
+		}
+	}
+}
+
+// baseValidCfg is a config that validates, for tests that then break one field.
+func baseValidCfg(t *testing.T) *Config {
+	t.Helper()
+	c, err := LoadConfig(writeCfg(t, ExampleConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}

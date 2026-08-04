@@ -14,7 +14,7 @@ version control without breaking `go build ./...`.
 ```sh
 # 1. build this framework's artifacts + the reporter binary
 cd /path/to/magi-tokenomics
-for c in c1-staking c2-emission c3-distributor c5-lp c6-migration c7-yield; do
+for c in c1-staking c2-emission c3-distributor; do
   GOTOOLCHAIN=go1.25.3 tinygo build -gc=custom -scheduler=none -panic=trap \
     -no-debug -target=wasm-unknown -o $c/artifacts/main.wasm ./$c/contract
 done
@@ -38,7 +38,7 @@ to your own paths.
 | test | covers | ~time |
 |---|---|---|
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
-| `magi_c5c6c7_devnet_test.go` | C1 + C2 + C5 + C6 + C7, then outsider attacks | 18 min |
+| `magi_stake_lp_airdrop_devnet_test.go` | staking + yield + airdrop (C1) and an LP channel, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
 | `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
@@ -55,7 +55,7 @@ with exact end-to-end balance conservation — and then attacks it from two dire
 **Three attacker profiles, because they probe different depths.** A pure outsider (no
 stake, no share, no tokens) is the easy case: most calls die on the first authority
 check. A *staked holder* is the realistic insider — real stake in C1, real shares in
-C3/C5, claims already collected — so their attacks (double-claim, epoch aliasing,
+the distributor, claims already collected — so their attacks (double-claim, epoch aliasing,
 early withdrawal, sweeping) reach far deeper into the logic before anything refuses.
 Both phases refuse to run if their attacker lacks the standing that makes the phase
 meaningful.
@@ -133,7 +133,7 @@ is worse than no entry at all.
 | `magi_multiepoch_devnet_test.go` | yes | 2025s |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
 | `magi_tokenomics_devnet_test.go` | yes | 591s |
-| `magi_c5c6c7_devnet_test.go` | yes | 1140s |
+| `magi_stake_lp_airdrop_devnet_test.go` | pending re-run on the merged layout | — |
 | `magi_refill_devnet_test.go` | yes | 1006s |
 | `magi_lp_multiepoch_devnet_test.go` | yes | 1205s |
 | `magi_reporter_devnet_test.go` | yes | 721s |
@@ -164,7 +164,7 @@ Keep this table honest as the code moves on: "patched and compiles" is not
 
 Three epochs of LP rewards driven by the real `reporter` binary in `source.kind: "lp"`.
 The indexer is faked with an httptest GraphQL server, exactly as the content reporter
-suite fakes Hive; everything else — C2, C5, submission, claims — is the live chain.
+suite fakes Hive; everything else — C2, the distributor, submission, claims — is the live chain.
 
 The fixture gives each epoch a **different** correct answer, so a pass means the
 `min(LP(start), LP(end))` rule actually discriminates rather than one assertion
@@ -287,11 +287,11 @@ way; ignoring them wastes 10–25 minutes per run.
   Using the helper is not enough on its own — it has to cover every actor and every
   key you are about to assert on.
 - **Stake before initialising C2.** C2's `genesis` is the block it initialises at,
-  and C7 credits `min(stakeAt(start), stakeAt(end))` — so stake arriving later is
+  and yield credits `min(stakeAt(start), stakeAt(end))` — so stake arriving later is
   zero at both epoch-0 boundaries and that epoch's yield is unclaimable.
-- **`C1.adoptSchedule` between `C2.init` and `C7.init`.** C1 accumulates a per-epoch
-  drawdown so C7 can divide by the exact `Σ min(aᵢ,bᵢ)` rather than an over-counting
-  total; it needs the epoch boundaries to do that, and cannot be told at its own init
-  because C2's genesis does not exist yet. C7's init refuses a `stakeSource` that
-  skipped this step, so a suite that forgets it fails at deploy with a clear message
-  rather than silently under-paying every yield epoch.
+- **`C1.adoptSchedule` after `C2.init`.** It arms both the per-epoch drawdown
+  accumulator (the exact `Σ min(aᵢ,bᵢ)` yield denominator) and the bucket yield is
+  funded from. Neither can be given at C1's own init, because C2's genesis and buckets
+  do not exist yet. `pullFunding` refuses until it has run.
+- **`addChannel` per reward stream**, after `C2.init` — registering a channel verifies
+  its bucket against the funder, so it cannot happen earlier.

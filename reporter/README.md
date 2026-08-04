@@ -1,12 +1,14 @@
 # reporter — off-chain share reporter
 
-The contracts in this repo cannot read Hive. `C3` (content rewards) and `C5` (LP
-rewards) only know how to accept a list of `account:shares` pairs and pay claims
-against it. This service is the piece that watches Hive, computes those shares, and
-pushes them on chain.
+The contracts in this repo cannot read Hive. The distributor only knows how to accept
+a list of `account:shares` pairs and pay claims against it. This service is the piece
+that watches Hive (or the DEX indexer), computes those shares, and pushes them on
+chain.
 
 There is no oracle: the reporter is a plain service that a tenant runs, holding an
-account that the distributor's `init` named as its reporter authority.
+account named as the reporter authority **of one channel**. One distributor carries
+several channels — content, LP, whatever a tenant adds — so you run one reporter per
+channel, each with its own key, and neither can write the other's share book.
 
 ```
 reporter epoch    # where are we? verifies config against on-chain state
@@ -54,7 +56,8 @@ quietly.
 | `indexer.pool` | *required for* `kind=lp` | pool contract id as `indexer_contract_id` |
 | `indexer.page_size` | `1000` | rows per GraphQL page |
 | `indexer.allow_stale` | `false` | disables the freshness gate. See the warning under **Two source kinds** before setting it |
-| `contracts.distributor` | *required* | C3 (content) or C5 (LP) |
+| `contracts.distributor` | *required* | the distributor contract |
+| `contracts.channel` | *required* | which reward channel on it this reporter writes (`content`, `lp`, …) |
 | `contracts.funder` | `""` | C2. Required when `submit.keeper` |
 | `contracts.stake` | `""` | C1. Required when `source.weight=token_stake` |
 | `epoch.genesis` | `0` | **must equal** the distributor's `cfg_genesis` |
@@ -67,7 +70,7 @@ which is unrecoverable.
 
 | field | default | notes |
 |---|---|---|
-| `source.kind` | `content` | `content` reads Hive posts/votes → C3; `lp` replays liquidity events → C5 |
+| `source.kind` | `content` | `content` reads Hive posts/votes; `lp` replays liquidity events from the indexer. Must match the channel you are writing. |
 | `source.tag` | *required for* `kind=content` | the Hive tag/community that counts |
 | `source.limit` | `1000` | max posts fetched per epoch |
 | `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required). Either way a vote contributes its **weight**, not a unit: `hive_rshares` uses Hive's own stake-weighted figure, `token_stake` uses `stake x vote% / 10000` |
@@ -92,13 +95,15 @@ Two of these are checked **against each other** at load, because they validate
 perfectly in isolation and are ruinous together. Pagination only emits a short page
 at the very end, so if a full page exceeds `rc_limit` then *every page but the last*
 reverts, every time — while the cheap calls (poke, pull, finalize) all succeed. The
-budget is ~95 RC per entry over a ~200 base ([rc-costs.md](../docs/rc-costs.md)).
+budget is ~91 RC per entry over a ~465 base ([rc-costs.md](../docs/rc-costs.md)) — the
+base rose when share keys became channel-scoped, so a stale figure under-covers SMALL
+pages, not large ones.
 
 ## Why the math is integer-only
 
 `sharecore` uses `math/big` throughout and never `float64`. Two reasons:
 
-1. **The challenge window.** `C3.finalizeEpoch` opens a window in which a guardian
+1. **The challenge window.** `finalizeEpoch` opens a window in which a guardian
    can cancel a bad report. That is only meaningful if a third party can recompute
    the same numbers from the same input.
 2. **Attest mode.** The `auth` module's Attest mode requires N reporter accounts to
@@ -142,7 +147,7 @@ canonicalisation, pagination, submission, Attest quorum — is identical either 
 | kind | reads | feeds |
 |---|---|---|
 | `content` (default) | Hive posts and votes | C3 |
-| `lp` | the indexer's liquidity event log | C5 |
+| `lp` | the indexer's liquidity event log | an `lp` channel |
 
 `reporter init-config lp` writes a ready LP config. It needs an `indexer` block:
 
@@ -165,7 +170,7 @@ snapshot, remove just after. So the reporter replays `add_liq`/`rem_liq` events:
 LP(provider, H) = SUM(lp_minted where height <= H) - SUM(lp_burned where height <= H)
 ```
 
-and credits **`min(LP(start), LP(end))`**, mirroring what C7 does for stake:
+and credits **`min(LP(start), LP(end))`**, mirroring what staking yield does:
 liquidity must be present at BOTH epoch boundaries to earn anything.
 
 **Freshness is gated by default.** A lagging indexer does not error — it returns fewer
@@ -422,8 +427,8 @@ and reporter tests stopped at producing a page:
 The seam test immediately paid for itself: `applyEntries` used the permissive
 `validateAddr`, so an entry with no ledger domain (`alice:100`) was **counted into
 totalShares and then unclaimable forever** — measured at 50% of an epoch's funding
-silently stranded, with the remaining claimant diluted. C3/C5 now skip
-domain-less share recipients, and C6 does the same for airdrop recipients.
+silently stranded, with the remaining claimant diluted. The distributor now skips
+domain-less share recipients, and the airdrop does the same for its recipients.
 
 ## Tests
 
