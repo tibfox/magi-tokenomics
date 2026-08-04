@@ -31,6 +31,11 @@ var (
 	reAction = regexp.MustCompile(`(?:CallContract\([^,]+,[^,]+,[^,]+|call[A-Za-z]*\((?:t, )?(?:ct|d)?[^"]*)"([a-z][A-Za-z0-9]*)"`)
 	// state keys are referenced as "prefix|..." literals
 	reStateKey = regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|`)
+	// A keyed READ: a contract id variable, then within the same call a "prefix|"
+	// literal. Attributing the key to its CONTRACT is the point — checking that a key
+	// exists in *some* contract let `claimed|` (written by the distributor) satisfy a
+	// read against C1, which writes `y_claimed|`. That cost a 20-minute devnet run.
+	reKeyedRead = regexp.MustCompile(`\b(c[1-7]ID|distID)\b[^\n]{0,120}?"([a-z][A-Za-z0-9_]*)\|`)
 )
 
 func devnetSources(t *testing.T) map[string]string {
@@ -118,29 +123,63 @@ func TestDevnetDrift_EveryReferencedActionExists(t *testing.T) {
 
 // Every state-key prefix the suites read must still be written somewhere.
 func TestDevnetDrift_EveryReferencedStateKeyExists(t *testing.T) {
-	contracts := contractSources(t)
+	perContract := contractSourcesByName(t)
 	missing := map[string][]string{}
-	// prefixes that are constructed by the test itself, not read from a contract
+	// prefixes the test constructs itself rather than reading from a contract
 	ignore := map[string]bool{"epoch": true, "block": true}
 
 	for name, src := range devnetSources(t) {
-		for _, m := range reStateKey.FindAllStringSubmatch(src, -1) {
-			k := m[1]
+		for _, m := range reKeyedRead.FindAllStringSubmatch(src, -1) {
+			idVar, k := m[1], m[2]
 			if ignore[k] {
 				continue
 			}
-			if strings.Contains(contracts, `"`+k+`|`) {
+			src, ok := perContract[contractOfVar(idVar)]
+			if !ok {
+				continue // an id this guard cannot attribute; not worth a false alarm
+			}
+			if strings.Contains(src, `"`+k+`|`) {
 				continue
 			}
-			missing[name] = append(missing[name], k)
+			missing[name] = append(missing[name], idVar+" -> "+k)
 		}
 	}
 	for f, keys := range missing {
 		sort.Strings(keys)
-		t.Errorf("%s reads state keys no contract writes: %v\n"+
+		t.Errorf("%s reads state keys THAT CONTRACT does not write: %v\n"+
 			"  a renamed key reads as empty on devnet, so assertions pass vacuously or time out",
 			f, uniqStrings(keys))
 	}
+}
+
+// contractOfVar maps a suite's contract id variable to the contract behind it.
+//
+// The suites kept their historical variable names through the merge — c5ID is the LP
+// CHANNEL on the distributor, c6ID/c7ID are roles inside C1 — so the mapping is by
+// convention rather than by name.
+func contractOfVar(v string) string {
+	switch v {
+	case "c1ID", "c6ID", "c7ID":
+		return "c1-staking"
+	case "c2ID":
+		return "c2-emission"
+	case "c3ID", "c5ID", "distID":
+		return "c3-distributor"
+	}
+	return ""
+}
+
+func contractSourcesByName(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, c := range []string{"c1-staking", "c2-emission", "c3-distributor"} {
+		b, err := os.ReadFile(filepath.Join(contractDir, c, "contract", "main.go"))
+		if err != nil {
+			t.Fatalf("read %s: %v", c, err)
+		}
+		out[c] = string(b)
+	}
+	return out
 }
 
 func uniqStrings(in []string) []string {

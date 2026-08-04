@@ -30,7 +30,7 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
 
-	cfg := DefaultConfig()
+	cfg := magiDevnetConfig()
 	if os.Getenv("DEVNET_KEEP") != "" {
 		cfg.KeepRunning = true
 	}
@@ -147,7 +147,14 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	send(1, tokenID, "init", `{"name":"M2","symbol":"M2","decimals":0,"maxSupply":"100000000"}`, "token.init")
 	waitKey(tokenID, "isInit", "token init")
 
-	send(1, c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"5","allow":""}`, tokenID), "c1.init")
+	// C1 carries three roles, and each is CONFIGURED rather than switched on: without
+	// maxAirdrop the airdrop entrypoint refuses, and without treasury+guardian the
+	// sweeps do. The suite exercises all three, so all three are configured.
+	send(1, c1ID, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"20","epochLen":"5","allow":"",`+
+			`"maxAirdrop":"1000","treasury":"hive:%s4","guardianMode":"0",`+
+			`"guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
+		tokenID, d.cfg.WitnessPrefix, d.cfg.WitnessPrefix), "c1.init")
 	waitKey(c1ID, "init", "c1 init")
 
 	// bootstrap supply BEFORE handing the token to C2 (owner can still mint)
@@ -184,7 +191,7 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 
 	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
 	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
-	send(1, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "c1.adoptSchedule")
+	send(1, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), "c1.adoptSchedule + yield bucket")
 	waitKey(c1ID, "cfg_genesis", "c1 schedule adopted")
 
 	c7tx := send(1, c1ID, "init", fmt.Sprintf(
@@ -265,7 +272,7 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	// C7: the holder claims pro-rata yield for the stake they held all epoch
 	if c7ok {
 		send(2, c1ID, "claimYield", `{"epoch":"0"}`, "c7.claim (staking yield)")
-		waitKey(c1ID, "claimed|0|hive:"+holder, "c7 claim recorded")
+		waitKey(c1ID, "y_claimed|0|hive:"+holder, "c7 claim recorded")
 	}
 
 	// ---------------- PHASE 3: outsider attacks on C5/C6/C7 ----------------

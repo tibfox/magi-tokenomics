@@ -46,7 +46,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	cfg := DefaultConfig()
+	cfg := magiDevnetConfig()
 	if os.Getenv("DEVNET_KEEP") != "" {
 		cfg.KeepRunning = true
 	}
@@ -328,7 +328,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// per-epoch drawdown accumulator that gives C7 an EXACT yield denominator; C7's
 	// init refuses a stakeSource without it, because dividing by min(Σa,Σb) instead
 	// strands part of every epoch and is what forced the old claim deadline.
-	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
+	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), "C1 adopt schedule + yield bucket")
 	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
 	initAs(c1ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+

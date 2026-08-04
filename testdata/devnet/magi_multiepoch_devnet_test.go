@@ -34,7 +34,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	cfg := DefaultConfig()
+	cfg := magiDevnetConfig()
 	if os.Getenv("DEVNET_KEEP") != "" {
 		cfg.KeepRunning = true
 	}
@@ -206,7 +206,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	waitKey(c3ID, "ch_bucket|content", "content channel registered")
 	// C1 adopts the emission schedule, arming the per-epoch drawdown accumulator that
 	// gives C7 an EXACT yield denominator. C7's init refuses a stakeSource without it.
-	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), "C1 adopt schedule")
+	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), "C1 adopt schedule + yield bucket")
 	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
 	call(c1ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
@@ -373,7 +373,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	for _, ep := range []string{"0", "1", "2", "3", "4"} {
 		pre := bal(holderB)
 		callN(2, c1ID, "claimYield", fmt.Sprintf(`{"epoch":"%s"}`, ep), "B claims yield e"+ep)
-		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "claimed|"+ep+"|hive:"+holderB, 3*time.Minute) {
+		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "y_claimed|"+ep+"|hive:"+holderB, 3*time.Minute) {
 			t.Fatalf("B never claimed yield epoch %s", ep)
 		}
 		time.Sleep(10 * time.Second) // let the transfer settle before measuring
@@ -441,7 +441,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// it tests. New assertions go after the existing lifecycle, not through it.
 	for _, ep := range []string{"0", "1", "2", "3", "4"} {
 		callN(1, c1ID, "claimYield", fmt.Sprintf(`{"epoch":"%s"}`, ep), "A claims yield e"+ep)
-		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "claimed|"+ep+"|hive:"+owner, 3*time.Minute) {
+		if !waitStateKeyPresent(t, d, ctx, 1, c1ID, "y_claimed|"+ep+"|hive:"+owner, 3*time.Minute) {
 			t.Fatalf("A never claimed yield epoch %s — out of RC, or the claim was rejected", ep)
 		}
 	}

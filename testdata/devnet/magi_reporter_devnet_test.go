@@ -250,7 +250,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
-	cfg := DefaultConfig()
+	cfg := magiDevnetConfig()
 	if os.Getenv("DEVNET_KEEP") != "" {
 		cfg.KeepRunning = true
 	}

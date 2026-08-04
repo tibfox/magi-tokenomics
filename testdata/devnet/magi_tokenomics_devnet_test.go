@@ -33,6 +33,32 @@ var magiFrameworkDir = envOr("MAGI_FRAMEWORK_DIR", "/home/dockeruser/okinoko/mag
 var magiTokenWasm = envOr("MAGI_TOKEN_WASM",
 	"/mnt/HC_Volume_105012347/magi/testnet/magi_token-contract/test/artifacts/main.wasm")
 
+// magiDevnetConfig is DefaultConfig with the HAF images PINNED.
+//
+// The harness leaves them on `:latest`, and on 2026-08-04 a rebuilt postgrest started
+// treating a missing schema as fatal rather than ignoring it. The devnet compose asks
+// for `hafah_endpoints,hafah_api_v1,hafah_api_v2`, but hafah has never created the
+// api_v1/v2 pair — checked against 1.27.11, 1.28.4 and 1.28.6, none of them contain
+// the name at all. The mismatch was harmless while postgrest tolerated it; once it
+// stopped, every devnet run died at startup with
+//
+//	Failed to load the schema cache ... schema "hafah_api_v1" does not exist
+//
+// before a single contract was deployed.
+//
+// Pinning is a workaround, not a fix: the compose naming schemas nothing creates is an
+// upstream wart in go-vsc-node and belongs there. This keeps OUR suites runnable
+// without editing their repo. Override with MAGI_POSTGREST_IMAGE / MAGI_HAFAH_IMAGE.
+func magiDevnetConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.PostgRESTImage = envOr("MAGI_POSTGREST_IMAGE",
+		"registry.gitlab.syncad.com/hive/haf_api_node/postgrest:1.28.5")
+	// hafah is deliberately NOT pinned: it is not what broke, and pinning it alongside
+	// postgrest left the chain stuck at block 1 with no witnesses registered. Only the
+	// component that actually changed behaviour is held back.
+	return cfg
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -57,7 +83,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
 
-	cfg := DefaultConfig()
+	cfg := magiDevnetConfig()
 	if os.Getenv("DEVNET_KEEP") != "" {
 		cfg.KeepRunning = true
 	}
