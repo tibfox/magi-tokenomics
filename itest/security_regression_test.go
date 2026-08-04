@@ -35,7 +35,7 @@ func TestSec_BoundaryJoinerCannotDilute(t *testing.T) {
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, rgC1), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, rgC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, rgC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"10000"}`, owner, 0, true)
 	call(t, &ct, tokenID, "transfer", `{"to":"hive:alice","amount":"600"}`, owner, 0, true)
@@ -71,15 +71,16 @@ func TestSec_EpochAliasRejected(t *testing.T) {
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
 
 	// overflow / non-canonical epochs are rejected outright
-	call(t, &ct, rgC3, "pullFunding", `{"epoch":"18446744073709551616"}`, "hive:attacker", 1, false)
-	call(t, &ct, rgC3, "pullFunding", `{"epoch":"00"}`, "hive:attacker", 1, false)
+	call(t, &ct, rgC3, "pullFunding", `{"channel":"author","epoch":"18446744073709551616"}`, "hive:attacker", 1, false)
+	call(t, &ct, rgC3, "pullFunding", `{"channel":"author","epoch":"00"}`, "hive:attacker", 1, false)
 	// the honest canonical path still works and gets the full amount
-	r := call(t, &ct, rgC3, "pullFunding", `{"epoch":"0"}`, "hive:keeper", 1, true)
+	r := call(t, &ct, rgC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:keeper", 1, true)
 	assert.Contains(t, r.Ret, `"100000"`)
 }
 
@@ -96,16 +97,17 @@ func TestSec_StaleEpochRescuable(t *testing.T) {
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
-	call(t, &ct, rgC3, "pullFunding", `{"epoch":"0"}`, "hive:keeper", 1, true)
+	call(t, &ct, rgC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:keeper", 1, true)
 
 	// reporter goes silent: too early to rescue...
-	call(t, &ct, rgC3, "cancelEpoch", `{"epoch":"0"}`, "hive:guardian", 2, false)
+	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 2, false)
 	// ...but after the staleness window the guardian can rescue + sweep to treasury
-	call(t, &ct, rgC3, "cancelEpoch", `{"epoch":"0"}`, "hive:guardian", 9999, true)
-	s := call(t, &ct, rgC3, "sweepUnallocated", `{"nonce":"1"}`, "hive:guardian", 9999, true)
+	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 9999, true)
+	s := call(t, &ct, rgC3, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "hive:guardian", 9999, true)
 	assert.Contains(t, s.Ret, `"100000"`)
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:treasury"}`, "hive:x", 9999, true)
 	assert.Contains(t, b.Ret, `"100000"`, "rescued funds must land in the PINNED treasury")
@@ -119,7 +121,8 @@ func TestSec_ZeroWindowRejected(t *testing.T) {
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"0","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
+	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 }
 
 // R2/HIGH-3: reporter and guardian authority sets must be disjoint.
@@ -130,7 +133,8 @@ func TestSec_ReporterGuardianOverlapRejected(t *testing.T) {
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:same","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:same","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:same","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, false)
+	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 }
 
 // R3/HIGH-1: the stale-rescue must be measured from the EPOCH END with a grace of
@@ -148,18 +152,19 @@ func TestSec_StaleRescueCannotDivertLiveEpoch(t *testing.T) {
 	// realistic cadence: 100-block epochs => stale grace must be >= 200 blocks after epoch end
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"100","baseAnnual":"1000000","blocksPerYear":"10000","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
-	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID), owner, 0, true)
+	call(t, &ct, rgC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
 
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 200, true)
 	// griefer front-runs the keeper to start any naive clock
-	call(t, &ct, rgC3, "pullFunding", `{"epoch":"0"}`, "hive:griefer", 200, true)
+	call(t, &ct, rgC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:griefer", 200, true)
 	// epoch 0 ended at h=99; grace is >= 1000 → rescue must be refused well past
 	// the old (buggy) 1000-blocks-after-pullFunding threshold
-	call(t, &ct, rgC3, "cancelEpoch", `{"epoch":"0"}`, "hive:guardian", 1050, false)
+	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 1050, false)
 	// the reporter can still do its job on the live epoch
-	call(t, &ct, rgC3, "submitShares", `{"epoch":"0","page":"0","entries":"hive:alice:1"}`, "hive:reporter", 1050, true)
-	call(t, &ct, rgC3, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 1050, true)
+	call(t, &ct, rgC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:1"}`, "hive:reporter", 1050, true)
+	call(t, &ct, rgC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1050, true)
 }
 
 // FINAL/HIGH-1: the C7 sweep must never take still-claimable yield.
@@ -185,7 +190,7 @@ func TestSec_C7SweepCannotStealClaimableYield(t *testing.T) {
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, fC1), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, fC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, fC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"600"}`, owner, 0, true)
 	call(t, &ct, tokenID, "transfer", `{"to":"hive:alice","amount":"600"}`, owner, 0, true)
@@ -234,7 +239,7 @@ func TestSec_C7SweepRecoversAnEpochNobodyCanClaim(t *testing.T) {
 	call(t, &ct, eC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, eC1), owner, 0, true)
-	call(t, &ct, eC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, eC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
 
 	// NOBODY ever stakes. Epoch 0 is funded and its denominator is zero.
@@ -303,7 +308,7 @@ func TestSec_KeeperLagCannotStrandEpoch(t *testing.T) {
 	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, kC1), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, kC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
+	call(t, &ct, kC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 
 	call(t, &ct, tokenID, "mint", `{"amount":"600"}`, owner, 0, true)
 	call(t, &ct, tokenID, "transfer", `{"to":"hive:alice","amount":"600"}`, owner, 0, true)

@@ -402,7 +402,7 @@ func c17BootYield(t *testing.T) test_utils.ContractTest {
 		tokenID, c17C1), c17Owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c17C2), c17Owner, 0, true)
+	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c17C2), c17Owner, 0, true)
 	return ct
 }
 

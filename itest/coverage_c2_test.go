@@ -157,8 +157,11 @@ func cvEmission(t *testing.T, ct *test_utils.ContractTest, epoch string, h uint6
 	return cvBig(cvField(r.Ret, "emission"))
 }
 
-func cvOwed(t *testing.T, ct *test_utils.ContractTest, target, epoch string, h uint64) *big.Int {
-	r := call(t, ct, cvC2, "owedOf", `{"target":"`+target+`","epoch":"`+epoch+`"}`, "hive:cvreader", h, true)
+// cvOwed reads an allocation by BUCKET NAME. C2 used to key these by the bucket's
+// target address, which collapsed two buckets paying one contract into a single
+// record — exactly the multi-channel configuration the distributor now uses.
+func cvOwed(t *testing.T, ct *test_utils.ContractTest, bucket, epoch string, h uint64) *big.Int {
+	r := call(t, ct, cvC2, "owedOf", `{"bucket":"`+bucket+`","epoch":"`+epoch+`"}`, "hive:cvreader", h, true)
 	return cvBig(cvField(r.Ret, "owed"))
 }
 
@@ -277,7 +280,7 @@ func TestCovEmit_RefillResumesAndPaysBacklog(t *testing.T) {
 	// Time passes with the pool still empty: epochs 2..9 accrue unfunded.
 	assert.Contains(t, cvPoke(t, &ct, 10), `"starved":true`)
 	assert.Equal(t, "200000", cvSupply(t, &ct, 10).String(), "still nothing drawn")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 10).String(), "epoch 2 unfunded so far")
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "2", 10).String(), "epoch 2 unfunded so far")
 
 	// Batch 2: mint another 300000 and ADD it to the allowance. increaseAllowance,
 	// not approve — approve OVERWRITES and would clobber any unspent remainder.
@@ -290,10 +293,10 @@ func TestCovEmit_RefillResumesAndPaysBacklog(t *testing.T) {
 	assert.Equal(t, "3", cvField(r2, "distributed"), "300000 funds exactly 3 backlog epochs")
 	assert.Equal(t, "500000", cvSupply(t, &ct, 10).String())
 	for _, ep := range []string{"2", "3", "4"} {
-		assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, ep, 10).String(),
+		assert.Equal(t, "100000", cvOwed(t, &ct, "solo", ep, 10).String(),
 			"backlog epoch "+ep+" must be paid in full, not pro-rated")
 	}
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "5", 10).String(), "and no further")
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "5", 10).String(), "and no further")
 }
 
 // ---- epoch accounting ----------------------------------------------------
@@ -309,13 +312,13 @@ func TestCovEmit_EpochZeroEmittedOnceOnly(t *testing.T) {
 	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 1), "distributed"), "epoch 0 must be emitted")
 	after := cvSupply(t, &ct, 1)
 	assert.Equal(t, "100000", after.String())
-	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "0", 1).String())
+	assert.Equal(t, "100000", cvOwed(t, &ct, "solo", "0", 1).String())
 
 	// re-poke, same height, different caller — nothing more may be minted
 	assert.Equal(t, "0", cvField(cvPoke(t, &ct, 1), "distributed"))
 	call(t, &ct, cvC2, "distributeEpoch", ``, "hive:cvgriefer", 1, true)
 	assert.Equal(t, after.String(), cvSupply(t, &ct, 1).String(), "re-poke must mint nothing")
-	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "0", 1).String(), "owed must not double")
+	assert.Equal(t, "100000", cvOwed(t, &ct, "solo", "0", 1).String(), "owed must not double")
 }
 
 // Before the first epoch has fully elapsed there is nothing to distribute — and
@@ -367,7 +370,7 @@ func TestCovEmit_CatchUpAfterDowntime(t *testing.T) {
 
 	got := new(big.Int)
 	for ep := 0; ep < 10; ep++ {
-		o := cvOwed(t, &ct, cvSolo, fmt.Sprint(ep), 10)
+		o := cvOwed(t, &ct, "solo", fmt.Sprint(ep), 10)
 		assert.Equal(t, want[fmt.Sprint(ep)], o.String(),
 			fmt.Sprintf("epoch %d must be credited at its own era rate", ep))
 		got.Add(got, o)
@@ -381,7 +384,7 @@ func TestCovEmit_CatchUpAfterDowntime(t *testing.T) {
 	assert.Equal(t, supply.String(), cvSupply(t, &ct, 10).String())
 	// and the next epoch resumes cleanly from where it left off
 	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 11), "distributed"))
-	assert.Equal(t, want["10"], cvOwed(t, &ct, cvSolo, "10", 11).String())
+	assert.Equal(t, want["10"], cvOwed(t, &ct, "solo", "10", 11).String())
 }
 
 // ---- maxSupply exhaustion ------------------------------------------------
@@ -406,7 +409,7 @@ func TestCovEmit_PoolExhaustsMidSchedule(t *testing.T) {
 
 	// epoch 2 wants 100000 but only 50000 is left, so it is not funded AT ALL
 	assert.Equal(t, "0", cvField(cvPoke(t, &ct, 3), "distributed"))
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 3).String(),
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "2", 3).String(),
 		"an epoch is never funded short — the 50000 stays in the pool")
 	s := cvSupply(t, &ct, 3)
 	assert.Equal(t, "200000", s.String(), "only whole epochs drawn")
@@ -416,13 +419,13 @@ func TestCovEmit_PoolExhaustsMidSchedule(t *testing.T) {
 	assert.Contains(t, cvPoke(t, &ct, 4), `"starved":true`)
 	assert.Contains(t, cvPoke(t, &ct, 50), `"starved":true`)
 	assert.Equal(t, "200000", cvSupply(t, &ct, 50).String(), "no draw past the pool")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "3", 50).String(), "no allocation past the pool")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "4", 50).String())
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "3", 50).String(), "no allocation past the pool")
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "4", 50).String())
 
 	// conservation: everything drawn is owed to somebody
 	total := new(big.Int)
 	for ep := 0; ep < 6; ep++ {
-		total.Add(total, cvOwed(t, &ct, cvSolo, fmt.Sprint(ep), 50))
+		total.Add(total, cvOwed(t, &ct, "solo", fmt.Sprint(ep), 50))
 	}
 	assert.Equal(t, "200000", total.String(), "sum of owed == total drawn")
 }
@@ -445,14 +448,14 @@ func TestCovEmit_PoolClampInsideCatchUp(t *testing.T) {
 
 	total := new(big.Int)
 	for ep := 0; ep < 10; ep++ {
-		total.Add(total, cvOwed(t, &ct, cvSolo, fmt.Sprint(ep), 10))
+		total.Add(total, cvOwed(t, &ct, "solo", fmt.Sprint(ep), 10))
 	}
 	assert.Equal(t, "200000", total.String(), "sum of owed == total drawn")
-	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "0", 10).String())
-	assert.Equal(t, "100000", cvOwed(t, &ct, cvSolo, "1", 10).String())
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "2", 10).String(),
+	assert.Equal(t, "100000", cvOwed(t, &ct, "solo", "0", 10).String())
+	assert.Equal(t, "100000", cvOwed(t, &ct, "solo", "1", 10).String())
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "2", 10).String(),
 		"the 50000 remainder is left in the pool, not paid as a partial epoch")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvSolo, "3", 10).String())
+	assert.Equal(t, "0", cvOwed(t, &ct, "solo", "3", 10).String())
 
 	assert.Contains(t, cvPoke(t, &ct, 11), `"starved":true`)
 	assert.Equal(t, "200000", cvSupply(t, &ct, 11).String())
@@ -469,9 +472,9 @@ func cvThreeBuckets(wCore, wOps, wDust int) string {
 // cvSumOwed totals the owed record of every bucket target over epochs [0,n).
 func cvSumOwed(t *testing.T, ct *test_utils.ContractTest, n int, h uint64) *big.Int {
 	sum := new(big.Int)
-	for _, tgt := range []string{cvCore, cvOps, cvDust} {
+	for _, bucket := range []string{"core", "ops", "dust"} {
 		for ep := 0; ep < n; ep++ {
-			sum.Add(sum, cvOwed(t, ct, tgt, fmt.Sprint(ep), h))
+			sum.Add(sum, cvOwed(t, ct, bucket, fmt.Sprint(ep), h))
 		}
 	}
 	return sum
@@ -491,9 +494,9 @@ func TestCovEmit_ThreeBucketWeights(t *testing.T) {
 	minted := cvSupply(t, &ct, 1)
 	assert.Equal(t, "100000", minted.String())
 
-	assert.Equal(t, "70000", cvOwed(t, &ct, cvCore, "0", 1).String(), "core = 70%")
-	assert.Equal(t, "15000", cvOwed(t, &ct, cvOps, "0", 1).String(), "ops = 15%")
-	assert.Equal(t, "15000", cvOwed(t, &ct, cvDust, "0", 1).String(), "dust = 15%")
+	assert.Equal(t, "70000", cvOwed(t, &ct, "core", "0", 1).String(), "core = 70%")
+	assert.Equal(t, "15000", cvOwed(t, &ct, "ops", "0", 1).String(), "ops = 15%")
+	assert.Equal(t, "15000", cvOwed(t, &ct, "dust", "0", 1).String(), "dust = 15%")
 	assert.Equal(t, minted.String(), cvSumOwed(t, &ct, 1, 1).String(),
 		"sum of all bucket allocations must equal the minted amount")
 
@@ -523,9 +526,9 @@ func TestCovEmit_BucketRoundingRemainderToDust(t *testing.T) {
 	assert.Equal(t, "100001", minted.String())
 
 	// floor(100001*3333/10000)=33330, floor(100001*3334/10000)=33340, remainder 1
-	assert.Equal(t, "33330", cvOwed(t, &ct, cvCore, "0", 1).String())
-	assert.Equal(t, "33330", cvOwed(t, &ct, cvOps, "0", 1).String())
-	assert.Equal(t, "33341", cvOwed(t, &ct, cvDust, "0", 1).String(),
+	assert.Equal(t, "33330", cvOwed(t, &ct, "core", "0", 1).String())
+	assert.Equal(t, "33330", cvOwed(t, &ct, "ops", "0", 1).String())
+	assert.Equal(t, "33341", cvOwed(t, &ct, "dust", "0", 1).String(),
 		"33340 weighted slice + 1 truncation remainder")
 	assert.Equal(t, minted.String(), cvSumOwed(t, &ct, 1, 1).String(),
 		"nothing may be lost to rounding")
@@ -551,30 +554,34 @@ func TestCovEmit_ClaimBucketAuthAndOnce(t *testing.T) {
 	})
 	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 1), "distributed"))
 
-	// a stranger is not a bucket target — nothing is owed to them
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, "hive:cvstranger", 1, false)
+	// A stranger naming a REAL, funded bucket must still be refused — on authority,
+	// not because the request was malformed. Omitting the bucket here would make these
+	// pass for the wrong reason.
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"0"}`, "hive:cvstranger", 1, false)
 	// ...not even the contract owner or the keeper
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, owner, 1, false)
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, "hive:cvkeeper", 1, false)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"0"}`, owner, 1, false)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"0"}`, "hive:cvkeeper", 1, false)
+	// and a real target may not pull a DIFFERENT bucket's allocation
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"ops","epoch":"0"}`, cvCore, 1, false)
 
 	// a real target pulls its exact slice
-	r := call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, cvCore, 1, true)
+	r := call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"0"}`, cvCore, 1, true)
 	assert.Equal(t, "70000", cvField(r.Ret, "claimed"))
 	assert.Equal(t, "70000", cvBalance(t, &ct, cvCore, 1).String(), "tokens actually delivered")
-	assert.Equal(t, "0", cvOwed(t, &ct, cvCore, "0", 1).String(), "owed zeroed on claim")
+	assert.Equal(t, "0", cvOwed(t, &ct, "core", "0", 1).String(), "owed zeroed on claim")
 
 	// double pull must fail and must not move more tokens
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, cvCore, 1, false)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"0"}`, cvCore, 1, false)
 	assert.Equal(t, "70000", cvBalance(t, &ct, cvCore, 1).String())
 
 	// an epoch that was never funded cannot be claimed
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"7"}`, cvCore, 1, false)
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"7"}`, cvDust, 1, false)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"core","epoch":"7"}`, cvCore, 1, false)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"dust","epoch":"7"}`, cvDust, 1, false)
 
 	// the other targets are unaffected by core's claim
-	r = call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, cvOps, 1, true)
+	r = call(t, &ct, cvC2, "claimBucket", `{"bucket":"ops","epoch":"0"}`, cvOps, 1, true)
 	assert.Equal(t, "15000", cvField(r.Ret, "claimed"))
-	r = call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, cvDust, 1, true)
+	r = call(t, &ct, cvC2, "claimBucket", `{"bucket":"dust","epoch":"0"}`, cvDust, 1, true)
 	assert.Equal(t, "15000", cvField(r.Ret, "claimed"))
 
 	// conservation: everything minted for epoch 0 was pulled, nothing left over
@@ -596,7 +603,7 @@ func TestCovEmit_GuardianPauseUnpauseEndToEnd(t *testing.T) {
 
 	// fund a real holder through the normal emission path
 	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 1), "distributed"))
-	call(t, &ct, cvC2, "claimBucket", `{"epoch":"0"}`, cvSolo, 1, true)
+	call(t, &ct, cvC2, "claimBucket", `{"bucket":"solo","epoch":"0"}`, cvSolo, 1, true)
 	assert.Equal(t, "100000", cvBalance(t, &ct, cvSolo, 1).String())
 
 	pause := `{"op":"pause","nonce":"1"}`

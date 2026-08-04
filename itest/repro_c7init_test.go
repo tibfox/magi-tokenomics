@@ -40,5 +40,5 @@ func TestRepro_C7InitWithAutoGenesis(t *testing.T) {
 	// now C7 init with that exact genesis — this is what failed on devnet
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, rC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, rC2), owner, 210, true)
+	call(t, &ct, rC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, rC2), owner, 210, true)
 }

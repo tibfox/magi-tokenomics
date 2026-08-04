@@ -182,10 +182,11 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 			`"guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1",`+
 			`"buckets":"author:contract:%s:10000"}`, seamToken, seamC3), owner, 0, true)
 	call(t, &ct, seamC3, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
-			`"reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury",`+
+		`{"token":"%s","kind":"0","funder":"%s",`+
+			`"treasury":"hive:treasury",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 		seamToken, seamC2), owner, 0, true)
+	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 
 	// ---- 3. execute the reporter's plan VERBATIM ----------------------------
 
@@ -220,10 +221,10 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 		want := new(big.Int).Div(new(big.Int).Mul(funded, share), onChainTotal)
 		if want.Sign() == 0 {
 			// contract aborts rather than emit a zero transfer; assert that instead
-			call(t, &ct, seamC3, "claim", `{"epoch":"0"}`, acct, 4, false)
+			call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 4, false)
 			continue
 		}
-		r := call(t, &ct, seamC3, "claim", `{"epoch":"0"}`, acct, 4, true)
+		r := call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 4, true)
 		assert.Contains(t, r.Ret, `"claimed":"`+want.String()+`"`,
 			"%s: payout disagrees with funded*share/total", acct)
 		assert.Equal(t, want.String(), balanceOf(t, &ct, seamToken, acct),
@@ -239,7 +240,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	// a second claim must fail for everyone
 	for acct := range res.Shares {
-		call(t, &ct, seamC3, "claim", `{"epoch":"0"}`, acct, 5, false)
+		call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 5, false)
 		break
 	}
 }
@@ -307,13 +308,14 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 			`"guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1",`+
 			`"buckets":"author:contract:%s:10000"}`, seamToken, seamC3), owner, 0, true)
 	call(t, &ct, seamC3, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0",`+
-			`"reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury",`+
+		`{"token":"%s","kind":"0","funder":"%s",`+
+			`"treasury":"hive:treasury",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 		seamToken, seamC2), owner, 0, true)
+	call(t, &ct, seamC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, owner, 0, true)
 
 	call(t, &ct, seamC2, "distributeEpoch", `{}`, "hive:keeper", 2, true)
-	call(t, &ct, seamC3, "pullFunding", `{"epoch":"0"}`, "hive:keeper", 2, true)
+	call(t, &ct, seamC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:keeper", 2, true)
 
 	// The domain-less entry is now SKIPPED rather than counted — consistent with how
 	// every other malformed entry is handled, and enough to close the stranding bug
@@ -322,12 +324,12 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 		`{"epoch":"0","page":"0","entries":"alice:100,hive:bob:100"}`, "hive:reporter", 2, true)
 	assert.Equal(t, "100", stateStr(t, &ct, seamC3, "totalShares|0"),
 		"a domain-less account must not be counted into totalShares")
-	call(t, &ct, seamC3, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 2, true)
+	call(t, &ct, seamC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 2, true)
 
 	// bob gets the WHOLE pot: no share is stranded on an unclaimable address.
 	// (Before the fix he received 50000 and the other half was lost forever.)
-	r := call(t, &ct, seamC3, "claim", `{"epoch":"0"}`, "hive:bob", 4, true)
+	r := call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 4, true)
 	assert.Contains(t, r.Ret, `"claimed":"100000"`,
 		"funding must not be stranded on an address that cannot claim")
-	call(t, &ct, seamC3, "claim", `{"epoch":"0"}`, "hive:alice", 4, false)
+	call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 4, false)
 }

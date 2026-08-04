@@ -39,10 +39,11 @@ func hdBoot(t *testing.T, ct *test_utils.ContractTest) {
 	fundC2Pool(t, ct, hdTok, hdC2, "10000000", 0)
 	call(t, ct, hdC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hdveto","vetoThreshold":"1","buckets":"author:contract:%s:5000,yield:contract:%s:5000"}`, hdTok, hdC3, hdC1), owner, 0, true)
 	call(t, ct, hdC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hdTok), owner, 0, true)
-	call(t, ct, hdC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hdreporter","reporterThreshold":"1","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2), owner, 0, true)
+	call(t, ct, hdC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2), owner, 0, true)
+	call(t, ct, hdC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:hdreporter","reporterThreshold":"1"}`, owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, ct, hdC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hdC2), owner, 0, true)
+	call(t, ct, hdC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, hdC2), owner, 0, true)
 }
 
 func hdStake(t *testing.T, ct *test_utils.ContractTest, who, amt string, h uint64, ok bool) {
@@ -64,20 +65,20 @@ func TestHolder_DonationCannotInflateClaims(t *testing.T) {
 	call(t, &ct, hdTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, hdC2), owner, 0, true)
 
 	call(t, &ct, hdC2, "distributeEpoch", ``, "hive:hdkeeper", 10, true)
-	call(t, &ct, hdC3, "pullFunding", `{"epoch":"0"}`, "hive:hdkeeper", 10, true)
+	call(t, &ct, hdC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:hdkeeper", 10, true)
 
 	// the donor dumps tokens directly into C3 hoping to enlarge the pool
 	call(t, &ct, hdTok, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"50000"}`, hdC3), "hive:hddonor", 10, true)
 
-	call(t, &ct, hdC3, "submitShares", `{"epoch":"0","page":"0","entries":"hive:hda:1"}`, "hive:hdreporter", 10, true)
-	call(t, &ct, hdC3, "finalizeEpoch", `{"epoch":"0"}`, "hive:hdreporter", 10, true)
-	r := call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hda", 11, true)
+	call(t, &ct, hdC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:hda:1"}`, "hive:hdreporter", 10, true)
+	call(t, &ct, hdC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:hdreporter", 10, true)
+	r := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hda", 11, true)
 
 	// Emission is 100000/epoch and C3's bucket is 50%, so funded|0 == 50000.
 	// The sole claimant must receive exactly that — NOT funded + the 50000 donation.
 	assert.Equal(t, "50000", pickJSON(r.Ret, "claimed"), "donation must not inflate the payout")
 	// the donation is still sitting in C3, unclaimed and unclaimable by the donor
-	call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hddonor", 11, false)
+	call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hddonor", 11, false)
 	assert.Equal(t, "0", hdBal(t, &ct, "hive:hddonor", 11).String(), "donor cannot recover the donation")
 	assert.Equal(t, "50000", hdBal(t, &ct, "contract:"+hdC3, 11).String(),
 		"the donated 50000 remains stranded in C3 — accounting is ledger-based, not balance-based")
@@ -92,19 +93,19 @@ func TestHolder_SybilSplitNeverBeatsSingleAccount(t *testing.T) {
 	hdBoot(t, &ct)
 	call(t, &ct, hdTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, hdC2), owner, 0, true)
 	call(t, &ct, hdC2, "distributeEpoch", ``, "hive:hdkeeper", 10, true)
-	call(t, &ct, hdC3, "pullFunding", `{"epoch":"0"}`, "hive:hdkeeper", 10, true)
+	call(t, &ct, hdC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:hdkeeper", 10, true)
 
 	// honest whale holds 300 shares in ONE account; sybil holds 300 split 3 ways.
 	// funded=25000, totalShares=600 → each share unit is worth 41.66…
 	call(t, &ct, hdC3, "submitShares",
 		`{"epoch":"0","page":"0","entries":"hive:hdwhale:300,hive:hdsyb1:100,hive:hdsyb2:100,hive:hdsyb3:100"}`,
 		"hive:hdreporter", 10, true)
-	call(t, &ct, hdC3, "finalizeEpoch", `{"epoch":"0"}`, "hive:hdreporter", 10, true)
+	call(t, &ct, hdC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:hdreporter", 10, true)
 
-	whale := call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hdwhale", 11, true)
-	s1 := call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hdsyb1", 11, true)
-	s2 := call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hdsyb2", 11, true)
-	s3 := call(t, &ct, hdC3, "claim", `{"epoch":"0"}`, "hive:hdsyb3", 11, true)
+	whale := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdwhale", 11, true)
+	s1 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb1", 11, true)
+	s2 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb2", 11, true)
+	s3 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb3", 11, true)
 
 	w := new(big.Int)
 	w.SetString(pickJSON(whale.Ret, "claimed"), 10)

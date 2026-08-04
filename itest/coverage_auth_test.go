@@ -71,7 +71,7 @@ func caFailedFor(t *testing.T, res test_utils.ContractTestCallResult, want strin
 func caShare(t *testing.T, ct *test_utils.ContractTest, ep, acct string, height uint64) string {
 	t.Helper()
 	r := caCall(t, ct, caC3ID, "shareOf",
-		fmt.Sprintf(`{"epoch":"%s","account":"%s"}`, ep, acct), []string{"hive:observer"}, height, true)
+		fmt.Sprintf(`{"channel":"author","epoch":"%s","account":"%s"}`, ep, acct), []string{"hive:observer"}, height, true)
 	return r.Ret
 }
 
@@ -83,8 +83,20 @@ func caC2InitPayload(guardMode, guardAuth, guardThr, vetoMode, vetoAuth, vetoThr
 }
 
 func caC3InitPayload(rMode, rAuth, rThr, gMode, gAuth, gThr string) string {
-	return fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"%s","reporterAuth":"%s","reporterThreshold":"%s","treasury":"hive:treasury","guardianMode":"%s","guardianAuth":"%s","guardianThreshold":"%s"}`,
-		caTokenID, caC2ID, rMode, rAuth, rThr, gMode, gAuth, gThr)
+	return fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:treasury","guardianMode":"%s","guardianAuth":"%s","guardianThreshold":"%s"}`,
+		caTokenID, caC2ID, gMode, gAuth, gThr)
+}
+
+// caCh is the reward channel these tests drive. The reporter policy under test is a
+// property of the CHANNEL now, not of the contract — one distributor can carry
+// several channels with different reporters.
+const caCh = "author"
+
+func caAddChannel(t *testing.T, ct *test_utils.ContractTest, rMode, rAuth, rThr string, ok bool) {
+	t.Helper()
+	call(t, ct, caC3ID, "addChannel", fmt.Sprintf(
+		`{"channel":"%s","bucket":"%s","window":"1","reporterMode":"%s","reporterAuth":"%s",`+
+			`"reporterThreshold":"%s"}`, caCh, caCh, rMode, rAuth, rThr), caOwner, 0, ok)
 }
 
 // caSetupC3 registers token/C2/C3, inits them with the given C3 reporter policy,
@@ -101,9 +113,10 @@ func caSetupC3(t *testing.T, rMode, rAuth, rThr string) *test_utils.ContractTest
 	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 	call(t, &ct, caC3ID, "init", caC3InitPayload(rMode, rAuth, rThr, "0", "hive:guardian", "1"), caOwner, 0, true)
+	caAddChannel(t, &ct, rMode, rAuth, rThr, true)
 	call(t, &ct, caTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, caC2ID), caOwner, 0, true)
 	call(t, &ct, caC2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
-	call(t, &ct, caC3ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
+	call(t, &ct, caC3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
 	return &ct
 }
 
@@ -118,7 +131,7 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	_ = os.RemoveAll("data/badger")
 	ct := caSetupC3(t, "2", "hive:rep1,hive:rep2,hive:rep3", "2")
 
-	const pageP = `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
+	const pageP = `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
 
 	// --- 1 of 2: recorded, but NOT applied -------------------------------
 	r := caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep1"}, 1, true)
@@ -151,8 +164,8 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	assert.Contains(t, s, `"totalShares":"100"`)
 
 	// --- divergent payloads for the same (epoch,page) do NOT commit ------
-	const page1A = `{"epoch":"0","page":"1","entries":"hive:carol:10"}`
-	const page1B = `{"epoch":"0","page":"1","entries":"hive:carol:20"}`
+	const page1A = `{"channel":"author","epoch":"0","page":"1","entries":"hive:carol:10"}`
+	const page1B = `{"channel":"author","epoch":"0","page":"1","entries":"hive:carol:20"}`
 	r = caCall(t, ct, caC3ID, "submitShares", page1A, []string{"hive:rep1"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":false`)
 	r = caCall(t, ct, caC3ID, "submitShares", page1B, []string{"hive:rep2"}, 1, true)
@@ -174,18 +187,18 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	assert.Contains(t, s, `"totalShares":"110"`)
 
 	// --- finalizeEpoch needs the threshold too ---------------------------
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, true)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
 	assert.Contains(t, r.Ret, `"finalized":false`, "a single reporter must not finalize")
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":""`, "epoch must still be open")
 	// and the payout stays shut while unfinalized
-	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
+	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
 
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep2"}, 2, true)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep2"}, 2, true)
 	assert.Contains(t, r.Ret, `"success":true`)
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":"finalized"`)
 
 	// sanity: the attested report actually pays out after the challenge window
-	caCall(t, ct, caC3ID, "claim", `{"epoch":"0"}`, []string{"hive:alice"}, 4, true)
+	caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +212,7 @@ func TestCovAuth_C3ReporterCosigned2of3(t *testing.T) {
 	_ = os.RemoveAll("data/badger")
 	ct := caSetupC3(t, "1", "hive:rep1,hive:rep2,hive:rep3", "2")
 
-	const pageP = `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
+	const pageP = `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
 
 	// --- one signer is below the threshold -------------------------------
 	r := caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep1"}, 1, false)
@@ -235,11 +248,11 @@ func TestCovAuth_C3ReporterCosigned2of3(t *testing.T) {
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 1), `"totalShares":"100"`)
 
 	// --- finalizeEpoch is gated by the same threshold --------------------
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, false)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, false)
 	caFailedFor(t, r, "threshold not met")
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":""`)
 
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1", "hive:rep3"}, 2, true)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1", "hive:rep3"}, 2, true)
 	assert.Contains(t, r.Ret, `"success":true`)
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":"finalized"`)
 }
@@ -263,53 +276,49 @@ func TestCovAuth_ConfigValidationRejectsBadPolicies(t *testing.T) {
 	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 
-	bad := func(name, payload, want string) {
+	// The GUARDIAN policy is contract-wide, so it is still validated at init.
+	badInit := func(name, payload, want string) {
 		t.Helper()
-		fmt.Printf("--- bad-policy case: %s\n", name)
-		r := call(t, &ct, caC3ID, "init", payload, caOwner, 0, false)
-		caFailedFor(t, r, want)
+		fmt.Printf("--- bad guardian policy: %s\n", name)
+		caFailedFor(t, call(t, &ct, caC3ID, "init", payload, caOwner, 0, false), want)
 		// the failed init must not have latched the contract
-		caFailedFor(t, call(t, &ct, caC3ID, "shareOf", `{"epoch":"0","account":"hive:alice"}`, "hive:x", 0, false),
+		caFailedFor(t, call(t, &ct, caC3ID, "shareOf",
+			`{"channel":"author","epoch":"0","account":"hive:alice"}`, "hive:x", 0, false),
 			"not initialized")
 	}
-
-	// duplicate authority — one signer would otherwise satisfy an M-of-N count
-	bad("dup", caC3InitPayload("2", "hive:rep1,hive:rep1", "2", "0", "hive:guardian", "1"),
-		"duplicate authority")
-	// threshold greater than N is unsatisfiable
-	bad("thr>n", caC3InitPayload("2", "hive:rep1,hive:rep2", "3", "0", "hive:guardian", "1"),
-		"threshold must be 1..N")
-	// threshold 0 must not silently mean "anyone"
-	bad("thr0", caC3InitPayload("2", "hive:rep1,hive:rep2", "0", "0", "hive:guardian", "1"),
-		"threshold must be a positive integer")
-	// non-numeric threshold must not silently mean 1-of-N
-	bad("thrNaN", caC3InitPayload("2", "hive:rep1,hive:rep2", "two", "0", "hive:guardian", "1"),
-		"threshold must be a positive integer")
-	// unknown mode must not silently downgrade to Single
-	bad("mode?", caC3InitPayload("7", "hive:rep1,hive:rep2", "2", "0", "hive:guardian", "1"),
-		"unknown mode")
-	bad("modeEmpty", caC3InitPayload("", "hive:rep1", "1", "0", "hive:guardian", "1"),
-		"unknown mode")
-	// Single mode with more than one authority = operator meant M-of-N
-	bad("single>1", caC3InitPayload("0", "hive:rep1,hive:rep2", "1", "0", "hive:guardian", "1"),
+	badInit("guardianSingle>1", caC3InitPayload("2", "hive:rep1,hive:rep2", "2", "0", "hive:g1,hive:g2", "1"),
 		"single mode takes exactly one authority")
-	// no authorities at all
-	bad("none", caC3InitPayload("2", "", "1", "0", "hive:guardian", "1"),
-		"no authorities")
-	// the state-key delimiter must never appear inside an authority id
-	bad("pipe", caC3InitPayload("2", "hive:rep1,hive:re|p2", "2", "0", "hive:guardian", "1"),
-		"not allowed in authority")
-	// the GUARDIAN policy is validated the same way, not just the reporter one
-	bad("guardianSingle>1", caC3InitPayload("2", "hive:rep1,hive:rep2", "2", "0", "hive:g1,hive:g2", "1"),
-		"single mode takes exactly one authority")
-	bad("guardianDup", caC3InitPayload("2", "hive:rep1,hive:rep2", "2", "2", "hive:g1,hive:g1", "2"),
+	badInit("guardianDup", caC3InitPayload("2", "hive:rep1,hive:rep2", "2", "2", "hive:g1,hive:g1", "2"),
 		"duplicate authority")
 
-	// a coherent 2-of-3 attest policy is accepted
+	// A coherent contract-wide config is accepted...
 	call(t, &ct, caC3ID, "init",
 		caC3InitPayload("2", "hive:rep1,hive:rep2,hive:rep3", "2", "1", "hive:g1,hive:g2,hive:g3", "2"),
 		caOwner, 0, true)
-	call(t, &ct, caC3ID, "shareOf", `{"epoch":"0","account":"hive:alice"}`, "hive:x", 0, true)
+
+	// ...and the REPORTER policy is now validated where it is configured: per channel.
+	// Each rejection must leave no channel behind, or a half-registered one would
+	// accept shares under a policy that was never accepted.
+	badCh := func(name, rMode, rAuth, rThr, want string) {
+		t.Helper()
+		fmt.Printf("--- bad reporter policy: %s\n", name)
+		caAddChannel(t, &ct, rMode, rAuth, rThr, false)
+		caFailedFor(t, call(t, &ct, caC3ID, "pullFunding",
+			`{"channel":"author","epoch":"0"}`, "hive:x", 0, false), "no such channel")
+	}
+	badCh("dup", "2", "hive:rep1,hive:rep1", "2", "duplicate authority")
+	badCh("thr>n", "2", "hive:rep1,hive:rep2", "3", "threshold must be 1..N")
+	badCh("thr0", "2", "hive:rep1,hive:rep2", "0", "threshold must be a positive integer")
+	badCh("thrNaN", "2", "hive:rep1,hive:rep2", "two", "threshold must be a positive integer")
+	badCh("mode?", "7", "hive:rep1,hive:rep2", "2", "unknown mode")
+	badCh("modeEmpty", "", "hive:rep1", "1", "unknown mode")
+	badCh("single>1", "0", "hive:rep1,hive:rep2", "1", "single mode takes exactly one authority")
+	badCh("none", "2", "", "1", "no authorities")
+	badCh("pipe", "2", "hive:rep1,hive:re|p2", "2", "not allowed in authority")
+
+	// a coherent 2-of-3 attest channel is accepted
+	caAddChannel(t, &ct, "2", "hive:rep1,hive:rep2,hive:rep3", "2", true)
+	call(t, &ct, caC3ID, "shareOf", `{"channel":"author","epoch":"0","account":"hive:alice"}`, "hive:x", 0, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -404,9 +413,10 @@ func caSetupC3Policy(t *testing.T, rMode, rAuth, rThr, gMode, gAuth, gThr string
 	fundC2Pool(t, &ct, caTokenID, caC2ID, "500000000", 0)
 	call(t, &ct, caC2ID, "init", caC2InitPayload("0", "hive:guardian", "1", "0", "hive:veto", "1", "1", "contract:"+caC3ID), caOwner, 0, true)
 	call(t, &ct, caC3ID, "init", caC3InitPayload(rMode, rAuth, rThr, gMode, gAuth, gThr), caOwner, 0, true)
+	caAddChannel(t, &ct, rMode, rAuth, rThr, true)
 	call(t, &ct, caTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, caC2ID), caOwner, 0, true)
 	call(t, &ct, caC2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
-	call(t, &ct, caC3ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
+	call(t, &ct, caC3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
 	return &ct
 }
 
@@ -417,44 +427,44 @@ func TestCovAuth_C3GuardianAttest2of3(t *testing.T) {
 	_ = os.RemoveAll("data/badger")
 	ct := caSetupC3Policy(t, "0", "hive:reporter", "1", "2", "hive:g1,hive:g2,hive:g3", "2")
 
-	call(t, ct, caC3ID, "submitShares", `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
-	call(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 2, true)
+	call(t, ct, caC3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
+	call(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 2, true)
 
 	// --- cancelEpoch (the veto) needs 2 of 3 ------------------------------
-	caFailedFor(t, caCall(t, ct, caC3ID, "cancelEpoch", `{"epoch":"0"}`, []string{"hive:mallory"}, 2, false),
+	caFailedFor(t, caCall(t, ct, caC3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:mallory"}, 2, false),
 		"not an authority")
-	r := caCall(t, ct, caC3ID, "cancelEpoch", `{"epoch":"0"}`, []string{"hive:g1"}, 2, true)
+	r := caCall(t, ct, caC3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:g1"}, 2, true)
 	assert.Contains(t, r.Ret, `"cancelled":false`, "one guardian must not cancel an epoch")
 	s := caShare(t, ct, "0", "hive:alice", 2)
 	assert.Contains(t, s, `"status":"finalized"`, "sub-threshold veto must leave the epoch intact")
 	assert.Contains(t, s, `"funded":"100000"`)
-	caFailedFor(t, caCall(t, ct, caC3ID, "cancelEpoch", `{"epoch":"0"}`, []string{"hive:g1"}, 2, false),
+	caFailedFor(t, caCall(t, ct, caC3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:g1"}, 2, false),
 		"already attested")
 
-	r = caCall(t, ct, caC3ID, "cancelEpoch", `{"epoch":"0"}`, []string{"hive:g2"}, 2, true)
+	r = caCall(t, ct, caC3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:g2"}, 2, true)
 	assert.Contains(t, r.Ret, `"success":true`)
 	s = caShare(t, ct, "0", "hive:alice", 2)
 	assert.Contains(t, s, `"status":"cancelled"`)
 	assert.Contains(t, s, `"funded":"0"`, "cancelled funding rolls into the unallocated pool")
-	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
+	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
 
 	// --- sweepUnallocated needs 2 of 3, and pays only the pinned treasury -
-	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"nonce":"1"}`, []string{"hive:g1"}, 4, true)
+	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g1"}, 4, true)
 	assert.Contains(t, r.Ret, `"swept":false`, "one guardian must not sweep")
 	b := caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"0"`, "nothing may move below the threshold")
 
-	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"nonce":"1"}`, []string{"hive:g3"}, 4, true)
+	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g3"}, 4, true)
 	assert.Contains(t, r.Ret, `"swept":"100000"`)
 	b = caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"100000"`)
 
 	// the committed sweep action cannot be replayed, and a fresh nonce finds
 	// an empty pool (no double-spend of the unallocated balance)
-	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"nonce":"1"}`, []string{"hive:g2"}, 4, false),
+	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g2"}, 4, false),
 		"already committed")
-	caCall(t, ct, caC3ID, "sweepUnallocated", `{"nonce":"2"}`, []string{"hive:g1"}, 4, true)
-	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"nonce":"2"}`, []string{"hive:g2"}, 4, false),
+	caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2"}`, []string{"hive:g1"}, 4, true)
+	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2"}`, []string{"hive:g2"}, 4, false),
 		"nothing to sweep")
 	b = caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"100000"`)
@@ -480,31 +490,31 @@ func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
 	ct := caSetupC3(t, "2", "hive:rep1,hive:rep2,hive:rep3", "2")
 
 	// page 0 reaches the threshold and APPLIES, so totalShares becomes 100
-	const page0 = `{"epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
+	const page0 = `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`
 	caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep1"}, 1, true)
 	r := caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep2"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":true`)
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 1), `"totalShares":"100"`)
 
 	// rep1 finalizes HERE — under the old code it bound totalShares=100
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, true)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
 	assert.Contains(t, r.Ret, `"finalized":false`, "one attestation is below the threshold")
 
 	// a second page now applies, MOVING totalShares to 110 while rep1's vote is pending
-	const page1 = `{"epoch":"0","page":"1","entries":"hive:carol:10"}`
+	const page1 = `{"channel":"author","epoch":"0","page":"1","entries":"hive:carol:10"}`
 	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep1"}, 2, true)
 	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep2"}, 2, true)
 	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 2), `"totalShares":"110"`)
 
 	// rep2 finalizes against the NEW state. Under the old binding this landed in a
 	// different payload bucket and the epoch could never be finalized by anyone.
-	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep2"}, 3, true)
+	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep2"}, 3, true)
 	assert.Contains(t, r.Ret, `"success":true`,
 		"votes cast at different totalShares must still merge to the threshold")
 	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 3), `"status":"finalized"`)
 
 	// and the epoch pays out the FULL report, not the partial one
-	caCall(t, ct, caC3ID, "claim", `{"epoch":"0"}`, []string{"hive:carol"}, 5, true)
+	caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:carol"}, 5, true)
 }
 
 // The constant payload must not weaken anti-equivocation: one authority still gets
@@ -513,12 +523,12 @@ func TestCovAuth_C3FinalizeStillOneVotePerAuthority(t *testing.T) {
 	_ = os.RemoveAll("data/badger")
 	ct := caSetupC3(t, "2", "hive:rep1,hive:rep2,hive:rep3", "2")
 	caCall(t, ct, caC3ID, "submitShares",
-		`{"epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep1"}, 1, true)
+		`{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep1"}, 1, true)
 	caCall(t, ct, caC3ID, "submitShares",
-		`{"epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep2"}, 1, true)
+		`{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep2"}, 1, true)
 
-	caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, true)
-	r := caCall(t, ct, caC3ID, "finalizeEpoch", `{"epoch":"0"}`, []string{"hive:rep1"}, 2, false)
+	caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
+	r := caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, false)
 	caFailedFor(t, r, "already attested")
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":""`,
 		"one authority must not reach the threshold alone")

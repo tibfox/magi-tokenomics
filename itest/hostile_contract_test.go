@@ -43,15 +43,16 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
 	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`, hosTok, hosC3, hosC1), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
-	call(t, &ct, hosC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hosreporter","reporterThreshold":"1","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2), owner, 0, true)
+	call(t, &ct, hosC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2), owner, 0, true)
+	call(t, &ct, hosC3, "addChannel", `{"channel":"author","bucket":"author","window":"1","reporterMode":"0","reporterAuth":"hive:hosreporter","reporterThreshold":"1"}`, owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
+	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, hosC2), owner, 0, true)
 	call(t, &ct, hosTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, hosC2), owner, 0, true)
 
 	// fund the system so there is something worth stealing
 	call(t, &ct, hosC2, "distributeEpoch", ``, "hive:hoskeeper", 10, true)
-	call(t, &ct, hosC3, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
+	call(t, &ct, hosC3, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:hoskeeper", 10, true)
 	call(t, &ct, hosC1, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
 
 	// relay(target, method, payload) — inner JSON is escaped so the hostile
@@ -70,21 +71,21 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	}
 
 	// --- the attacker's contract tries every privileged path ---
-	relay(hosC2, "claimBucket", `{"epoch":"0"}`, 12)                                                  // impersonate a bucket target
-	relay(hosC3, "claim", `{"epoch":"0"}`, 12)                                                        // claim with no share
-	relay(hosC1, "claimYield", `{"epoch":"0"}`, 12)                                                   // claim with no stake
-	relay(hosC3, "submitShares", `{"epoch":"0","page":"0","entries":"hive:x:1"}`, 12)                 // not the reporter
-	relay(hosC3, "finalizeEpoch", `{"epoch":"0"}`, 12)                                                // not the reporter
-	relay(hosC3, "cancelEpoch", `{"epoch":"0"}`, 12)                                                  // not the guardian
-	relay(hosC3, "sweepUnallocated", `{"nonce":"1"}`, 12)                                             // not the guardian
-	relay(hosC1, "sweepResidual", `{"epoch":"0"}`, 12)                                                // not the guardian
-	relay(hosC1, "stakeFor", `{"acct":"hive:hosmallory","amount":"100"}`, 12)                         // not allowlisted
-	relay(hosC1, "unstake", `{"amount":"100"}`, 12)                                                   // no stake of its own
-	relay(hosC2, "queueTokenOp", `{"op":"changeOwner","nonce":"1","newOwner":"hive:hosmallory"}`, 12) // not the guardian
-	relay(hosTok, "mint", `{"amount":"1000000"}`, 12)                                                 // not the token owner
-	relay(hosTok, "changeOwner", `{"newOwner":"hive:hosmallory"}`, 12)                                // not the token owner
-	relay(hosC2, "init", `{"token":"x"}`, 12)                                                         // re-init
-	relay(hosC3, "init", `{"token":"x"}`, 12)                                                         // re-init
+	relay(hosC2, "claimBucket", `{"epoch":"0"}`, 12)                                                     // impersonate a bucket target
+	relay(hosC3, "claim", `{"channel":"author","epoch":"0"}`, 12)                                        // claim with no share
+	relay(hosC1, "claimYield", `{"epoch":"0"}`, 12)                                                      // claim with no stake
+	relay(hosC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:x:1"}`, 12) // not the reporter
+	relay(hosC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, 12)                                // not the reporter
+	relay(hosC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, 12)                                  // not the guardian
+	relay(hosC3, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, 12)                             // not the guardian
+	relay(hosC1, "sweepResidual", `{"epoch":"0"}`, 12)                                                   // not the guardian
+	relay(hosC1, "stakeFor", `{"acct":"hive:hosmallory","amount":"100"}`, 12)                            // not allowlisted
+	relay(hosC1, "unstake", `{"amount":"100"}`, 12)                                                      // no stake of its own
+	relay(hosC2, "queueTokenOp", `{"op":"changeOwner","nonce":"1","newOwner":"hive:hosmallory"}`, 12)    // not the guardian
+	relay(hosTok, "mint", `{"amount":"1000000"}`, 12)                                                    // not the token owner
+	relay(hosTok, "changeOwner", `{"newOwner":"hive:hosmallory"}`, 12)                                   // not the token owner
+	relay(hosC2, "init", `{"token":"x"}`, 12)                                                            // re-init
+	relay(hosC3, "init", `{"token":"x"}`, 12)                                                            // re-init
 
 	// reentrancy attempt: same privileged call twice inside one tx
 	call(t, &ct, hosEvil, "reenter",
@@ -96,7 +97,7 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 		assert.Contains(t, b.Ret, `"0"`, acct+" must hold nothing")
 	}
 	// distributor funding untouched
-	si := call(t, &ct, hosC3, "shareOf", `{"epoch":"0","account":"hive:none"}`, "hive:anyone", 13, true)
+	si := call(t, &ct, hosC3, "shareOf", `{"channel":"author","epoch":"0","account":"hive:none"}`, "hive:anyone", 13, true)
 	assert.Contains(t, si.Ret, `"funded":"60000"`, "C3 funding untouched")
 	// token still owned by C2
 	own := call(t, &ct, hosTok, "getOwner", ``, "hive:anyone", 13, true)
@@ -129,7 +130,7 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
+	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, hosC2), owner, 0, true)
 
 	// give the attacker's CONTRACT real tokens and a real approval, so the composed
 	// legs are individually legitimate — the question is whether the SEQUENCE is.
