@@ -58,7 +58,7 @@ func TestPriv_PostingKeyCannotUsePrivilegedPaths(t *testing.T) {
 	t.Cleanup(func() { ct.DataLayer.Stop() })
 	ct.RegisterContract(pvTok, owner, read(tokenWasmPath))
 	ct.RegisterContract(pvC2, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(pvC6, owner, read("../c6-migration/artifacts/main.wasm"))
+	ct.RegisterContract(pvC6, owner, read("../c1-staking/artifacts/main.wasm"))
 	pvInitC2(t, &ct, pvC3)
 
 	// guardian's posting key must NOT be able to queue a token takeover

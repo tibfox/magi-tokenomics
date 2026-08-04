@@ -59,9 +59,9 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 	ct.RegisterContract(pC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(pC2, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(pC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	ct.RegisterContract(pC5, owner, read("../c5-lp/artifacts/main.wasm"))
-	ct.RegisterContract(pC6, owner, read("../c6-migration/artifacts/main.wasm"))
-	ct.RegisterContract(pC7, owner, read("../c7-yield/artifacts/main.wasm"))
+	ct.RegisterContract(pC5, owner, read("../c3-distributor/artifacts/main.wasm"))
+	ct.RegisterContract(pC6, owner, read("../c1-staking/artifacts/main.wasm"))
+	ct.RegisterContract(pC7, owner, read("../c1-staking/artifacts/main.wasm"))
 
 	// ---- setup: the standard deployment sequence -------------------------
 	record("C0 token", "init", "", call(t, &ct, pTok, "init",

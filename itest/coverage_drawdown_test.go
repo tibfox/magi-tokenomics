@@ -17,10 +17,7 @@ import (
 // unclaimable residue, so there is nothing for a guardian to sweep, so claims never
 // have to close. These tests pin the arithmetic that argument rests on.
 
-const (
-	ddC1 = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
-	ddC7 = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
-)
+const ddC1 = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
 
 // ddSetup wires token + C1 + C2 + C7 with epochLen 10 from genesis 0, so epoch 0 spans
 // blocks 0..9 and the whole emission (100000) goes to yield.
@@ -32,24 +29,22 @@ func ddSetup(t *testing.T) *test_utils.ContractTest {
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(ddC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(ddC7, owner, read("../c7-yield/artifacts/main.wasm"))
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	// cooldown must exceed epochLen (R15)
 	call(t, &ct, ddC1, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","cooldown":"15","epochLen":"10","allow":""}`, tokenID), owner, 0, true)
+		`{"token":"%s","kind":"0","cooldown":"15","epochLen":"10","allow":"",`+
+			`"treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian",`+
+			`"guardianThreshold":"1"}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
 			`"blocksPerYear":"100","dustBucket":"yield","timelock":"1",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1",`+
-			`"buckets":"yield:contract:%s:10000"}`, tokenID, ddC7), owner, 0, true)
-	call(t, &ct, ddC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
-	call(t, &ct, ddC7, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10",`+
-			`"treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian",`+
-			`"guardianThreshold":"1"}`, tokenID, c2ID, ddC1), owner, 0, true)
+			`"buckets":"yield:contract:%s:10000"}`, tokenID, ddC1), owner, 0, true)
+	call(t, &ct, ddC1, "adoptSchedule",
+		fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 	return &ct
 }
 
@@ -87,11 +82,11 @@ func TestCovDrawdown_UnstakeThenRestakeIsNotDoubleCounted(t *testing.T) {
 	call(t, ct, ddC1, "stake", `{"amount":"300"}`, "hive:alice", 6, true)
 
 	call(t, ct, c2ID, "distributeEpoch", ``, "hive:keeper", 10, true)
-	call(t, ct, ddC7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
+	call(t, ct, ddC1, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
 
 	// denominator = min(600,600) + min(400,400) = 1000, NOT 700
-	pa := c17I64(t, call(t, ct, ddC7, "claim", `{"epoch":"0"}`, "hive:alice", 11, true).Ret, "claimed")
-	pb := c17I64(t, call(t, ct, ddC7, "claim", `{"epoch":"0"}`, "hive:bob", 11, true).Ret, "claimed")
+	pa := c17I64(t, call(t, ct, ddC1, "claimYield", `{"epoch":"0"}`, "hive:alice", 11, true).Ret, "claimed")
+	pb := c17I64(t, call(t, ct, ddC1, "claimYield", `{"epoch":"0"}`, "hive:bob", 11, true).Ret, "claimed")
 	assert.EqualValues(t, 60000, pa, "alice returned to her starting stake, so she is not penalised")
 	assert.EqualValues(t, 40000, pb)
 	assert.EqualValues(t, 100000, pa+pb,
@@ -120,12 +115,12 @@ func TestCovDrawdown_TelescopesAcrossManyMutations(t *testing.T) {
 	call(t, ct, ddC1, "unstake", `{"amount":"200"}`, "hive:carol", 4, true) // full exit
 
 	call(t, ct, c2ID, "distributeEpoch", ``, "hive:keeper", 10, true)
-	call(t, ct, ddC7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
+	call(t, ct, ddC1, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
 
 	// Σ min = alice 350 + bob 200 + carol 0 = 550
-	pa := c17I64(t, call(t, ct, ddC7, "claim", `{"epoch":"0"}`, "hive:alice", 11, true).Ret, "claimed")
-	pb := c17I64(t, call(t, ct, ddC7, "claim", `{"epoch":"0"}`, "hive:bob", 11, true).Ret, "claimed")
-	call(t, ct, ddC7, "claim", `{"epoch":"0"}`, "hive:carol", 11, false) // exited → min 0
+	pa := c17I64(t, call(t, ct, ddC1, "claimYield", `{"epoch":"0"}`, "hive:alice", 11, true).Ret, "claimed")
+	pb := c17I64(t, call(t, ct, ddC1, "claimYield", `{"epoch":"0"}`, "hive:bob", 11, true).Ret, "claimed")
+	call(t, ct, ddC1, "claimYield", `{"epoch":"0"}`, "hive:carol", 11, false) // exited → min 0
 
 	assert.EqualValues(t, 63636, pa, "alice earns on her LOWEST point, 350/550")
 	assert.EqualValues(t, 36363, pb, "bob held 200 throughout, 200/550")
@@ -143,18 +138,19 @@ func TestCovDrawdown_AdoptScheduleIsOwnerOnlyAndOnce(t *testing.T) {
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(ddC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(ddC7, owner, read("../c7-yield/artifacts/main.wasm"))
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
 	call(t, &ct, ddC1, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","cooldown":"15","epochLen":"10","allow":""}`, tokenID), owner, 0, true)
+		`{"token":"%s","kind":"0","cooldown":"15","epochLen":"10","allow":"",`+
+			`"treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian",`+
+			`"guardianThreshold":"1"}`, tokenID), owner, 0, true)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
 			`"blocksPerYear":"100","dustBucket":"yield","timelock":"1",`+
 			`"guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1",`+
-			`"buckets":"yield:contract:%s:10000"}`, tokenID, ddC7), owner, 0, true)
+			`"buckets":"yield:contract:%s:10000"}`, tokenID, ddC1), owner, 0, true)
 
 	// An outsider must not be able to anchor the schedule — pointing C1 at a fabricated
 	// funder would shift every epoch boundary.

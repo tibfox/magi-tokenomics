@@ -25,7 +25,6 @@ const (
 	advC1  = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
 	advC2  = "vsc1BmLNMQep1RaaUdYTPfEhqn1inESqNz4Ekt"
 	advC3  = "vsc1Bnuikc8sJii5baG5gmxno4V2xTW7joi2vu"
-	advC7  = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSXMPPj"
 	advC6  = "vsc1BquGPy8B766YpstdcL5cSF2GkWVVsVxJS3"
 
 	advMal      = "hive:advmallory"
@@ -70,23 +69,20 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	ct.RegisterContract(advC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(advC2, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(advC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	ct.RegisterContract(advC7, owner, read("../c7-yield/artifacts/main.wasm"))
-	ct.RegisterContract(advC6, owner, read("../c6-migration/artifacts/main.wasm"))
+	ct.RegisterContract(advC6, owner, read("../c1-staking/artifacts/main.wasm"))
 
 	// ---------------- PHASE 1: deploy + wire ----------------
 	// epochLen=10 so C7's hStart(0) != hEnd(9); emission = 1000000*10/100 = 100000/epoch
 	call(t, &ct, advTok, "init", `{"name":"ADV","symbol":"ADV","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
 	fundC2Pool(t, &ct, advTok, advC2, "10000000", 0)
 	call(t, &ct, advC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"%s","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`,
-		advTok, advGuardian, advVeto, advC3, advC7), owner, 0, true)
+		advTok, advGuardian, advVeto, advC3, advC1), owner, 0, true)
 	call(t, &ct, advC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, advTok), owner, 0, true)
 	call(t, &ct, advC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"%s","reporterThreshold":"1","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
 		advTok, advC2, advReporter, advTreasury, advGuardian), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, advC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, advC2), owner, 0, true)
-	call(t, &ct, advC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"%s","guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
-		advTok, advC2, advC1, advTreasury, advGuardian), owner, 0, true)
 	call(t, &ct, advC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, advTok), owner, 0, true)
 
 	// bootstrap supply, then hand the token to C2 (the ONLY minter from here on)
@@ -108,14 +104,14 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 
 	call(t, &ct, advC2, "distributeEpoch", ``, advKeeper, 10, true)
 	call(t, &ct, advC3, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true) // 60000
-	call(t, &ct, advC7, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true) // 40000
+	call(t, &ct, advC1, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true) // 40000
 	call(t, &ct, advC3, "submitShares", fmt.Sprintf(`{"epoch":"0","page":"0","entries":"%s:75,%s:25"}`, advAlice, advBob), advReporter, 10, true)
 	call(t, &ct, advC3, "finalizeEpoch", `{"epoch":"0"}`, advReporter, 10, true)
 
-	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advAlice, 11, true) // 45000
-	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advBob, 11, true)   // 15000
-	call(t, &ct, advC7, "claim", `{"epoch":"0"}`, advAlice, 11, true) // 24000
-	call(t, &ct, advC7, "claim", `{"epoch":"0"}`, advBob, 11, true)   // 16000
+	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advAlice, 11, true)      // 45000
+	call(t, &ct, advC3, "claim", `{"epoch":"0"}`, advBob, 11, true)        // 15000
+	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advAlice, 11, true) // 24000
+	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advBob, 11, true)   // 16000
 
 	// airdrop 700 + author 45000 + yield 24000 = 69700 (600 is staked in C1)
 	assert.Equal(t, "69700", advBal(t, &ct, advAlice, 11).String(), "alice honest total")
@@ -142,12 +138,12 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	F(advC3, "cancelEpoch", `{"epoch":"0"}`, advMal, 12)
 	// 7. sweep the distributor to himself
 	F(advC3, "sweepUnallocated", fmt.Sprintf(`{"nonce":"1","to":"%s"}`, advMal), advMal, 12)
-	F(advC7, "sweepResidual", `{"epoch":"0"}`, advMal, 12)
+	F(advC1, "sweepResidual", `{"epoch":"0"}`, advMal, 12)
 	// 8. claim rewards he has no share of / double-claim
 	F(advC3, "claim", `{"epoch":"0"}`, advMal, 12)
 	F(advC3, "claim", `{"epoch":"0"}`, advAlice, 12) // alice already claimed
-	F(advC7, "claim", `{"epoch":"0"}`, advMal, 12)
-	F(advC7, "claim", `{"epoch":"0"}`, advBob, 12) // bob already claimed
+	F(advC1, "claimYield", `{"epoch":"0"}`, advMal, 12)
+	F(advC1, "claimYield", `{"epoch":"0"}`, advBob, 12) // bob already claimed
 	// 9. non-canonical epoch aliasing (strand/divert funding)
 	F(advC3, "pullFunding", `{"epoch":"00"}`, advMal, 12)
 	F(advC3, "pullFunding", `{"epoch":"18446744073709551616"}`, advMal, 12)
@@ -179,11 +175,11 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	call(t, &ct, advTok, "approve", fmt.Sprintf(`{"spender":"contract:%s","amount":"69700"}`, advC1), advAlice, 12, true)
 	call(t, &ct, advC1, "stake", `{"amount":"5000"}`, advAlice, 19, true) // joins at the END of epoch 1
 	call(t, &ct, advC2, "distributeEpoch", ``, advKeeper, 20, true)
-	call(t, &ct, advC7, "pullFunding", `{"epoch":"1"}`, advKeeper, 20, true)
+	call(t, &ct, advC1, "pullFunding", `{"epoch":"1"}`, advKeeper, 20, true)
 	// alice's epoch-1 credit is min(stake@h10, stake@h19) = 600 — the 5000 late top-up
 	// must NOT count, and must not dilute bob either.
-	rA := call(t, &ct, advC7, "claim", `{"epoch":"1"}`, advAlice, 21, true)
-	rB := call(t, &ct, advC7, "claim", `{"epoch":"1"}`, advBob, 21, true)
+	rA := call(t, &ct, advC1, "claimYield", `{"epoch":"1"}`, advAlice, 21, true)
+	rB := call(t, &ct, advC1, "claimYield", `{"epoch":"1"}`, advBob, 21, true)
 	assert.Equal(t, "24000", pickJSON(rA.Ret, "claimed"), "flash-stake must not inflate alice")
 	assert.Equal(t, "16000", pickJSON(rB.Ret, "claimed"), "bob must not be diluted")
 

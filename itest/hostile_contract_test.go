@@ -24,7 +24,6 @@ const (
 	hosC1   = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
 	hosC2   = "vsc1BmLNMQep1RaaUdYTPfEhqn1inESqNz4Ekt"
 	hosC3   = "vsc1Bnuikc8sJii5baG5gmxno4V2xTW7joi2vu"
-	hosC7   = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSXMPPj"
 	hosEvil = "vsc1BquGPy8B766YpstdcL5cSF2GkWVVsVxJS3" // attacker-deployed
 	hosMal  = "hive:hosmallory"
 )
@@ -37,25 +36,23 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	ct.RegisterContract(hosC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(hosC2, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(hosC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	ct.RegisterContract(hosC7, owner, read("../c7-yield/artifacts/main.wasm"))
 	// the attacker deploys their own contract (owner is the attacker, not us)
 	ct.RegisterContract(hosEvil, hosMal, read("../hostile/artifacts/main.wasm"))
 
 	call(t, &ct, hosTok, "init", `{"name":"H","symbol":"H","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
 	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
-	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`, hosTok, hosC3, hosC7), owner, 0, true)
+	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`, hosTok, hosC3, hosC1), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
 	call(t, &ct, hosC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hosreporter","reporterThreshold":"1","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
-	call(t, &ct, hosC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2, hosC1), owner, 0, true)
 	call(t, &ct, hosTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, hosC2), owner, 0, true)
 
 	// fund the system so there is something worth stealing
 	call(t, &ct, hosC2, "distributeEpoch", ``, "hive:hoskeeper", 10, true)
 	call(t, &ct, hosC3, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
-	call(t, &ct, hosC7, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
+	call(t, &ct, hosC1, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
 
 	// relay(target, method, payload) — inner JSON is escaped so the hostile
 	// contract can forward it verbatim.
@@ -75,12 +72,12 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	// --- the attacker's contract tries every privileged path ---
 	relay(hosC2, "claimBucket", `{"epoch":"0"}`, 12)                                                  // impersonate a bucket target
 	relay(hosC3, "claim", `{"epoch":"0"}`, 12)                                                        // claim with no share
-	relay(hosC7, "claim", `{"epoch":"0"}`, 12)                                                        // claim with no stake
+	relay(hosC1, "claimYield", `{"epoch":"0"}`, 12)                                                   // claim with no stake
 	relay(hosC3, "submitShares", `{"epoch":"0","page":"0","entries":"hive:x:1"}`, 12)                 // not the reporter
 	relay(hosC3, "finalizeEpoch", `{"epoch":"0"}`, 12)                                                // not the reporter
 	relay(hosC3, "cancelEpoch", `{"epoch":"0"}`, 12)                                                  // not the guardian
 	relay(hosC3, "sweepUnallocated", `{"nonce":"1"}`, 12)                                             // not the guardian
-	relay(hosC7, "sweepResidual", `{"epoch":"0"}`, 12)                                                // not the guardian
+	relay(hosC1, "sweepResidual", `{"epoch":"0"}`, 12)                                                // not the guardian
 	relay(hosC1, "stakeFor", `{"acct":"hive:hosmallory","amount":"100"}`, 12)                         // not allowlisted
 	relay(hosC1, "unstake", `{"amount":"100"}`, 12)                                                   // no stake of its own
 	relay(hosC2, "queueTokenOp", `{"op":"changeOwner","nonce":"1","newOwner":"hive:hosmallory"}`, 12) // not the guardian
@@ -124,17 +121,15 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 	ct.RegisterContract(hosTok, owner, read(tokenWasmPath))
 	ct.RegisterContract(hosC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(hosC2, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(hosC7, owner, read("../c7-yield/artifacts/main.wasm"))
 	ct.RegisterContract(hosEvil, hosMal, read("../hostile/artifacts/main.wasm"))
 
 	call(t, &ct, hosTok, "init", `{"name":"H","symbol":"H","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
 	fundC2Pool(t, &ct, hosTok, hosC2, "10000000", 0)
-	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, hosTok, hosC7), owner, 0, true)
+	call(t, &ct, hosC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"5","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hosveto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, hosTok, hosC1), owner, 0, true)
 	call(t, &ct, hosC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hosTok), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, hosC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hosC2), owner, 0, true)
-	call(t, &ct, hosC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hostreasury","guardianMode":"0","guardianAuth":"hive:hosguardian","guardianThreshold":"1"}`, hosTok, hosC2, hosC1), owner, 0, true)
 
 	// give the attacker's CONTRACT real tokens and a real approval, so the composed
 	// legs are individually legitimate — the question is whether the SEQUENCE is.
@@ -145,7 +140,7 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 
 	// fund epoch 0's yield bucket
 	call(t, &ct, hosC2, "distributeEpoch", ``, "hive:hoskeeper", 10, true)
-	call(t, &ct, hosC7, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
+	call(t, &ct, hosC1, "pullFunding", `{"epoch":"0"}`, "hive:hoskeeper", 10, true)
 
 	esc := func(s string) string {
 		out := ""
@@ -179,7 +174,7 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 	assert.Equal(t, "5000", before.String(), "fixture: the attacker contract holds its float")
 	compose(12, false,
 		[3]string{hosC1, "stake", `{"amount":"5000"}`},
-		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+		[3]string{hosC1, "claimYield", `{"epoch":"0"}`},
 	)
 	assert.Equal(t, "5000", covBalanceOf(t, &ct, hosTok, evil, 12).String(),
 		"a stake and a claim in one tx must not pay the attacker, and the revert must "+
@@ -189,14 +184,14 @@ func TestHostile_CrossContractCompositionInOneTx(t *testing.T) {
 	//    together — an attempt to be paid for an epoch and exit within it.
 	call(t, &ct, hosC1, "stake", `{"amount":"5000"}`, evil, 11, true)
 	compose(13, false,
-		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+		[3]string{hosC1, "claimYield", `{"epoch":"0"}`},
 		[3]string{hosC1, "unstake", `{"amount":"5000"}`},
 	)
 
 	// 3. the reverse order — exit first, then claim, in one atomic tx.
 	compose(14, false,
 		[3]string{hosC1, "unstake", `{"amount":"5000"}`},
-		[3]string{hosC7, "claim", `{"epoch":"0"}`},
+		[3]string{hosC1, "claimYield", `{"epoch":"0"}`},
 	)
 
 	// The stake moved the float into C1, so the liquid balance is now zero and must

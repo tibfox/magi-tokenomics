@@ -40,8 +40,8 @@ const (
 	covTreasury = "hive:covtreasury"
 
 	covC3Wasm = "../c3-distributor/artifacts/main.wasm"
-	covC5Wasm = "../c5-lp/artifacts/main.wasm"
-	covC6Wasm = "../c6-migration/artifacts/main.wasm"
+	covC5Wasm = "../c3-distributor/artifacts/main.wasm"
+	covC6Wasm = "../c1-staking/artifacts/main.wasm"
 	covC2Wasm = "../c2-emission/artifacts/main.wasm"
 )
 
@@ -64,16 +64,32 @@ func covDistInit(window, reporter string) string {
 }
 
 func covDistInitRaw(funder, window, reporterAuth, guardianAuth, treasury string) string {
-	win := ""
-	if window != "" {
-		win = fmt.Sprintf(`"window":"%s",`, window)
-	}
 	tre := ""
 	if treasury != "" {
 		tre = fmt.Sprintf(`"treasury":"%s",`, treasury)
 	}
-	return fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s",%s"reporterMode":"0","reporterAuth":"%s","reporterThreshold":"1",%s"guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
-		covTokenID, funder, win, reporterAuth, tre, guardianAuth)
+	return fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s",%s"guardianMode":"0","guardianAuth":"%s","guardianThreshold":"1"}`,
+		covTokenID, funder, tre, guardianAuth)
+}
+
+// covCh is the single reward channel these tests use. Its name matches the C2 bucket
+// that funds it — the distributor verifies that correspondence at addChannel.
+const covCh = "share"
+
+// covAddChannelExpect registers a channel and asserts whether it should be accepted.
+func covAddChannelExpect(t *testing.T, ct *test_utils.ContractTest, distID, ch, bucket, window, reporter string, ok bool) {
+	t.Helper()
+	call(t, ct, distID, "addChannel", fmt.Sprintf(
+		`{"channel":"%s","bucket":"%s","window":"%s","reporterMode":"0","reporterAuth":"%s",`+
+			`"reporterThreshold":"1"}`, ch, bucket, window, reporter), owner, 0, ok)
+}
+
+// covAddChannel registers the channel that used to be the contract's own config.
+func covAddChannel(t *testing.T, ct *test_utils.ContractTest, distID, window, reporter string) test_utils.ContractTestCallResult {
+	t.Helper()
+	return call(t, ct, distID, "addChannel", fmt.Sprintf(
+		`{"channel":"%s","bucket":"%s","window":"%s","reporterMode":"0","reporterAuth":"%s",`+
+			`"reporterThreshold":"1"}`, covCh, covCh, window, reporter), owner, 0, true)
 }
 
 // covBoot registers + initializes token, C2 and the distributor under test, and
@@ -97,6 +113,7 @@ func covBoot(t *testing.T, distWasm, distID, window, reporter string) *test_util
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000000"}`, covC2ID), owner, 0, true)
 	call(t, &ct, covC2ID, "init", covC2Init(distID), owner, 0, true)
 	call(t, &ct, distID, "init", covDistInit(window, reporter), owner, 0, true)
+	covAddChannel(t, &ct, distID, window, reporter)
 	call(t, &ct, covTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, covC2ID), owner, 0, true)
 	return &ct
 }
@@ -106,7 +123,7 @@ func covBoot(t *testing.T, distWasm, distID, window, reporter string) *test_util
 func covFundEpoch(t *testing.T, ct *test_utils.ContractTest, distID, epoch string, height uint64) {
 	t.Helper()
 	call(t, ct, covC2ID, "distributeEpoch", ``, "hive:covkeeper", height, true)
-	r := call(t, ct, distID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, epoch), "hive:covanyone", height, true)
+	r := call(t, ct, distID, "pullFunding", fmt.Sprintf(`{"channel":"share","epoch":"%s"}`, epoch), "hive:covanyone", height, true)
 	assert.Contains(t, r.Ret, fmt.Sprintf(`"funded":"%d"`, covEpochFunding))
 }
 
@@ -142,7 +159,7 @@ func covBalance(t *testing.T, ct *test_utils.ContractTest, account string, heigh
 // covShareOf returns (share, totalShares, funded, status) for an account.
 func covShareOf(t *testing.T, ct *test_utils.ContractTest, distID, epoch, account string, height uint64) (string, string, string, string) {
 	t.Helper()
-	r := call(t, ct, distID, "shareOf", fmt.Sprintf(`{"epoch":"%s","account":"%s"}`, epoch, account), "hive:covquery", height, true)
+	r := call(t, ct, distID, "shareOf", fmt.Sprintf(`{"channel":"share","epoch":"%s","account":"%s"}`, epoch, account), "hive:covquery", height, true)
 	return covJSONField(t, r.Ret, "share"),
 		covJSONField(t, r.Ret, "totalShares"),
 		covJSONField(t, r.Ret, "funded"),
@@ -152,7 +169,7 @@ func covShareOf(t *testing.T, ct *test_utils.ContractTest, distID, epoch, accoun
 func covSubmit(t *testing.T, ct *test_utils.ContractTest, distID, reporter, epoch, page, entries string, height uint64, expectOK bool) {
 	t.Helper()
 	call(t, ct, distID, "submitShares",
-		fmt.Sprintf(`{"epoch":"%s","page":"%s","entries":"%s"}`, epoch, page, entries),
+		fmt.Sprintf(`{"channel":"%s","epoch":"%s","page":"%s","entries":"%s"}`, covCh, epoch, page, entries),
 		reporter, height, expectOK)
 }
 
@@ -193,7 +210,7 @@ func TestCovDist_MultiPageSharesAccumulate(t *testing.T) {
 	// a non-reporter cannot push a page at all
 	covSubmit(t, ct, covC3ID, "hive:coveve", "0", "3", "hive:coveve:1000", 1, false)
 
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// ...and no further page may be added once the epoch is frozen
 	covSubmit(t, ct, covC3ID, covReporter, "0", "3", "hive:covd:1000", 1, false)
@@ -231,16 +248,16 @@ func TestCovDist_MalformedEntriesSkipped(t *testing.T) {
 	_, ts, _, _ = covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
 	assert.Equal(t, "17", ts, "junk-only page must not change totalShares")
 
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// the surviving shares still pay out proportionally (10/17, 7/17 of 100000)
-	ra := call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:cova", 2, true)
-	rd := call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covd", 2, true)
+	ra := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cova", 2, true)
+	rd := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covd", 2, true)
 	assert.Equal(t, "58823", covJSONField(t, ra.Ret, "claimed"))
 	assert.Equal(t, "41176", covJSONField(t, rd.Ret, "claimed"))
 	// accounts that only appeared in malformed entries cannot claim
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covb", 2, false)
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:cove", 2, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covb", 2, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cove", 2, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,17 +273,17 @@ func TestCovDist_RoundingDustAndConservation(t *testing.T) {
 	covFundEpoch(t, ct, covC3ID, "0", 1)
 
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:covr1:1,hive:covr2:1,hive:covr3:1", 1, true)
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// finalize at h=1 with window=5 → claims open at h=6
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covr1", 2, false)
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covr1", 5, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 2, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 5, false)
 
 	funded := big.NewInt(covEpochFunding)
 	total := big.NewInt(3)
 	sum := new(big.Int)
 	for _, acct := range []string{"hive:covr1", "hive:covr2", "hive:covr3"} {
-		r := call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, acct, 6, true)
+		r := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, acct, 6, true)
 		paid := covBig(t, covJSONField(t, r.Ret, "claimed"))
 		want := new(big.Int).Div(new(big.Int).Mul(funded, big.NewInt(1)), total) // floor
 		assert.Equal(t, want.String(), paid.String(), "payout for %s must be floor(funded*share/total)", acct)
@@ -283,8 +300,8 @@ func TestCovDist_RoundingDustAndConservation(t *testing.T) {
 		"undistributed dust must remain in the distributor")
 
 	// double claim and no-share claim must both be refused
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covr1", 6, false)
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covnobody", 6, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 6, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covnobody", 6, false)
 	assert.Equal(t, "0", covBalance(t, ct, "hive:covnobody", 6).String())
 	// ...and the paid accounts' balances did not move on the failed second claim
 	assert.Equal(t, "33333", covBalance(t, ct, "hive:covr1", 6).String())
@@ -303,15 +320,15 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
 	covFundEpoch(t, ct, covC3ID, "0", 1)
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60,hive:covb:40", 1, true)
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// only the guardian may veto (reporter/random/owner may not)
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covReporter, 2, false)
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, "hive:coveve", 2, false)
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, owner, 2, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 2, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, "hive:coveve", 2, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, owner, 2, false)
 
 	// guardian veto inside the window (finalized at h=1, window 10 → open until h=11)
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2, true)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 2, true)
 	sh, ts, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2)
 	assert.Equal(t, "60", sh, "shares are retained, the funding is what moves")
 	assert.Equal(t, "100", ts)
@@ -319,17 +336,17 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 	assert.Equal(t, "cancelled", status)
 
 	// every claim is dead, before and after the (now irrelevant) window
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:cova", 3, false)
-	call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, "hive:covb", 20, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cova", 3, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covb", 20, false)
 	assert.Equal(t, "0", covBalance(t, ct, "hive:cova", 20).String())
 
 	// a non-guardian cannot sweep
-	call(t, ct, covC3ID, "sweepUnallocated", `{"nonce":"1"}`, "hive:coveve", 20, false)
-	call(t, ct, covC3ID, "sweepUnallocated", `{"nonce":"1"}`, covReporter, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, "hive:coveve", 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, covReporter, 20, false)
 
 	// the guardian sweeps — and a `to` field in the payload is IGNORED: the only
 	// destination is the treasury pinned at init (H2).
-	s := call(t, ct, covC3ID, "sweepUnallocated", `{"nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	s := call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String(),
 		"cancelled funding must land in the PINNED treasury")
@@ -339,16 +356,16 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 		"the whole cancelled epoch must have left the distributor")
 
 	// a second sweep (fresh nonce, so auth is not the blocker) has nothing to move
-	call(t, ct, covC3ID, "sweepUnallocated", `{"nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 
 	// ---- and the veto EXPIRES: a second epoch, cancelled after its window ----
 	covFundEpoch(t, ct, covC3ID, "1", 25)
 	covSubmit(t, ct, covC3ID, covReporter, "1", "0", "hive:cova:1", 25, true)
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"1"}`, covReporter, 25, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"1"}`, covReporter, 25, true)
 	// finalized at h=25, window 10 → challenge window elapsed at h=35
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"1"}`, covGuardian, 40, false)
-	call(t, ct, covC3ID, "claim", `{"epoch":"1"}`, "hive:cova", 40, true)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, covGuardian, 40, false)
+	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"1"}`, "hive:cova", 40, true)
 	assert.Equal(t, "100000", covBalance(t, ct, "hive:cova", 40).String(),
 		"an epoch past its challenge window must be payable, not vetoable")
 }
@@ -375,22 +392,37 @@ func TestCovDist_InitValidationRejectsBadConfig(t *testing.T) {
 
 	call(t, &ct, covC2ID, "init", covC2Init(covC3bID), owner, 0, true)
 
-	// (2) window missing entirely
-	call(t, &ct, covC3bID, "init", covDistInitRaw(covC2ID, "", covReporter, covGuardian, covTreasury), owner, 0, false)
-	// (3) window = 0 (would silently disable the guardian veto)
-	call(t, &ct, covC3bID, "init", covDistInitRaw(covC2ID, "0", covReporter, covGuardian, covTreasury), owner, 0, false)
-	// (4) treasury missing — sweepUnallocated would have no pinned destination
+	// (2) treasury missing — sweepUnallocated would have no pinned destination
 	call(t, &ct, covC3bID, "init", covDistInitRaw(covC2ID, "1", covReporter, covGuardian, ""), owner, 0, false)
-	// (5) reporter ∩ guardian overlap — one coalition could both forge and refuse to veto
-	call(t, &ct, covC3bID, "init", covDistInitRaw(covC2ID, "1", "hive:covsame", "hive:covsame", covTreasury), owner, 0, false)
-	// (6) non-owner cannot init
+	// (3) non-owner cannot init
 	call(t, &ct, covC3bID, "init", good, "hive:coveve", 0, false)
 
 	// none of the rejected attempts may have left the contract initialized...
-	call(t, &ct, covC3bID, "shareOf", `{"epoch":"0","account":"hive:cova"}`, "hive:covquery", 0, false)
+	call(t, &ct, covC3bID, "shareOf", `{"channel":"share","epoch":"0","account":"hive:cova"}`, "hive:covquery", 0, false)
 	// ...and the fully valid config still initializes
 	call(t, &ct, covC3bID, "init", good, owner, 0, true)
 	call(t, &ct, covC3bID, "init", good, owner, 0, false) // no re-init
+
+	// The per-channel policy moved to addChannel, so its validation lives there now.
+	ach := func(ch, bucket, window, reporter string, ok bool) {
+		call(t, &ct, covC3bID, "addChannel", fmt.Sprintf(
+			`{"channel":"%s","bucket":"%s","window":"%s","reporterMode":"0",`+
+				`"reporterAuth":"%s","reporterThreshold":"1"}`, ch, bucket, window, reporter),
+			owner, 0, ok)
+	}
+	ach("a", covCh, "", covReporter, false)           // window missing
+	ach("b", covCh, "0", covReporter, false)          // window 0 disables the veto
+	ach("c", covCh, "1", covGuardian, false)          // reporter ∩ guardian overlap
+	ach("d", "nosuchbucket", "1", covReporter, false) // funder has no such bucket
+	ach("", covCh, "1", covReporter, false)           // channel name required
+	// a non-owner may not add one at all
+	call(t, &ct, covC3bID, "addChannel", fmt.Sprintf(
+		`{"channel":"e","bucket":"%s","window":"1","reporterMode":"0",`+
+			`"reporterAuth":"%s","reporterThreshold":"1"}`, covCh, covReporter),
+		"hive:coveve", 0, false)
+	// ...and the valid one works, exactly once
+	ach(covCh, covCh, "1", covReporter, true)
+	ach(covCh, covCh, "1", covReporter, false) // append-only
 }
 
 // ---------------------------------------------------------------------------
@@ -411,31 +443,31 @@ func TestCovDist_C5PagesRoundingAndVetoParity(t *testing.T) {
 	_, ts, _, _ := covShareOf(t, ct, covC5ID, "0", "hive:covlp1", 1)
 	assert.Equal(t, "3", ts)
 
-	call(t, ct, covC5ID, "finalizeEpoch", `{"epoch":"0"}`, lpReporter, 1, true)
-	call(t, ct, covC5ID, "claim", `{"epoch":"0"}`, "hive:covlp1", 3, false) // window not elapsed
+	call(t, ct, covC5ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, lpReporter, 1, true)
+	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covlp1", 3, false) // window not elapsed
 
 	sum := new(big.Int)
 	for _, acct := range []string{"hive:covlp1", "hive:covlp2", "hive:covlp3"} {
-		r := call(t, ct, covC5ID, "claim", `{"epoch":"0"}`, acct, 6, true)
+		r := call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, acct, 6, true)
 		assert.Equal(t, "33333", covJSONField(t, r.Ret, "claimed"))
 		sum.Add(sum, covBig(t, covJSONField(t, r.Ret, "claimed")))
 	}
 	assert.True(t, sum.Cmp(big.NewInt(covEpochFunding)) <= 0, "Σ(payouts) must be <= funded")
-	call(t, ct, covC5ID, "claim", `{"epoch":"0"}`, "hive:covlp1", 6, false)    // double claim
-	call(t, ct, covC5ID, "claim", `{"epoch":"0"}`, "hive:covnobody", 6, false) // no share
+	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covlp1", 6, false)    // double claim
+	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covnobody", 6, false) // no share
 
 	// veto path on a second epoch: cancel → sweep to the pinned treasury
 	covFundEpoch(t, ct, covC5ID, "1", 10)
 	covSubmit(t, ct, covC5ID, lpReporter, "1", "0", "hive:covlp1:1", 10, true)
-	call(t, ct, covC5ID, "finalizeEpoch", `{"epoch":"1"}`, lpReporter, 10, true)
-	call(t, ct, covC5ID, "cancelEpoch", `{"epoch":"1"}`, "hive:coveve", 11, false)
-	call(t, ct, covC5ID, "cancelEpoch", `{"epoch":"1"}`, covGuardian, 11, true)
-	call(t, ct, covC5ID, "claim", `{"epoch":"1"}`, "hive:covlp1", 20, false)
-	s := call(t, ct, covC5ID, "sweepUnallocated", `{"nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	call(t, ct, covC5ID, "finalizeEpoch", `{"channel":"share","epoch":"1"}`, lpReporter, 10, true)
+	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, "hive:coveve", 11, false)
+	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, covGuardian, 11, true)
+	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"1"}`, "hive:covlp1", 20, false)
+	s := call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 	assert.Equal(t, "0", covBalance(t, ct, "hive:coveve", 20).String())
-	call(t, ct, covC5ID, "sweepUnallocated", `{"nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +486,8 @@ func covBootC6WithTreasury(t *testing.T, c6, maxAirdrop, bootstrap, treasury str
 	ct.RegisterContract(c6, owner, read(covC6Wasm))
 	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
 	call(t, &ct, c6, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","maxAirdrop":"%s","treasury":"%s"}`, covTokenID, maxAirdrop, treasury),
+		`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":"",`+
+			`"maxAirdrop":"%s","treasury":"%s"}`, covTokenID, maxAirdrop, treasury),
 		owner, 0, true)
 	call(t, &ct, covTokenID, "mint", fmt.Sprintf(`{"amount":"%s"}`, bootstrap), owner, 0, true)
 	call(t, &ct, covTokenID, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"%s"}`, c6, bootstrap), owner, 0, true)
@@ -468,7 +501,9 @@ func covBootC6(t *testing.T, c6 string, maxAirdrop string, bootstrap string) *te
 	ct.RegisterContract(covTokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(c6, owner, read(covC6Wasm))
 	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
-	call(t, &ct, c6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"%s"}`, covTokenID, maxAirdrop), owner, 0, true)
+	call(t, &ct, c6, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":"","maxAirdrop":"%s"}`,
+		covTokenID, maxAirdrop), owner, 0, true)
 	call(t, &ct, covTokenID, "mint", fmt.Sprintf(`{"amount":"%s"}`, bootstrap), owner, 0, true)
 	call(t, &ct, covTokenID, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"%s"}`, c6, bootstrap), owner, 0, true)
 	return &ct
@@ -546,13 +581,21 @@ func TestCovDist_C6InitRejectsBadCap(t *testing.T) {
 	ct.RegisterContract(covC6bID, owner, read(covC6Wasm))
 	call(t, &ct, covTokenID, "init", covTokenInit(), owner, 0, true)
 
-	base := `{"token":"` + covTokenID + `","kind":"0"`
-	call(t, &ct, covC6bID, "init", base+`}`, owner, 0, false)                   // missing
+	base := `{"token":"` + covTokenID + `","kind":"0","cooldown":"5","epochLen":"1","allow":""`
+	// A cap that is present but nonsensical is rejected outright.
 	call(t, &ct, covC6bID, "init", base+`,"maxAirdrop":"0"}`, owner, 0, false)  // zero
 	call(t, &ct, covC6bID, "init", base+`,"maxAirdrop":"-5"}`, owner, 0, false) // negative
-	call(t, &ct, covC6bID, "init", base+`,"maxAirdrop":""}`, owner, 0, false)   // empty
-	// still uninitialized after all of the above
+	// still uninitialized after those
 	call(t, &ct, covC6bID, "airdropTotal", ``, "hive:covquery", 0, false)
+
+	// An ABSENT cap is legal and means the airdrop is simply not available on this
+	// deployment — capability follows config rather than a flag. It must then refuse
+	// to run a batch, not accept one against an unset limit.
+	ct.RegisterContract(covC3bID, owner, read(covC6Wasm))
+	call(t, &ct, covC3bID, "init", base+`}`, owner, 0, true)
+	call(t, &ct, covC3bID, "airdropBatch",
+		`{"batchId":"b","entries":"hive:cova:1"}`, owner, 0, false)
+
 	// a positive cap works
 	call(t, &ct, covC6bID, "init", base+`,"maxAirdrop":"1"}`, owner, 0, true)
 	assert.Equal(t, "0", covAirdropTotal(t, &ct, covC6bID))
@@ -582,14 +625,14 @@ func TestCovDist_StaleRescueAnchorsOnFundedAtNotEpochEnd(t *testing.T) {
 
 	// Past the old epochEnd+stale deadline (1000) but not past fundedAt+stale (2500):
 	// the guardian must be REFUSED. This is the assertion the old code failed.
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2000, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 2000, false)
 	_, _, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2000)
 	assert.Equal(t, "", status, "the epoch must still be open")
 	assert.NotEqual(t, "0", funded, "the funding must not have been swept away")
 
 	// The reporter has time to do its job inside that window.
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60,hive:covb:40", 2100, true)
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 2100, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 2100, true)
 	_, _, _, status = covShareOf(t, ct, covC3ID, "0", "hive:cova", 2100)
 	assert.Equal(t, "finalized", status)
 }
@@ -603,9 +646,9 @@ func TestCovDist_StaleRescueStillOpensAfterTheFundedAnchor(t *testing.T) {
 	covFundEpoch(t, ct, covC3ID, "0", fundedAt)
 
 	// still shut just before fundedAt + staleBlocks()
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2499, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 2499, false)
 	// and open just after
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 2501, true)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 2501, true)
 	_, _, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2501)
 	assert.Equal(t, "cancelled", status)
 	assert.Equal(t, "0", funded, "funding rolls into unallocated for the guardian to sweep")
@@ -618,7 +661,7 @@ func TestCovDist_StaleRescueRequiresActualFunding(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
 	// never funded — far past any conceivable deadline
-	call(t, ct, covC3ID, "cancelEpoch", `{"epoch":"0"}`, covGuardian, 99999, false)
+	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 99999, false)
 }
 
 // covBootRaw brings up the token + C2 only, so a test can drive several distributor
@@ -644,12 +687,13 @@ func TestCovDist_InitRejectsAnAbsurdChallengeWindow(t *testing.T) {
 	ct := covBootRaw(t)
 
 	ct.RegisterContract(covC3ID, owner, read(covC3Wasm))
-	call(t, ct, covC3ID, "init", covDistInit("11", covReporter), owner, 0, false)
+	call(t, ct, covC3ID, "init", covDistInit("", covReporter), owner, 0, true)
+	// the window is per-channel now, so the bound is enforced where it is configured
+	covAddChannelExpect(t, ct, covC3ID, "over", covCh, "11", covReporter, false)
 
 	// exactly at the bound is still legal — the guard must reject typos, not tighten
 	// the contract's stated policy
-	ct.RegisterContract(covC3bID, owner, read(covC3Wasm))
-	call(t, ct, covC3bID, "init", covDistInit("10", covReporter), owner, 0, true)
+	covAddChannelExpect(t, ct, covC3ID, covCh, covCh, "10", covReporter, true)
 }
 
 // The role label lets a reporter tell a content distributor from an LP one. Nothing
@@ -660,22 +704,22 @@ func TestCovDist_RoleLabelIsOptionalAndValidated(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := covBootRaw(t)
 
-	withRole := func(role string) string {
-		base := covDistInit("5", covReporter)
-		return base[:len(base)-1] + fmt.Sprintf(`,"role":"%s"}`, role)
-	}
-
-	// a value that is neither "content" nor "lp" is rejected outright
+	// The role label belongs to a CHANNEL now — one contract can serve both a content
+	// and an LP channel, so the label cannot be a property of the contract.
 	ct.RegisterContract(covC3ID, owner, read(covC3Wasm))
-	call(t, ct, covC3ID, "init", withRole("distributor"), owner, 0, false)
+	call(t, ct, covC3ID, "init", covDistInit("", covReporter), owner, 0, true)
 
-	// a legal one is accepted and readable back
-	ct.RegisterContract(covC3bID, owner, read(covC3Wasm))
-	call(t, ct, covC3bID, "init", withRole("lp"), owner, 0, true)
-
-	// and omitting it entirely stays legal
-	ct.RegisterContract(covC5ID, owner, read(covC5Wasm))
-	call(t, ct, covC5ID, "init", covDistInit("5", covReporter), owner, 0, true)
+	withRole := func(ch, role string, ok bool) {
+		call(t, ct, covC3ID, "addChannel", fmt.Sprintf(
+			`{"channel":"%s","bucket":"%s","window":"5","reporterMode":"0",`+
+				`"reporterAuth":"%s","reporterThreshold":"1","role":"%s"}`,
+			ch, covCh, covReporter, role), owner, 0, ok)
+	}
+	withRole("bad", "distributor", false) // neither "content" nor "lp"
+	withRole(covCh, "lp", true)           // a legal one is accepted
+	r := call(t, ct, covC3ID, "channelInfo",
+		fmt.Sprintf(`{"channel":"%s"}`, covCh), "hive:covquery", 0, true)
+	assert.Contains(t, r.Ret, `"role":"lp"`, "the label must read back: "+r.Ret)
 }
 
 // C6 holds the largest single balance at launch and, until now, had NO exit for it.
@@ -689,19 +733,19 @@ func TestCovDist_C6ResidualSweepOnlyTakesTheExcess(t *testing.T) {
 	ct := covBootC6WithTreasury(t, covC6ID, "600", "1000", covTreasury)
 
 	// while the full capacity is unspent, NOTHING is residual beyond the excess
-	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, true)
+	call(t, ct, covC6ID, "sweepUnobligated", `{}`, owner, 1, true)
 	assert.Equal(t, "400", covBalance(t, ct, covTreasury, 1).String(),
 		"only the un-airdroppable excess may move")
 	assert.Equal(t, "600", covBalance(t, ct, "contract:"+covC6ID, 1).String(),
 		"every token the remaining capacity could still pay must stay put")
 
 	// a second sweep has nothing left to take
-	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 2, false)
+	call(t, ct, covC6ID, "sweepUnobligated", `{}`, owner, 2, false)
 
 	// after airdropping part of the capacity, the freed reservation becomes sweepable
 	call(t, ct, covC6ID, "airdropBatch",
 		`{"batchId":"b1","entries":"hive:cova:200"}`, owner, 3, true)
-	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 4, false) // still fully reserved
+	call(t, ct, covC6ID, "sweepUnobligated", `{}`, owner, 4, false) // still fully reserved
 	assert.Equal(t, "400", covBalance(t, ct, "contract:"+covC6ID, 4).String())
 }
 
@@ -710,8 +754,8 @@ func TestCovDist_C6ResidualSweepOnlyTakesTheExcess(t *testing.T) {
 func TestCovDist_C6SweepIsOwnerAndActiveOnly(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := covBootC6WithTreasury(t, covC6ID, "600", "1000", covTreasury)
-	call(t, ct, covC6ID, "sweepResidual", `{}`, "hive:coveve", 1, false)
-	pvCallPosting(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, false)
+	call(t, ct, covC6ID, "sweepUnobligated", `{}`, "hive:coveve", 1, false)
+	pvCallPosting(t, ct, covC6ID, "sweepUnobligated", `{}`, owner, 1, false)
 	assert.Equal(t, "0", covBalance(t, ct, covTreasury, 1).String())
 }
 
@@ -720,7 +764,7 @@ func TestCovDist_C6SweepIsOwnerAndActiveOnly(t *testing.T) {
 func TestCovDist_C6WithoutTreasuryCannotSweep(t *testing.T) {
 	os.RemoveAll("data/badger")
 	ct := covBootC6(t, covC6ID, "600", "1000")
-	call(t, ct, covC6ID, "sweepResidual", `{}`, owner, 1, false)
+	call(t, ct, covC6ID, "sweepUnobligated", `{}`, owner, 1, false)
 }
 
 // SCALE. Every other test in this repo reports a handful of accounts; a real tribe
@@ -768,7 +812,7 @@ func TestCovDist_FiveHundredEarnersAcrossNinePages(t *testing.T) {
 	}
 	t.Logf("submitted %d earners across %d pages, totalShares should be %d", total, page, wantTotal)
 
-	call(t, ct, covC3ID, "finalizeEpoch", `{"epoch":"0"}`, covReporter, 1, true)
+	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 	_, ts, funded, status := covShareOf(t, ct, covC3ID, "0", earners[0].acct, 2)
 	assert.Equal(t, "finalized", status)
 	assert.Equal(t, strconv.Itoa(wantTotal), ts,
@@ -786,7 +830,7 @@ func TestCovDist_FiveHundredEarnersAcrossNinePages(t *testing.T) {
 			t.Fatalf("%s started with a balance of %s", e.acct, before)
 		}
 		expect := fundedN * e.share / wantTotal
-		r := call(t, ct, covC3ID, "claim", `{"epoch":"0"}`, e.acct, 3, expect > 0)
+		r := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, e.acct, 3, expect > 0)
 		_ = r
 		got := covBalance(t, ct, e.acct, 3)
 		if got.String() != strconv.Itoa(expect) {

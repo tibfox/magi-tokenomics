@@ -20,7 +20,6 @@ import (
 const (
 	c17C1    = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
 	c17C2    = "vsc1BquGPy8B766YpstdcL5cSF2GkWVVsVxJS3"
-	c17C7    = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
 	c17Owner = "hive:tibfox"
 )
 
@@ -392,7 +391,6 @@ func c17BootYield(t *testing.T) test_utils.ContractTest {
 	ct := c17NewTest(t, map[string]string{
 		c17C1: c17C1Only,
 		c17C2: "../c2-emission/artifacts/main.wasm",
-		c17C7: "../c7-yield/artifacts/main.wasm",
 	})
 	// cooldown (11) > epochLen (10), as R15 requires
 	call(t, &ct, c17C1, "init",
@@ -401,13 +399,10 @@ func c17BootYield(t *testing.T) test_utils.ContractTest {
 	fundC2Pool(t, &ct, tokenID, c17C2, "500000000", 0)
 	call(t, &ct, c17C2, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`,
-		tokenID, c17C7), c17Owner, 0, true)
+		tokenID, c17C1), c17Owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c17C2), c17Owner, 0, true)
-	call(t, &ct, c17C7, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
-		tokenID, c17C2, c17C1), c17Owner, 0, true)
 	return ct
 }
 
@@ -424,9 +419,9 @@ func TestCovStake_YieldProRataEpochLen10(t *testing.T) {
 
 	// epoch 0 spans h=0..9 → first fully-elapsed at h=10
 	call(t, &ct, c17C2, "distributeEpoch", ``, "hive:keeper", 10, true)
-	call(t, &ct, c17C7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
+	call(t, &ct, c17C1, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
 
-	f := call(t, &ct, c17C7, "fundedOf", `{"epoch":"0"}`, "hive:probe", 10, true)
+	f := call(t, &ct, c17C1, "fundedOf", `{"epoch":"0"}`, "hive:probe", 10, true)
 	funded := c17I64(t, f.Ret, "funded")
 	assert.EqualValues(t, 100000, funded, "fundedOf must report the pulled slice")
 
@@ -434,18 +429,18 @@ func TestCovStake_YieldProRataEpochLen10(t *testing.T) {
 	assert.EqualValues(t, 600, c17StakeAt(t, &ct, "hive:alice", 0, 10))
 	assert.EqualValues(t, 600, c17StakeAt(t, &ct, "hive:alice", 9, 10))
 
-	ca := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:alice", 11, true)
-	cb := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:bob", 11, true)
+	ca := call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:alice", 11, true)
+	cb := call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:bob", 11, true)
 	pa, pb := c17I64(t, ca.Ret, "claimed"), c17I64(t, cb.Ret, "claimed")
 	assert.EqualValues(t, 60000, pa)
 	assert.EqualValues(t, 40000, pb)
 	assert.LessOrEqual(t, pa+pb, funded, "Σclaims must not exceed funded")
 
 	// double claim
-	call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:alice", 11, false)
+	call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:alice", 11, false)
 	// never-funded epoch
-	call(t, &ct, c17C7, "claim", `{"epoch":"1"}`, "hive:alice", 11, false)
-	f = call(t, &ct, c17C7, "fundedOf", `{"epoch":"1"}`, "hive:probe", 11, true)
+	call(t, &ct, c17C1, "claimYield", `{"epoch":"1"}`, "hive:alice", 11, false)
+	f = call(t, &ct, c17C1, "fundedOf", `{"epoch":"1"}`, "hive:probe", 11, true)
 	assert.EqualValues(t, 0, c17I64(t, f.Ret, "funded"))
 
 	// payouts landed on-chain
@@ -454,14 +449,14 @@ func TestCovStake_YieldProRataEpochLen10(t *testing.T) {
 
 	// --- epoch 1: fund it, then prove the "not fully elapsed" guard ---------
 	call(t, &ct, c17C2, "distributeEpoch", ``, "hive:keeper", 20, true)
-	call(t, &ct, c17C7, "pullFunding", `{"epoch":"1"}`, "hive:anyone", 20, true)
-	f = call(t, &ct, c17C7, "fundedOf", `{"epoch":"1"}`, "hive:probe", 20, true)
+	call(t, &ct, c17C1, "pullFunding", `{"epoch":"1"}`, "hive:anyone", 20, true)
+	f = call(t, &ct, c17C1, "fundedOf", `{"epoch":"1"}`, "hive:probe", 20, true)
 	assert.EqualValues(t, 100000, c17I64(t, f.Ret, "funded"))
 	// epoch 1 spans h=10..19; a claim evaluated at h=19 must be refused even
 	// though the epoch is funded (harness re-evaluates at an earlier height).
-	call(t, &ct, c17C7, "claim", `{"epoch":"1"}`, "hive:alice", 19, false)
+	call(t, &ct, c17C1, "claimYield", `{"epoch":"1"}`, "hive:alice", 19, false)
 	// at h=20 the epoch has fully elapsed and the claim goes through
-	ca = call(t, &ct, c17C7, "claim", `{"epoch":"1"}`, "hive:alice", 20, true)
+	ca = call(t, &ct, c17C1, "claimYield", `{"epoch":"1"}`, "hive:alice", 20, true)
 	assert.EqualValues(t, 60000, c17I64(t, ca.Ret, "claimed"))
 }
 
@@ -492,8 +487,8 @@ func TestCovStake_YieldMinOverEpochRule(t *testing.T) {
 	assert.EqualValues(t, 900, c17TotalAt(t, &ct, 9, 10)) // 300+400+200
 
 	call(t, &ct, c17C2, "distributeEpoch", ``, "hive:keeper", 10, true)
-	call(t, &ct, c17C7, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
-	f := call(t, &ct, c17C7, "fundedOf", `{"epoch":"0"}`, "hive:probe", 10, true)
+	call(t, &ct, c17C1, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 10, true)
+	f := call(t, &ct, c17C1, "fundedOf", `{"epoch":"0"}`, "hive:probe", 10, true)
 	funded := c17I64(t, f.Ret, "funded")
 	assert.EqualValues(t, 100000, funded)
 
@@ -504,15 +499,15 @@ func TestCovStake_YieldMinOverEpochRule(t *testing.T) {
 	// could compute unaided — which paid out only 77,777 of 100,000 and left 22,223
 	// belonging to nobody. 22% of one epoch. Recovering that is what the guardian
 	// sweep was for, and the sweep is why claims had to close after ~10 days.
-	ca := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:alice", 11, true)
-	cb := call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:bob", 11, true)
+	ca := call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:alice", 11, true)
+	cb := call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:bob", 11, true)
 	pa, pb := c17I64(t, ca.Ret, "claimed"), c17I64(t, cb.Ret, "claimed")
 	assert.EqualValues(t, 42857, pa, "alice is paid on min(600,300)=300 / 700")
 	assert.EqualValues(t, 57142, pb, "bob is paid on 400/700")
 	assert.Less(t, pa, pb, "leaving mid-epoch must cost alice her lead over bob")
 
 	// carol joined mid-epoch → min(0,200)=0 → nothing for this epoch
-	call(t, &ct, c17C7, "claim", `{"epoch":"0"}`, "hive:carol", 11, false)
+	call(t, &ct, c17C1, "claimYield", `{"epoch":"0"}`, "hive:carol", 11, false)
 
 	assert.LessOrEqual(t, pa+pb, funded, "Σclaims must not exceed funded")
 	// THE POINT OF THE WHOLE CHANGE: what stays behind is now per-claimant truncation
@@ -526,8 +521,8 @@ func TestCovStake_YieldMinOverEpochRule(t *testing.T) {
 
 	// carol IS entitled for the NEXT epoch, which she holds start-to-end
 	call(t, &ct, c17C2, "distributeEpoch", ``, "hive:keeper", 20, true)
-	call(t, &ct, c17C7, "pullFunding", `{"epoch":"1"}`, "hive:anyone", 20, true)
-	cc := call(t, &ct, c17C7, "claim", `{"epoch":"1"}`, "hive:carol", 20, true)
+	call(t, &ct, c17C1, "pullFunding", `{"epoch":"1"}`, "hive:anyone", 20, true)
+	cc := call(t, &ct, c17C1, "claimYield", `{"epoch":"1"}`, "hive:carol", 20, true)
 	assert.EqualValues(t, 200*100000/900, c17I64(t, cc.Ret, "claimed"),
 		"carol earns pro-rata once she is staked for a whole epoch")
 }
@@ -582,7 +577,7 @@ func TestCovStake_ContractCallerCanStillUnstake(t *testing.T) {
 		fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), c17Owner, 0, true)
 
 	// a contract holds tokens and approves C1, exactly as a hive account would
-	holder := "contract:" + c17C7 // any contract id; it never executes here
+	holder := "contract:" + c17C1 // any contract id; it never executes here
 	call(t, &ct, tokenID, "mint", `{"amount":"500"}`, owner, 0, true)
 	call(t, &ct, tokenID, "transfer", fmt.Sprintf(`{"to":"%s","amount":"500"}`, holder), owner, 0, true)
 	call(t, &ct, tokenID, "approve",
@@ -638,15 +633,13 @@ func TestCovStake_FunderIsOptional(t *testing.T) {
 }
 
 // R15's cooldown check happens inside C1 against an epochLen the OPERATOR supplies,
-// and C1 cannot verify it: the deploy order puts C1 before C2, because stake must
-// exist before C2's genesis or epoch 0's yield is funded-but-unclaimable. C7 is the
-// first contract that knows both schedules — and the one R15 protects — so it does
-// the check.
-func TestCovStake_C7RejectsAStakeSourceOnTheWrongSchedule(t *testing.T) {
+// and C1 cannot verify it at init: the deploy order puts C1 before C2, because stake
+// must exist before C2's genesis or epoch 0's yield is funded-but-unclaimable.
+// adoptSchedule is the first moment it can compare against the real schedule.
+func TestCovStake_AdoptRejectsTheWrongSchedule(t *testing.T) {
 	ct := c17NewTest(t, map[string]string{
 		c17C1: c17C1Only,
 		c17C2: "../c2-emission/artifacts/main.wasm",
-		c17C7: "../c7-yield/artifacts/main.wasm",
 	})
 	fundC2Pool(t, &ct, tokenID, c17C2, "1000000", 0)
 	call(t, &ct, c17C2, "init", fmt.Sprintf(
@@ -654,7 +647,7 @@ func TestCovStake_C7RejectsAStakeSourceOnTheWrongSchedule(t *testing.T) {
 			`"blocksPerYear":"100","dustBucket":"y","timelock":"5",`+
 			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
-			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C7), c17Owner, 0, true)
+			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C1), c17Owner, 0, true)
 
 	// C1 deployed against a DIFFERENT epoch length than the emission schedule. Its own
 	// R15 check passed (cooldown 7 > epochLen 5), but against a fiction.
@@ -662,51 +655,12 @@ func TestCovStake_C7RejectsAStakeSourceOnTheWrongSchedule(t *testing.T) {
 		`{"token":"%s","kind":"0","cooldown":"7","epochLen":"5","allow":""}`, tokenID),
 		c17Owner, 0, true)
 
-	// Adoption is the first moment C1 can compare its supplied epochLen against the
-	// real one, and it must refuse: cooldown 7 does NOT exceed the real epoch of 10, so
-	// a staker could capture a full epoch of yield and exit. This is strictly earlier
-	// than C7's init, which is where the mismatch used to surface.
-	call(t, &ct, c17C1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c17C2), c17Owner, 0, false)
+	// Adoption must refuse: cooldown 7 does NOT exceed the real epoch of 10, so a
+	// staker could capture a full epoch of yield and exit.
+	call(t, &ct, c17C1, "adoptSchedule",
+		fmt.Sprintf(`{"funder":"%s","bucket":"y"}`, c17C2), c17Owner, 0, false)
 
-	// And C7 refuses in turn. The failed adoption left C1 with no schedule at all, so
-	// it can supply neither an R15 guarantee nor an exact yield denominator.
-	call(t, &ct, c17C7, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
-			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
-		tokenID, c17C2, c17C1), c17Owner, 0, false)
-}
-
-// C7 must REFUSE a stakeSource that cannot supply an exact denominator — and the
-// refusal has to be C7's OWN diagnostic, not a nested abort from inside C1.
-//
-// scheduleInfo is deliberately free of assertInit, because a nested abort reverts the
-// CALLER's transaction: "C1 is not ready" would surface as an unexplained C7 deploy
-// failure. The diagnostic must not be the thing that breaks the deploy.
-//
-// This test asserted the OPPOSITE until the exact-denominator work — that an
-// uninitialised C1 did not block C7. That was right while C7 could fall back to
-// min(Σa,Σb); it cannot now, and accepting such a C1 would silently strand part of
-// every epoch and bring the claim deadline back with it.
-func TestCovStake_C7RefusesAStakeSourceWithNoSchedule(t *testing.T) {
-	ct := c17NewTest(t, map[string]string{
-		c17C1: c17C1Only,
-		c17C2: "../c2-emission/artifacts/main.wasm",
-		c17C7: "../c7-yield/artifacts/main.wasm",
-	})
-	fundC2Pool(t, &ct, tokenID, c17C2, "1000000", 0)
-	call(t, &ct, c17C2, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000",`+
-			`"blocksPerYear":"100","dustBucket":"y","timelock":"5",`+
-			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1",`+
-			`"vetoMode":"0","vetoAuth":"hive:v","vetoThreshold":"1",`+
-			`"buckets":"y:contract:%s:10000"}`, tokenID, c17C7), c17Owner, 0, true)
-
-	// C1 registered but NEVER initialised, so it has no schedule and records nothing.
-	res := call(t, &ct, c17C7, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:tre",`+
-			`"guardianMode":"0","guardianAuth":"hive:g","guardianThreshold":"1"}`,
-		tokenID, c17C2, c17C1), c17Owner, 0, false)
-	assert.Contains(t, res.ErrMsg, "no adopted schedule",
-		"the refusal must be C7's own check — an assertInit inside C1.scheduleInfo would "+
-			"revert the whole transaction with an unrelated message instead")
+	// The failed adoption leaves C1 with no schedule, so it can supply neither an R15
+	// guarantee nor an exact yield denominator — and yield funding stays shut.
+	call(t, &ct, c17C1, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 100, false)
 }

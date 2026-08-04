@@ -10,32 +10,34 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Staking-yield slice (plan Profile-1 trustless core): token + C1 staking + C2
-// emission + C7 yield. Proves allowance staking, height-checkpointed stake reads,
-// and pro-rata trustless yield (no reporter). alice stakes 600, bob 400; one epoch
-// mints 100000 all to C7; claims split 60000/40000 by stake.
+// Staking-yield slice (plan Profile-1 trustless core): token + C1 + C2 emission.
+// Proves allowance staking, height-checkpointed stake reads, and pro-rata trustless
+// yield (no reporter). alice stakes 600, bob 400; one epoch releases 100000, all to
+// the yield bucket; claims split 60000/40000 by stake.
+//
+// Yield used to be a separate contract; it now lives in C1, so the staking source and
+// the payer are one id.
 func TestStakingYieldSlice(t *testing.T) {
-	const (
-		c1ID = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
-		c7ID = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
-	)
+	const c1ID = "vsc1BfqCB2b5ppiq4snQP74joWrJ3BMUN58pn9"
 	os.RemoveAll("data/badger")
 	ct := test_utils.NewContractTest()
 	t.Cleanup(func() { ct.DataLayer.Stop() })
 	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
 	ct.RegisterContract(c1ID, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(c7ID, owner, read("../c7-yield/artifacts/main.wasm"))
 
 	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	call(t, &ct, c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":""}`, tokenID), owner, 0, true)
-	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, c7ID)
+	call(t, &ct, c1ID, "init", fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"2","epochLen":"1","allow":"",`+
+			`"treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian",`+
+			`"guardianThreshold":"1"}`, tokenID), owner, 0, true)
+	c2init := fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"yield","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"yield:contract:%s:10000"}`, tokenID, c1ID)
 	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
 	call(t, &ct, c2ID, "init", c2init, owner, 0, true)
-	// C7 requires its stakeSource to have adopted the emission schedule:
-	// without it C1 records no drawdowns and the yield denominator over-counts.
-	call(t, &ct, c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, c2ID), owner, 0, true)
-	call(t, &ct, c7ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`, tokenID, c2ID, c1ID), owner, 0, true)
+	// Arms the drawdown accumulator (the exact yield denominator) AND the funding
+	// path: both name things that only exist once C2 is initialised.
+	call(t, &ct, c1ID, "adoptSchedule",
+		fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), owner, 0, true)
 
 	// mint 1000 to owner, hand out to alice/bob (all before ownership handover)
 	call(t, &ct, tokenID, "mint", `{"amount":"1000"}`, owner, 0, true)
@@ -52,13 +54,13 @@ func TestStakingYieldSlice(t *testing.T) {
 	// hand token ownership to C2
 	call(t, &ct, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), owner, 0, true)
 
-	// keeper pokes epoch 0 (h=1) → 100000 minted, all to C7; C7 pulls it
+	// keeper pokes epoch 0 (h=1) → 100000 to the yield bucket; C1 pulls it
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
-	call(t, &ct, c7ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
+	call(t, &ct, c1ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
 
 	// pro-rata yield claims (h_e for epoch 0 = 0; stakes recorded at height 0)
-	ca := call(t, &ct, c7ID, "claim", `{"epoch":"0"}`, "hive:alice", 2, true)
-	cb := call(t, &ct, c7ID, "claim", `{"epoch":"0"}`, "hive:bob", 2, true)
+	ca := call(t, &ct, c1ID, "claimYield", `{"epoch":"0"}`, "hive:alice", 2, true)
+	cb := call(t, &ct, c1ID, "claimYield", `{"epoch":"0"}`, "hive:bob", 2, true)
 	assert.Contains(t, ca.Ret, `"60000"`)
 	assert.Contains(t, cb.Ret, `"40000"`)
 

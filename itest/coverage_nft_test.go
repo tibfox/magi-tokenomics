@@ -25,7 +25,7 @@ import (
 // "1" at init.
 //
 // These tests prove the gate end-to-end on the real VSC engine:
-//   - every one of the 6 contracts rejects kind "1" at init, with the explicit
+//   - every one of the 3 contracts rejects kind "1" at init, with the explicit
 //     NFT-unsupported message (not a generic parse failure);
 //   - unknown/absent kinds are rejected too (no silent fallthrough to fungible);
 //   - a non-empty tokenId is rejected (it only ever meant "the NFT edition id");
@@ -37,9 +37,6 @@ const (
 	nftC1ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk1"
 	nftC2ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk2"
 	nftC3ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk3"
-	nftC5ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk5"
-	nftC6ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk6"
-	nftC7ID    = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSNFTk7"
 	nftOwner   = "hive:tibfox"
 )
 
@@ -57,21 +54,13 @@ func nftInitPayloads() []struct {
 		tmpl string
 	}{
 		{"c1-staking", nftC1ID,
-			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","cooldown":"2","epochLen":"1","allow":""}`, nftTokenID)},
+			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","cooldown":"2","epochLen":"1","allow":"","maxAirdrop":"1000000"}`, nftTokenID)},
 		{"c2-emission", nftC2ID,
 			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"1","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:6000,yield:contract:%s:4000"}`,
-				nftTokenID, nftC3ID, nftC7ID)},
+				nftTokenID, nftC3ID, nftC1ID)},
 		{"c3-distributor", nftC3ID,
-			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
+			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","funder":"%s","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
 				nftTokenID, nftC2ID)},
-		{"c5-lp", nftC5ID,
-			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:lpreporter","reporterThreshold":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
-				nftTokenID, nftC2ID)},
-		{"c6-migration", nftC6ID,
-			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","maxAirdrop":"1000000"}`, nftTokenID)},
-		{"c7-yield", nftC7ID,
-			fmt.Sprintf(`{"token":"%s","kind":"%%KIND%%","tokenId":"%%TOKENID%%","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"1","treasury":"hive:treasury","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1"}`,
-				nftTokenID, nftC2ID, nftC1ID)},
 	}
 }
 
@@ -79,7 +68,7 @@ func nftPayload(tmpl, kind, tokenId string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(tmpl, "%KIND%", kind), "%TOKENID%", tokenId)
 }
 
-// nftNewChain boots a fresh engine with the token + all 6 framework contracts
+// nftNewChain boots a fresh engine with the token + all 3 framework contracts
 // registered and the token initialized.
 func nftNewChain(t *testing.T) *test_utils.ContractTest {
 	t.Helper()
@@ -90,9 +79,6 @@ func nftNewChain(t *testing.T) *test_utils.ContractTest {
 	ct.RegisterContract(nftC1ID, nftOwner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(nftC2ID, nftOwner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(nftC3ID, nftOwner, read("../c3-distributor/artifacts/main.wasm"))
-	ct.RegisterContract(nftC5ID, nftOwner, read("../c5-lp/artifacts/main.wasm"))
-	ct.RegisterContract(nftC6ID, nftOwner, read("../c6-migration/artifacts/main.wasm"))
-	ct.RegisterContract(nftC7ID, nftOwner, read("../c7-yield/artifacts/main.wasm"))
 	call(t, &ct, nftTokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, nftOwner, 0, true)
 	return &ct
 }
@@ -114,12 +100,12 @@ func TestCovNFT_EveryContractRejectsNFTKindAtInit(t *testing.T) {
 
 	// Phase 2: the SAME payloads with kind "0" init successfully. Ordering matters:
 	// C2 reads the token's getInfo, and C3/C5/C7 read C2's scheduleInfo at init.
-	order := map[string]int{"c1-staking": 0, "c2-emission": 1, "c3-distributor": 2, "c5-lp": 3, "c6-migration": 4, "c7-yield": 5}
+	order := map[string]int{"c1-staking": 0, "c2-emission": 1, "c3-distributor": 2}
 	seq := make([]struct {
 		name string
 		id   string
 		tmpl string
-	}, 6)
+	}, 3)
 	for _, c := range nftInitPayloads() {
 		seq[order[c.name]] = c
 	}
@@ -177,11 +163,11 @@ func TestCovNFT_FungibleEmissionAndClaimStillWorks(t *testing.T) {
 	fundC2Pool(t, ct, nftTokenID, nftC2ID, "500000000", 0)
 	call(t, ct, nftC2ID, "init", nftPayload(byName["c2-emission"], "0", ""), nftOwner, 0, true)
 	call(t, ct, nftC3ID, "init", nftPayload(byName["c3-distributor"], "0", ""), nftOwner, 0, true)
-	// C1 before C7, and adopting the schedule in between: C7 refuses a stakeSource that
-	// is not accumulating drawdowns, so it can no longer be initialised first.
+	call(t, ct, nftC3ID, "addChannel", `{"channel":"author","bucket":"author","window":"1",`+
+		`"reporterMode":"0","reporterAuth":"hive:reporter","reporterThreshold":"1"}`, nftOwner, 0, true)
 	call(t, ct, nftC1ID, "init", nftPayload(byName["c1-staking"], "0", ""), nftOwner, 0, true)
-	call(t, ct, nftC1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, nftC2ID), nftOwner, 0, true)
-	call(t, ct, nftC7ID, "init", nftPayload(byName["c7-yield"], "0", ""), nftOwner, 0, true)
+	call(t, ct, nftC1ID, "adoptSchedule",
+		fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, nftC2ID), nftOwner, 0, true)
 
 	// C2 becomes the token owner so it can mint.
 	call(t, ct, nftTokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, nftC2ID), nftOwner, 0, true)
@@ -189,11 +175,11 @@ func TestCovNFT_FungibleEmissionAndClaimStillWorks(t *testing.T) {
 	// epoch 0 at height 1 → emission = baseAnnual*epochLen/blocksPerYear = 100000,
 	// split 6000/4000 bps → author bucket (C3) = 60000.
 	call(t, ct, nftC2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
-	call(t, ct, nftC3ID, "pullFunding", `{"epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, ct, nftC3ID, "submitShares", `{"epoch":"0","page":"0","entries":"hive:alice:75,hive:bob:25"}`, "hive:reporter", 1, true)
-	call(t, ct, nftC3ID, "finalizeEpoch", `{"epoch":"0"}`, "hive:reporter", 1, true)
-	call(t, ct, nftC3ID, "claim", `{"epoch":"0"}`, "hive:alice", 2, true)
-	call(t, ct, nftC3ID, "claim", `{"epoch":"0"}`, "hive:bob", 2, true)
+	call(t, ct, nftC3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
+	call(t, ct, nftC3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:75,hive:bob:25"}`, "hive:reporter", 1, true)
+	call(t, ct, nftC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1, true)
+	call(t, ct, nftC3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 2, true)
+	call(t, ct, nftC3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 2, true)
 
 	a := call(t, ct, nftTokenID, "balanceOf", `{"account":"hive:alice"}`, "hive:x", 2, true)
 	b := call(t, ct, nftTokenID, "balanceOf", `{"account":"hive:bob"}`, "hive:x", 2, true)

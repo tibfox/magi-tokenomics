@@ -1128,6 +1128,49 @@ func AirdropBatch(payload *string) *string {
 	return str(out + `}`)
 }
 
+// sweepUnobligated — owner recovers airdrop float that is left over.
+//
+// The old standalone airdrop contract had this, and dropping it in the merge would
+// have stranded every unspent token permanently: float transferred in for a snapshot
+// that turned out smaller than budgeted has no other way out.
+//
+// It can only ever move the UNOBLIGATED remainder — balance less staked principal and
+// less yield that is funded but unclaimed — so it is the same envelope airdropBatch
+// pays within, and it cannot reach anybody's stake or anybody's unclaimed reward.
+// Owner-only with an active authority, to the treasury pinned at init.
+//
+//go:wasmexport sweepUnobligated
+func SweepUnobligated(_ *string) *string {
+	assertInit()
+	c := mustCaller()
+	ownerK := sdk.GetEnvKey("contract.owner")
+	if ownerK == nil || c != *ownerK {
+		sdk.Abort("only owner")
+	}
+	auth.RequireActive(c, reqAuths())
+	to := getStr(kTreasury)
+	if to == "" {
+		sdk.Abort("no treasury configured — nothing may be swept without a pinned destination")
+	}
+	// Reserve whatever airdrop capacity is still unspent. Sweeping it would leave a
+	// migration half-done with no float behind its remaining batches — the old
+	// standalone airdrop contract protected exactly this, and dropping the reservation
+	// would turn a mid-migration sweep into a silent failure of the batches that follow.
+	amt := unobligated()
+	if cap := getStr(kMaxAir); cap != "" {
+		reserved := new(big.Int).Sub(parseBig(cap), getBig(kAirTotal))
+		if reserved.Sign() > 0 {
+			amt = new(big.Int).Sub(amt, reserved)
+		}
+	}
+	if amt.Sign() <= 0 {
+		sdk.Abort("nothing sweepable: the balance is committed to stake, unclaimed yield, " +
+			"or the airdrop capacity still to be spent")
+	}
+	adapter.Transfer(asset(), to, amt)
+	return str(`{"swept":"` + amt.String() + `"}`)
+}
+
 //go:wasmexport airdropTotal
 func AirdropTotal(_ *string) *string {
 	assertInit()

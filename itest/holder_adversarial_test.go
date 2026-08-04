@@ -20,7 +20,6 @@ const (
 	hdC1  = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
 	hdC2  = "vsc1BmLNMQep1RaaUdYTPfEhqn1inESqNz4Ekt"
 	hdC3  = "vsc1Bnuikc8sJii5baG5gmxno4V2xTW7joi2vu"
-	hdC7  = "vsc1BpQYDaMwcfdsh9T7DSEHZvdma1XaSXMPPj"
 )
 
 func hdBal(t *testing.T, ct *test_utils.ContractTest, acct string, h uint64) *big.Int {
@@ -36,16 +35,14 @@ func hdBoot(t *testing.T, ct *test_utils.ContractTest) {
 	ct.RegisterContract(hdC1, owner, read("../c1-staking/artifacts/main.wasm"))
 	ct.RegisterContract(hdC2, owner, read("../c2-emission/artifacts/main.wasm"))
 	ct.RegisterContract(hdC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	ct.RegisterContract(hdC7, owner, read("../c7-yield/artifacts/main.wasm"))
 	call(t, ct, hdTok, "init", `{"name":"HD","symbol":"HD","decimals":0,"maxSupply":"100000000"}`, owner, 0, true)
 	fundC2Pool(t, ct, hdTok, hdC2, "10000000", 0)
-	call(t, ct, hdC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hdveto","vetoThreshold":"1","buckets":"author:contract:%s:5000,yield:contract:%s:5000"}`, hdTok, hdC3, hdC7), owner, 0, true)
+	call(t, ct, hdC2, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"10","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:hdveto","vetoThreshold":"1","buckets":"author:contract:%s:5000,yield:contract:%s:5000"}`, hdTok, hdC3, hdC1), owner, 0, true)
 	call(t, ct, hdC1, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"20","epochLen":"10","allow":""}`, hdTok), owner, 0, true)
 	call(t, ct, hdC3, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","window":"1","reporterMode":"0","reporterAuth":"hive:hdreporter","reporterThreshold":"1","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2), owner, 0, true)
 	// C7 requires its stakeSource to have adopted the emission schedule:
 	// without it C1 records no drawdowns and the yield denominator over-counts.
 	call(t, ct, hdC1, "adoptSchedule", fmt.Sprintf(`{"funder":"%s"}`, hdC2), owner, 0, true)
-	call(t, ct, hdC7, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","genesis":"0","epochLen":"10","treasury":"hive:hdtreasury","guardianMode":"0","guardianAuth":"hive:hdguard","guardianThreshold":"1"}`, hdTok, hdC2, hdC1), owner, 0, true)
 }
 
 func hdStake(t *testing.T, ct *test_utils.ContractTest, who, amt string, h uint64, ok bool) {
@@ -144,10 +141,10 @@ func TestHolder_MidEpochExitRestakeIsNotProfitable(t *testing.T) {
 	hdStake(t, &ct, "hive:hdgamer", "1000", 8, true)
 
 	call(t, &ct, hdC2, "distributeEpoch", ``, "hive:hdkeeper", 10, true)
-	call(t, &ct, hdC7, "pullFunding", `{"epoch":"0"}`, "hive:hdkeeper", 10, true)
+	call(t, &ct, hdC1, "pullFunding", `{"epoch":"0"}`, "hive:hdkeeper", 10, true)
 
-	g := call(t, &ct, hdC7, "claim", `{"epoch":"0"}`, "hive:hdgamer", 11, true)
-	h := call(t, &ct, hdC7, "claim", `{"epoch":"0"}`, "hive:hdhonest", 11, true)
+	g := call(t, &ct, hdC1, "claimYield", `{"epoch":"0"}`, "hive:hdgamer", 11, true)
+	h := call(t, &ct, hdC1, "claimYield", `{"epoch":"0"}`, "hive:hdhonest", 11, true)
 	gv := new(big.Int)
 	gv.SetString(pickJSON(g.Ret, "claimed"), 10)
 	hv := new(big.Int)
