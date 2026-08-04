@@ -248,3 +248,45 @@ func TestDevnetDrift_ArtifactsAreNewerThanSources(t *testing.T) {
 // The merge removed the twin: one distributor serves every reward channel, so there
 // is nothing left to keep in sync and the whole class of bug is gone. Deleting the
 // guard rather than leaving it passing vacuously, which would read as coverage.
+
+// A devnet suite reads state in two steps: fetch a set of keys, then look them up in
+// the returned map. If a key is renamed in the fetch but not the lookup, the lookup
+// returns nil and every assertion built on it passes VACUOUSLY — a SECURITY FAILURE
+// check that compares nil to nil and reports success.
+//
+// That is not hypothetical. Channel-scoping renamed `funded|0` to `funded|<ch>|0`;
+// two suites had the fetch updated and the lookup left behind, and both would have
+// reported "nothing was stolen" without comparing anything. One of them burned a
+// 16-minute devnet run before the mismatch surfaced as a confusing nil.
+//
+// TestDevnetDrift_EveryReferencedStateKeyExists cannot catch this: it checks key
+// PREFIXES against a contract, and `funded` is a prefix the distributor really does
+// write. Only the fetch/lookup correspondence exposes it.
+func TestDevnetDrift_EveryLookupMatchesAKeyThatWasRead(t *testing.T) {
+	reKeyLiteral := regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*\|[^"]*)"`)
+	reLookup := regexp.MustCompile(`\w+\["([^"]*\|[^"]*)"\]`)
+
+	for name, src := range devnetSources(t) {
+		// Strip the lookup expressions BEFORE collecting fetched keys. A lookup
+		// contains the key literal itself, so counting it as a fetch makes this guard
+		// vacuous in exactly the way it exists to prevent — which is what the first
+		// version of it did, and it passed happily against a known-broken file.
+		fetched := reLookup.ReplaceAllString(src, "")
+		read := map[string]bool{}
+		for _, m := range reKeyLiteral.FindAllStringSubmatch(fetched, -1) {
+			read[m[1]] = true
+		}
+		var bad []string
+		for _, m := range reLookup.FindAllStringSubmatch(src, -1) {
+			if !read[m[1]] {
+				bad = append(bad, m[1])
+			}
+		}
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s looks up state keys it never fetched: %v\n"+
+				"  the lookup returns nil, so any assertion on it passes without comparing anything",
+				name, uniqStrings(bad))
+		}
+	}
+}

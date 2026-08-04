@@ -301,15 +301,15 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	time.Sleep(20 * time.Second)
 
 	// ---------------- PHASE 4: nothing was stolen ----------------
-	c5after, err := d.GetStateByKeys(ctx, 1, c5ID, []string{"funded|lp|0", "totalShares|lp|0", "status|lp|0", "totalShares|1", "unallocated"})
+	c5after, err := d.GetStateByKeys(ctx, 1, c5ID, []string{"funded|lp|0", "totalShares|lp|0", "status|lp|0", "totalShares|lp|1", "unallocated"})
 	if err != nil {
 		t.Fatalf("read c5 after attacks: %v", err)
 	}
 	t.Logf("C5 after attacks: %v", c5after)
-	if fmt.Sprintf("%v", c5after["funded|0"]) != c5Funded {
-		t.Fatalf("SECURITY FAILURE: C5 epoch-0 funding changed %q -> %v", c5Funded, c5after["funded|0"])
+	if fmt.Sprintf("%v", c5after["funded|lp|0"]) != c5Funded {
+		t.Fatalf("SECURITY FAILURE: C5 epoch-0 funding changed %q -> %v", c5Funded, c5after["funded|lp|0"])
 	}
-	if v := fmt.Sprintf("%v", c5after["totalShares|1"]); v != "" && v != "<nil>" && v != "0" {
+	if v := fmt.Sprintf("%v", c5after["totalShares|lp|1"]); v != "" && v != "<nil>" && v != "0" {
 		t.Fatalf("SECURITY FAILURE: attacker injected LP shares into epoch 1: %v", v)
 	}
 

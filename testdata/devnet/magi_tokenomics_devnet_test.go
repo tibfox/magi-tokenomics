@@ -268,19 +268,19 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	}
 
 	c3after, err := d.GetStateByKeys(ctx, 1, c3ID,
-		[]string{"funded|author|0", "totalShares|author|0", "status|author|0", "funded|1", "totalShares|1"})
+		[]string{"funded|author|0", "totalShares|author|0", "status|author|0", "funded|author|1", "totalShares|author|1"})
 	if err != nil {
 		t.Fatalf("read c3 after attacks: %v", err)
 	}
 	t.Logf("C3 state after attacks: %v", c3after)
-	if fmt.Sprintf("%v", c3after["funded|0"]) != funded {
-		t.Fatalf("SECURITY FAILURE: epoch-0 funding changed %q -> %v", funded, c3after["funded|0"])
+	if fmt.Sprintf("%v", c3after["funded|author|0"]) != funded {
+		t.Fatalf("SECURITY FAILURE: epoch-0 funding changed %q -> %v", funded, c3after["funded|author|0"])
 	}
-	if ts := fmt.Sprintf("%v", c3after["totalShares|0"]); ts != shares {
+	if ts := fmt.Sprintf("%v", c3after["totalShares|author|0"]); ts != shares {
 		t.Fatalf("SECURITY FAILURE: epoch-0 shares mutated: %v", ts)
 	}
 	// the attacker's fake epoch-1 shares must never have been recorded
-	if v := fmt.Sprintf("%v", c3after["totalShares|1"]); v != "" && v != "<nil>" && v != "0" {
+	if v := fmt.Sprintf("%v", c3after["totalShares|author|1"]); v != "" && v != "<nil>" && v != "0" {
 		t.Fatalf("SECURITY FAILURE: attacker injected shares into epoch 1: %v", v)
 	}
 
