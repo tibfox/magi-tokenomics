@@ -290,3 +290,142 @@ func TestDevnetDrift_EveryLookupMatchesAKeyThatWasRead(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// An owner-only action must be sent FROM the node that deployed the contract.
+//
+// magi_full spreads the four deploys across nodes so no single account carries every
+// 10 HBD fee, which means the contract owner differs per contract. Its generic `call`
+// helper hardcodes node 1, so using it for an owner-only action aborts with "only
+// contract owner can ..." — and because the suites confirm progress by waiting for a
+// state key, the symptom is a silent four-minute timeout, not an error. That cost a
+// full 17-minute run on `adoptSchedule`.
+//
+// The check resolves the owner node from the `dep(...)` call that created each contract
+// id and compares it against the node each call site sends from. Suites that deploy
+// everything from one node resolve to no mismatch and cost nothing.
+
+// ownerOnlyActions maps contract dir -> action names whose body compares
+// contract.owner against msg.caller.
+func ownerOnlyActions(t *testing.T) map[string]map[string]bool {
+	t.Helper()
+	reExport := regexp.MustCompile(`//go:wasmexport (\w+)\s*\nfunc \w+\([^)]*\)[^{]*\{`)
+	out := map[string]map[string]bool{}
+	for name, src := range contractSourcesByName(t) {
+		acts := map[string]bool{}
+		for _, loc := range reExport.FindAllStringSubmatchIndex(src, -1) {
+			act := src[loc[2]:loc[3]]
+			// walk the function body by brace depth from the opening brace
+			depth, end := 0, loc[1]-1
+			for i := loc[1] - 1; i < len(src); i++ {
+				switch src[i] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				}
+				if depth == 0 && i > loc[1]-1 {
+					end = i
+					break
+				}
+			}
+			if strings.Contains(src[loc[1]-1:end], "contract.owner") {
+				acts[act] = true
+			}
+		}
+		out[name] = acts
+	}
+	return out
+}
+
+func TestDevnetDrift_OwnerOnlyActionsAreCalledFromTheOwnerNode(t *testing.T) {
+	ownerOnly := ownerOnlyActions(t)
+	total := 0
+	for _, acts := range ownerOnly {
+		total += len(acts)
+	}
+	assert.NotZero(t, total, "found no owner-gated actions in any contract — the scan is broken, not the suites")
+
+	// c1ID := dep("magi-c1-staking", magiWasm(t, "..."), 2)
+	reDep := regexp.MustCompile(`(?m)^\s*(\w+) := dep\(.*,\s*(\d+)\)\s*$`)
+	// call := func(id, action, payload, what string) { callN(1, id, ...) }
+	reCallBinding := regexp.MustCompile(`call := func\([^)]*\)[^{]*\{\s*callN\((\d+),`)
+	reCall := regexp.MustCompile(`\bcall\((\w+),\s*"([a-zA-Z][A-Za-z0-9]*)"`)
+	reCallN := regexp.MustCompile(`\bcallN\((\d+),\s*(\w+),\s*"([a-zA-Z][A-Za-z0-9]*)"`)
+
+	checked := 0
+	for name, src := range devnetSources(t) {
+		owner := map[string]int{}
+		for _, m := range reDep.FindAllStringSubmatch(src, -1) {
+			owner[m[1]] = atoiOr(m[2], 0)
+		}
+		if len(owner) == 0 {
+			continue // single-node suite: the generic caller is always the owner
+		}
+		callNode := 1
+		if m := reCallBinding.FindStringSubmatch(src); m != nil {
+			callNode = atoiOr(m[1], 1)
+		}
+
+		type site struct {
+			v, act string
+			node   int
+		}
+		sites := []site{}
+		for _, m := range reCall.FindAllStringSubmatch(src, -1) {
+			sites = append(sites, site{m[1], m[2], callNode})
+		}
+		for _, m := range reCallN.FindAllStringSubmatch(src, -1) {
+			sites = append(sites, site{m[2], m[3], atoiOr(m[1], 0)})
+		}
+
+		bad := []string{}
+		for _, s := range sites {
+			c := contractOfVar(s.v)
+			if c == "" || !ownerOnly[c][s.act] {
+				continue
+			}
+			want, ok := owner[s.v]
+			if !ok {
+				continue
+			}
+			checked++
+			if s.node != want {
+				bad = append(bad, s.act+" on "+s.v+" sent from node "+
+					itoa(s.node)+", but "+s.v+" was deployed by node "+itoa(want))
+			}
+		}
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s calls owner-only actions from a non-owner node: %v\n"+
+				"  these abort with \"only contract owner can ...\"; use callOwner(...) instead.\n"+
+				"  the suite will not report an error — it will hang on the confirming waitKey",
+				name, uniqStrings(bad))
+		}
+	}
+	assert.NotZero(t, checked,
+		"resolved no owner-only call sites at all — the regexes stopped matching, so this guard is vacuous")
+}
+
+func atoiOr(s string, def int) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return def
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	out := ""
+	for n > 0 {
+		out = string(rune('0'+n%10)) + out
+		n /= 10
+	}
+	return out
+}
