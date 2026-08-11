@@ -747,3 +747,90 @@ done:
 	}
 	return strings.TrimSpace(expr), pipes
 }
+
+// ---------------------------------------------------------------------------
+// An action must be exported by the contract it is SENT TO, not merely by some contract.
+//
+// EveryReferencedActionExists asks whether an action exists anywhere, which is the
+// wrong question once contracts share vocabulary: `claim` is a distributor entrypoint,
+// C1 has claimYield, and calling claim on C1 passed that check while aborting on chain.
+// It cost a run that had already reached PHASE 7.
+//
+// This attributes each call to its contract wherever the id is a known variable, and
+// says nothing where it cannot tell — a call through a helper parameter is invisible
+// here, which is why the channel guard covers that shape separately.
+func TestDevnetDrift_ActionsExistOnTheContractTheyAreSentTo(t *testing.T) {
+	exports := map[string]map[string]bool{}
+	for name, src := range contractSourcesByName(t) {
+		set := map[string]bool{}
+		for _, m := range regexp.MustCompile(`//go:wasmexport (\w+)`).FindAllStringSubmatch(src, -1) {
+			set[m[1]] = true
+		}
+		exports[name] = set
+	}
+	assert.NotEmpty(t, exports["c1-staking"], "no exports found for C1 — the scan is broken")
+
+	// init is universal and never declared with //go:wasmexport in these contracts
+	universal := map[string]bool{"init": true}
+
+	// Shape alone cannot identify a call. `{"distributor": c3ID, "channel": "content"}`
+	// is a map entry and `waitValue(c3ID, "unallocated", ...)` reads a state key, yet
+	// both look exactly like <id>, "<name>". Between them they produced five confident
+	// reports of actions that were never calls. So gate on the HELPER instead: only
+	// something named like a call or a send actually sends one.
+	reCallHelper := regexp.MustCompile(`\b(\w*[Cc]all\w*|send\w*)\(`)
+	reIDAction := regexp.MustCompile(`\b(c[1-7]ID|distID)\s*,\s*"([a-zA-Z][A-Za-z0-9]*)"\s*,`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		bad := []string{}
+		// collect (idVar, action) pairs that appear inside a call helper's arguments
+		pairs := [][2]string{}
+		for _, h := range reCallHelper.FindAllStringIndex(src, -1) {
+			depth, end := 0, len(src)
+			for i := h[1] - 1; i < len(src); i++ {
+				switch src[i] {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+				if depth == 0 && i > h[1]-1 {
+					end = i
+					break
+				}
+			}
+			for _, m := range reIDAction.FindAllStringSubmatch(src[h[1]:end], -1) {
+				pairs = append(pairs, [2]string{m[1], m[2]})
+			}
+		}
+		for _, p := range pairs {
+			idVar, act := p[0], p[1]
+			c := contractOfVar(idVar)
+			if c == "" || universal[act] {
+				continue
+			}
+			checked++
+			if exports[c][act] {
+				continue
+			}
+			// where does it actually live? that is the useful half of the message
+			owner := "no contract"
+			for cn, set := range exports {
+				if set[act] {
+					owner = cn
+					break
+				}
+			}
+			bad = append(bad, act+" on "+idVar+" ("+c+") — exported by "+owner)
+		}
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s calls actions the target contract does not export: %v\n"+
+				"  the broadcast succeeds and the call aborts on chain, so the suite sees\n"+
+				"  a state key that never appears rather than an error",
+				name, uniqStrings(bad))
+		}
+	}
+	assert.NotZero(t, checked, "attributed no calls to a contract — this guard is vacuous")
+}
