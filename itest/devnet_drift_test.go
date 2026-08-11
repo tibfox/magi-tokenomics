@@ -429,3 +429,133 @@ func itoa(n int) string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// Channel-scoped calls must name a channel, and channel-scoped keys must carry one.
+//
+// The merge turned content and LP from two deployed contracts into two CHANNELS on
+// one, which made `channel` a required component of eight distributor entrypoints and
+// eight state-key prefixes. The port updated the call sites it touched and left the
+// rest, so six suites still had calls that abort in mustChannel and keys that address
+// nothing — and a key that addresses nothing does not fail loudly, it returns "" and
+// the assertion compares "" to "".
+//
+// Both halves are derived from the contract source rather than hand-listed, so adding
+// a channel-scoped entrypoint or key extends the check automatically.
+func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
+	distSrc := contractSourcesByName(t)["c3-distributor"]
+
+	// entrypoints that resolve a channel from the payload
+	needChannel := map[string]bool{}
+	reExport := regexp.MustCompile(`//go:wasmexport (\w+)\s*\nfunc \w+\([^)]*\)[^{]*\{`)
+	for _, loc := range reExport.FindAllStringSubmatchIndex(distSrc, -1) {
+		act := distSrc[loc[2]:loc[3]]
+		depth, end := 0, loc[1]-1
+		for i := loc[1] - 1; i < len(distSrc); i++ {
+			switch distSrc[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			if depth == 0 && i > loc[1]-1 {
+				end = i
+				break
+			}
+		}
+		if strings.Contains(distSrc[loc[1]-1:end], "mustChannel(") {
+			needChannel[act] = true
+		}
+	}
+	assert.NotEmpty(t, needChannel, "no entrypoint resolves a channel — the scan is broken, not the suites")
+
+	// Key prefixes built as "prefix|" + ch. Two shapes, and the difference matters:
+	// ch_bucket|<ch> ends at the channel, while funded|<ch>|<ep> continues. Only the
+	// second kind needs a separator after the channel, so requiring one everywhere
+	// would flag every correct ch_bucket| read.
+	scoped, withEpoch := map[string]bool{}, map[string]bool{}
+	for _, m := range regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|"\s*\+\s*ch\b\s*(\+\s*"\|")?`).FindAllStringSubmatch(distSrc, -1) {
+		scoped[m[1]] = true
+		if m[2] != "" {
+			withEpoch[m[1]] = true
+		}
+	}
+	assert.NotEmpty(t, scoped, "no channel-scoped key prefixes found — the scan is broken")
+	assert.NotEmpty(t, withEpoch, "no channel+epoch key prefixes found — the scan is broken")
+
+	reDistVar := regexp.MustCompile(`\b(c3ID|c5ID|distID)\s*,\s*"(\w+)"`)
+	checkedCalls, checkedKeys := 0, 0
+
+	for name, src := range devnetSources(t) {
+		bad := []string{}
+
+		// --- calls: the payload that follows must mention "channel" ---
+		for _, m := range reDistVar.FindAllStringSubmatchIndex(src, -1) {
+			act := src[m[4]:m[5]]
+			if !needChannel[act] {
+				continue
+			}
+			checkedCalls++
+			tail := src[m[1]:min(m[1]+400, len(src))]
+			payload := ""
+			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
+				payload = bt[1]
+			}
+			if !strings.Contains(payload, "{") {
+				// payload passed as an identifier — resolve its literal definition
+				if idm := regexp.MustCompile(`^\s*,\s*([A-Za-z_]\w*)\s*[,)]`).FindStringSubmatch(tail); idm != nil {
+					def := regexp.MustCompile(`\b` + idm[1] + "\\s*(?::?=)\\s*(?:fmt\\.Sprintf\\()?`([^`]*)`")
+					if dm := def.FindStringSubmatch(src); dm != nil {
+						payload = dm[1]
+					}
+				}
+			}
+			if payload == "" {
+				continue // could not resolve; the key check below still covers this suite
+			}
+			if !strings.Contains(payload, `"channel"`) {
+				bad = append(bad, act+" payload has no \"channel\": "+trunc(payload, 60))
+			}
+		}
+
+		// --- keys: a channel-scoped prefix needs a component after the prefix ---
+		for _, m := range regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|([^"]*)"`).FindAllStringSubmatch(src, -1) {
+			if !scoped[m[1]] {
+				continue
+			}
+			checkedKeys++
+			// "prefix|" alone is a concatenation — the channel comes from a variable
+			if m[2] == "" || !withEpoch[m[1]] {
+				continue
+			}
+			// a channel+epoch key needs a separator after the channel
+			if !strings.Contains(m[2], "|") {
+				bad = append(bad, "key \""+m[1]+"|"+m[2]+"\" has no channel component")
+			}
+		}
+
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s has channel-scoped calls or keys without a channel: %v\n"+
+				"  calls abort in mustChannel; keys silently address nothing and the\n"+
+				"  assertion then compares \"\" to \"\" and passes",
+				name, uniqStrings(bad))
+		}
+	}
+	assert.NotZero(t, checkedCalls, "resolved no channel-scoped call sites — this guard is vacuous")
+	assert.NotZero(t, checkedKeys, "resolved no channel-scoped keys — this guard is vacuous")
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
