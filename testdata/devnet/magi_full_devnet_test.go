@@ -390,7 +390,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		"contracts": map[string]any{"distributor": c3ID, "channel": "content", "funder": c2ID, "stake": c1ID},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{"tag": "magitribe", "limit": 100,
-			"attribution": "cashout", "weight": "hive_rshares", "exclude": []string{}},
+			"weight": "hive_rshares", "exclude": []string{}},
 		"shares": map[string]any{"author_reward_bps": 5000, "author_curve": "1/1",
 			"curation_curve": "1/2", "muted": []string{}},
 		"page": map[string]any{"max_entries": 4, "max_bytes": 3800},

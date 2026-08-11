@@ -380,7 +380,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{
 			"tag": "magitribe", "limit": 100,
-			"attribution": "cashout", "weight": "hive_rshares", "exclude": []string{},
+			"weight": "hive_rshares", "exclude": []string{},
 		},
 		"shares": map[string]any{
 			"author_reward_bps": 5000, "author_curve": "1/1",

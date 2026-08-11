@@ -559,3 +559,75 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------------------
+// Every key a suite puts in reporter.json must exist in the reporter's config struct.
+//
+// The reporter decodes with DisallowUnknownFields, deliberately, so a typo'd or
+// retired key is a hard error rather than a silent default. That is the right call for
+// operators and a trap for the suites: `attribution` was removed from the config when
+// scoring moved to strictly-after-payout, and two suites kept sending it. The reporter
+// then refused to start 17 minutes into a devnet run, at PHASE 6, having already
+// deployed four contracts and emitted an epoch.
+//
+// The known-key set is read from the struct tags, so retiring a field automatically
+// starts failing any suite that still sends it — which is exactly the signal that was
+// missing.
+func TestDevnetDrift_ReporterConfigKeysExist(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "reporter", "cmd", "reporter", "config.go"))
+	if err != nil {
+		t.Skipf("reporter config not present: %v", err)
+	}
+	known := map[string]bool{}
+	for _, m := range regexp.MustCompile(`json:"([a-z_0-9]+)"`).FindAllStringSubmatch(string(b), -1) {
+		known[m[1]] = true
+	}
+	assert.NotEmpty(t, known, "no json tags found in the reporter config — the scan is broken")
+
+	// Only the literal that BECOMES reporter.json, not every map in the file: these
+	// suites also carry Hive fixture JSON, whose keys are not config keys.
+	reCfgStart := regexp.MustCompile(`(?:json\.Marshal(?:Indent)?\(map\[string\]any\{|reporterCfg\s*:?=\s*map\[string\]any\{)`)
+	checked := 0
+	for name, src := range devnetSources(t) {
+		if !strings.Contains(src, "reporter.json") {
+			continue
+		}
+		for _, loc := range reCfgStart.FindAllStringIndex(src, -1) {
+			// balanced-brace scan from the opening { of the map literal
+			open := strings.LastIndex(src[:loc[1]], "{")
+			depth, end := 0, len(src)
+			for i := open; i < len(src); i++ {
+				switch src[i] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				}
+				if depth == 0 {
+					end = i
+					break
+				}
+			}
+			body := src[open:end]
+			// a config literal names the top-level sections; anything else is fixture data
+			if !strings.Contains(body, `"submit"`) && !strings.Contains(body, `"contracts"`) {
+				continue
+			}
+			bad := []string{}
+			for _, m := range regexp.MustCompile(`"([a-z_0-9]+)"\s*:`).FindAllStringSubmatch(body, -1) {
+				checked++
+				if !known[m[1]] {
+					bad = append(bad, m[1])
+				}
+			}
+			if len(bad) > 0 {
+				sort.Strings(bad)
+				t.Errorf("%s sends reporter.json keys that no longer exist in the config struct: %v\n"+
+					"  the reporter decodes with DisallowUnknownFields, so it refuses to start —\n"+
+					"  mid-run, after the contracts are already deployed",
+					name, uniqStrings(bad))
+			}
+		}
+	}
+	assert.NotZero(t, checked, "found no reporter.json config literal — this guard is vacuous")
+}
