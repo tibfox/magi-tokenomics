@@ -24,10 +24,12 @@ import (
 //
 //	PHASE 1  deploy token + C1 + C2 + distributor (spread across nodes so no single
 //	         account carries every 10 HBD deploy fee)
-//	PHASE 2  bootstrap: mint, fund C1's airdrop float, airdrop to holders, hand token to C2
-//	PHASE 3  init C1, then STAKE, then init C2 and the distributor — the stake must
-//	         exist before C2 sets genesis, or epoch-0 yield is unclaimable
-//	PHASE 4  C2 splits 50/30/20 into content/LP/yield
+//	PHASE 2  bootstrap: mint, fund C1's airdrop float, init C1 (one init, all three
+//	         roles), airdrop to holders, hand the token to C2
+//	PHASE 3  STAKE — this must happen before C2 sets genesis, or epoch-0 yield is
+//	         unclaimable
+//	PHASE 4  init C2 (splitting 50/30/20 into content/LP/yield) and the distributor's
+//	         two channels; C1 then adopts the schedule and its yield bucket
 //	PHASE 5  one keeper poke funds all three buckets from a single emission
 //	PHASE 6  content via the REAL reporter binary; LP direct; yield trustless
 //	PHASE 7  claims + conservation invariants
@@ -258,19 +260,35 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	// ---------------- PHASE 2: bootstrap supply + airdrop ----------------
 	//
-	// C6 pays airdrops out of its OWN balance, so it must be funded while the
+	// The airdrop pays out of C1's OWN balance, so C1 must be funded while the
 	// deployer still owns the token — i.e. before ownership moves to C2.
 	initAs(tokenID, `{"name":"MagiFull","symbol":"MFULL","decimals":0,"maxSupply":"100000000"}`,
 		"owner", "token init")
 	// MintPayload carries only {amount}: mint credits the OWNER, it cannot target an
-	// address. Funding C6 is therefore mint-then-transfer, and both must happen
+	// address. Funding C1 is therefore mint-then-transfer, and both must happen
 	// while the deployer still owns the token.
 	callOwner(tokenID, "mint", `{"amount":"1000"}`, "mint 1000 to owner")
 	callOwner(tokenID, "transfer",
-		fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c1ID), "fund C6 with the airdrop float")
-	initAs(c1ID, fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"1000"}`, tokenID), "cfg_token", "C6 init")
+		fmt.Sprintf(`{"to":"contract:%s","amount":"1000"}`, c1ID), "fund C1 with the airdrop float")
+
+	// ONE init for all three of C1's roles, and it has to happen HERE — the airdrop
+	// below needs the contract live while the deployer still owns the token, and a
+	// contract may only be initialised once.
+	//
+	// Staking is the base role, so cooldown and epochLen are mandatory; yield and the
+	// airdrop are configured rather than switched on, which is why treasury/guardian
+	// (for sweepEmptyEpoch) and maxAirdrop appear in the same payload. `funder` is
+	// deliberately ABSENT: C2 does not exist yet, and C1's init cross-checks epochLen
+	// against the funder's schedule when one is named. The funder and yield bucket are
+	// adopted in PHASE 4 instead, once C2 is up.
+	initAs(c1ID, fmt.Sprintf(
+		`{"token":"%s","kind":"0","cooldown":"%d","epochLen":"%d","allow":"",`+
+			`"maxAirdrop":"1000","treasury":"hive:%s",`+
+			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+		tokenID, epochLen*3, epochLen, treasury, guardian), "cfg_token", "C1 init (staking+yield+airdrop)")
+
 	callOwner(c1ID, "airdropBatch", fmt.Sprintf(
-		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C6 airdrop")
+		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C1 airdrop")
 	// C2 no longer mints — it PULLS each epoch's emission from an account that has
 	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
 	// only the owner may mint. (C2 no longer needs to own the token at all; the
@@ -282,12 +300,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	callOwner(tokenID, "changeOwner",
 		fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token ownership -> C2")
 
-	// ---------------- PHASE 3: init the rest ----------------
-	initAs(c1ID, fmt.Sprintf(
-		`{"token":"%s","kind":"0","cooldown":"%d","epochLen":"%d","allow":""}`,
-		tokenID, epochLen*3, epochLen), "cfg_token", "C1 init")
-
-	// ---------------- PHASE 4: stake (BEFORE C2 init) ----------------
+	// ---------------- PHASE 3: stake (BEFORE C2 init) ----------------
 	//
 	// Ordering is load-bearing. C7 credits min(stakeAt(hStart), stakeAt(hEnd)) for
 	// the epoch, and `genesis` is whatever height C2 initialises at — so staking
@@ -299,6 +312,8 @@ func TestDevnetMagiFull(t *testing.T) {
 	callN(2, c1ID, "stake", `{"amount":"400"}`, "B stake 400")
 	waitValue(c1ID, "total_staked", "1000", "C1 total_staked")
 
+	// ---------------- PHASE 4: init C2 + the distributor's channels ----------
+	//
 	// One emission, split three ways: content 50%, LP 30%, yield 20%.
 	initAs(c2ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
@@ -326,15 +341,17 @@ func TestDevnetMagiFull(t *testing.T) {
 		waitKey(c3ID, "ch_bucket|"+ch.name, ch.name+" channel registered")
 	}
 	// C1 adopts the emission schedule now that C2 exists. This is what arms the
-	// per-epoch drawdown accumulator that gives C7 an EXACT yield denominator; C7's
-	// init refuses a stakeSource without it, because dividing by min(Σa,Σb) instead
-	// strands part of every epoch and is what forced the old claim deadline.
-	call(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), "C1 adopt schedule + yield bucket")
+	// per-epoch drawdown accumulator that gives yield an EXACT denominator; dividing
+	// by min(Σa,Σb) instead strands part of every epoch, which is what would force a
+	// claim deadline. It also names the bucket pullFunding draws from — until this
+	// call lands, C1 has staking and an airdrop but no way to fund yield.
+	// callOwner, NOT call: adoptSchedule is owner-only, and C1 is the one contract
+	// deployed from node 2 rather than node 1. Anchoring the schedule is exactly the
+	// kind of thing an outsider must not be able to do, so the generic node-1 caller
+	// gets refused here — see the C1 re-init row in PHASE 8 for the same guard.
+	callOwner(c1ID, "adoptSchedule", fmt.Sprintf(`{"funder":"%s","bucket":"yield"}`, c2ID), "C1 adopt schedule + yield bucket")
 	waitKey(c1ID, "cfg_genesis", "C1 schedule adopted")
-	initAs(c1ID, fmt.Sprintf(
-		`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s",`+
-			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
-		tokenID, c2ID, c1ID, treasury, guardian), "cfg_funder", "C7 init (yield)")
+	waitKey(c1ID, "cfg_bucket", "C1 yield bucket adopted")
 
 	// ---------------- PHASE 5: one poke funds three buckets ----------------
 	t.Logf("waiting for epoch 0 to close (block %d)...", genesis+epochLen)
@@ -344,12 +361,14 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	// emission = baseAnnual*epochLen/blocksPerYear = 1000000*10/1000 = 10000
 	// content 5000bps=5000, lp 3000bps=3000, yield 2000bps=2000
-	// NB: C2 keys allocations by bucket TARGET, not bucket name (addOwed uses the
-	// target string), so the key is owed|contract:<id>|<epoch>.
-	for _, b := range []struct{ name, id, want string }{
-		{"content", c3ID, "5000"}, {"lp", c3ID, "3000"}, {"yield", c1ID, "2000"},
+	//
+	// NB: C2 keys allocations by bucket NAME, not by target. It has to: content and lp
+	// are two channels on the SAME distributor, so a target-keyed ledger would collapse
+	// both into one entry and neither channel could tell what it was owed.
+	for _, b := range []struct{ name, want string }{
+		{"content", "5000"}, {"lp", "3000"}, {"yield", "2000"},
 	} {
-		waitValue(c2ID, "owed|contract:"+b.id+"|0", b.want, "C2 owed["+b.name+"]")
+		waitValue(c2ID, "owed|"+b.name+"|0", b.want, "C2 owed["+b.name+"]")
 	}
 
 	// ---------------- PHASE 6: three distributors, three mechanisms ----------
@@ -651,11 +670,25 @@ func TestDevnetMagiFull(t *testing.T) {
 			`{"from":"hive:%s","to":"hive:%s","amount":"1000"}`, holderA, outsider),
 			"C0 transferFrom without allowance (steal a holder's balance)"},
 
-		// --- C1 staking: custody must be untouchable ---
-		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"1","epochLen":"1","allow":"hive:%s"}`, tokenID, outsider), "C1 re-init (would reset the allowlist)"},
+		// --- C1: staking custody, yield, and the airdrop are all one contract now ---
+		//
+		// ONE re-init row covers all three roles. The payload below would, if it landed,
+		// reset the stakeFor allowlist, raise the airdrop cap to near-infinity AND
+		// repoint the sweep treasury at the attacker — a single "already initialized"
+		// guard is what stops all of it, so testing it three times proved nothing extra.
+		{c1ID, "init", fmt.Sprintf(
+			`{"token":"%s","kind":"0","cooldown":"1","epochLen":"1","allow":"hive:%s",`+
+				`"maxAirdrop":"99999999","treasury":"hive:%s",`+
+				`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`,
+			tokenID, outsider, outsider, outsider),
+			"C1 re-init (would reset the allowlist, raise the airdrop cap and seize the treasury)"},
 		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, outsider), "C1 stakeFor while not allowlisted"},
 		{c1ID, "unstake", `{"amount":"1000"}`, "C1 unstake stake they never made"},
 		{c1ID, "claimUnstaked", `{}`, "C1 claimUnstaked with nothing queued"},
+		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "C1 airdrop to self"},
+		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"1","entries":"hive:%s:1000"}`, outsider), "C1 replay the already-applied batch 1"},
+		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "C1 sweep a yield epoch with stakers (aborts on the stakers check, not on auth)"},
+		{c1ID, "claimYield", `{"epoch":"0"}`, "C1 claim yield with no stake"},
 
 		// --- C2 emission: the mint authority ---
 		{c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","epochLen":"1","baseAnnual":"9999999","blocksPerYear":"1","dustBucket":"x","timelock":"1","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1","buckets":"x:hive:%s:10000"}`, tokenID, outsider, treasury, outsider), "C2 re-init (would redirect every bucket)"},
@@ -677,23 +710,22 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "C3 claim with no share"},
 
-		// --- C5 LP distributor: same surface, separate instance ---
-		{c3ID, "init", distInitPayload, "C5 re-init"},
-		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "C5 push fraudulent shares"},
-		{c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "C5 finalize"},
-		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "C5 veto a legitimate epoch"},
-		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "C5 sweep the pot (valid nonce, so this reaches the guardian gate)"},
-		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "C5 claim with no share"},
-
-		// --- C6 migration ---
-		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","maxAirdrop":"99999999"}`, tokenID), "C6 re-init (would raise the airdrop cap)"},
-		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"9","entries":"hive:%s:1000"}`, outsider), "C6 airdrop to self"},
-		{c1ID, "airdropBatch", fmt.Sprintf(`{"batchId":"1","entries":"hive:%s:1000"}`, outsider), "C6 replay the already-applied batch 1"},
-
-		// --- C7 yield ---
-		{c1ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","funder":"%s","stakeSource":"%s","treasury":"hive:%s","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1"}`, tokenID, c2ID, c1ID, outsider, outsider), "C7 re-init (would repoint the treasury)"},
-		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "C7 sweep an epoch with stakers (aborts on the stakers check, not on auth)"},
-		{c1ID, "claimYield", `{"epoch":"0"}`, "C7 claim yield with no stake"},
+		// --- the LP channel: same contract, same surface, DIFFERENT channel ---
+		//
+		// This is the half of channel-scoping that matters adversarially: holding a
+		// reporter authority on `content` must buy nothing on `lp`. The rows are
+		// duplicated per channel deliberately, unlike the re-init above, because each
+		// one exercises a distinct per-channel authority record rather than a single
+		// contract-wide guard.
+		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "lp push fraudulent shares"},
+		{c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "lp finalize"},
+		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "lp veto a legitimate epoch"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "lp sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "lp claim with no share"},
+		{c3ID, "addChannel", fmt.Sprintf(
+			`{"channel":"pirate","bucket":"content","window":"1","reporterMode":"0",`+
+				`"reporterAuth":"hive:%s","reporterThreshold":"1","role":"content"}`, outsider),
+			"C3 register a channel of their own (would siphon the content bucket)"},
 	}
 
 	t.Logf("adversarial sweep: %d attacks from outsider hive:%s", len(attacks), outsider)
