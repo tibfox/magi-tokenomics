@@ -42,6 +42,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		t.Skip("skipping devnet test in short mode")
 	}
 	requireDocker(t)
+	requireDiskSpace(t)
 	if _, err := os.Stat(reporterBin); err != nil {
 		t.Fatalf("reporter binary missing at %s — build it first", reporterBin)
 	}

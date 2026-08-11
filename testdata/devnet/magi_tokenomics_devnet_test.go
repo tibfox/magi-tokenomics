@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -59,6 +60,38 @@ func magiDevnetConfig() *Config {
 	return cfg
 }
 
+// requireDiskSpace fails the test immediately when the filesystem cannot hold a run.
+//
+// A devnet run needs roughly 5 GB transiently: HAF's database, five node datadirs and
+// the mongo indexes. When it is not there, nothing says so — bring-up proceeds for
+// about seven minutes and then mongo aborts with
+//
+//	(OutOfDiskSpace) available disk space of N bytes is less than required minimum of 524288000
+//
+// surfacing as "starting devnet: genesis-elector: exit status 1", which reads like a
+// consensus problem and sent one investigation after the suite rather than the disk.
+// Checking up front turns seven minutes and a misleading error into one second and an
+// accurate one.
+//
+// The threshold is deliberately above mongo's own 500 MB floor: mongo checks only at
+// index creation, by which point HAF has already taken its share, so a disk that
+// passes mongo's check can still fail later in the run.
+func requireDiskSpace(t *testing.T) {
+	t.Helper()
+	const needBytes = 6 << 30 // 6 GiB
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(os.TempDir(), &st); err != nil {
+		t.Logf("could not stat the filesystem, proceeding anyway: %v", err)
+		return
+	}
+	avail := st.Bavail * uint64(st.Bsize)
+	if avail < needBytes {
+		t.Fatalf("only %.1f GiB free, a devnet run needs ~%.0f GiB — it would die ~7 minutes "+
+			"in with a mongo OutOfDiskSpace that looks like a genesis-election failure",
+			float64(avail)/(1<<30), float64(needBytes)/(1<<30))
+	}
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -79,6 +112,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		t.Skip("skipping devnet test in short mode")
 	}
 	requireDocker(t)
+	requireDiskSpace(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()

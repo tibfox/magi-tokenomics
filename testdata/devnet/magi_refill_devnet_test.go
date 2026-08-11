@@ -36,6 +36,7 @@ func TestDevnetMagiRefill(t *testing.T) {
 		t.Skip("skipping devnet test in short mode")
 	}
 	requireDocker(t)
+	requireDiskSpace(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()

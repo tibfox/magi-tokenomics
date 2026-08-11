@@ -241,6 +241,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 		t.Skip("skipping devnet test in short mode")
 	}
 	requireDocker(t)
+	requireDiskSpace(t)
 	if _, err := os.Stat(reporterBin); err != nil {
 		t.Fatalf("reporter binary missing at %s — build it: "+
 			"cd %s && GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter",

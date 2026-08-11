@@ -26,6 +26,7 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 		t.Skip("skipping devnet test in short mode")
 	}
 	requireDocker(t)
+	requireDiskSpace(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
 	defer cancel()
