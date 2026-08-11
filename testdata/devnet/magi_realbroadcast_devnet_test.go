@@ -223,9 +223,9 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 	// A reporter that printed success proves nothing; the chain acting on its
 	// self-signed transactions does.
 	for _, c := range []struct{ key, want, what string }{
-		{"funded|0", strconv.Itoa(emission), "C5 funded by the reporter's own poke+pull"},
-		{"totalShares|0", "4000", "shares applied from the reporter's own submitShares"},
-		{"status|0", "finalized", "epoch finalized by the reporter's own tx"},
+		{"funded|lp|0", strconv.Itoa(emission), "lp channel funded by the reporter's own poke+pull"},
+		{"totalShares|lp|0", "4000", "shares applied from the reporter's own submitShares"},
+		{"status|lp|0", "finalized", "epoch finalized by the reporter's own tx"},
 	} {
 		deadline := time.Now().Add(4 * time.Minute)
 		for {

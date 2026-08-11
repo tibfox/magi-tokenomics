@@ -420,11 +420,13 @@ func TestDevnetMagiFull(t *testing.T) {
 		callN(1, c.ContractID, c.Action, c.Payload, fmt.Sprintf("C3 reporter plan[%d] %s", i, c.Action))
 	}
 
-	// -- LP: shares pushed directly (C5 is byte-identical to C3; the reporter
-	//    path is already proven above, so this covers the direct-push mode) --
+	// -- LP: shares pushed directly. Same contract and same code as content above,
+	//    just a different channel — the reporter path is already proven, so this
+	//    covers the direct-push mode. --
 	call(c3ID, "submitShares", fmt.Sprintf(
-		`{"epoch":"0","page":"0","entries":"hive:%s:70,hive:%s:30"}`, holderA, holderB), "C5 LP shares")
-	call(c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "C5 finalize")
+		`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:70,hive:%s:30"}`,
+		holderA, holderB), "lp shares")
+	call(c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "lp finalize")
 
 	// ---------------- PHASE 7: claims, invariants, outsider ----------------
 	if st := waitKey(c3ID, "status|content|0", "C3 status"); st != "finalized" {
@@ -747,17 +749,31 @@ func TestDevnetMagiFull(t *testing.T) {
 		}
 	}
 
-	// nothing may have been created for the attacker anywhere
-	for _, c := range []struct{ id, name string }{{c3ID, "C3"}, {c3ID, "C5"}, {c1ID, "C7"}} {
-		if v := stateOf(c.id, "share|0|hive:"+outsider); v != "" && v != "0" {
-			t.Fatalf("%s granted the outsider a share: %s", c.name, v)
+	// Nothing may have been created for the attacker anywhere.
+	//
+	// The loop is over CHANNELS, not contract ids: content and lp share one distributor
+	// now, so every key needs the channel component or it addresses nothing.
+	for _, ch := range []string{"content", "lp"} {
+		if v := stateOf(c3ID, "share|"+ch+"|0|hive:"+outsider); v != "" && v != "0" {
+			t.Fatalf("%s channel granted the outsider a share: %s", ch, v)
 		}
-		if v := stateOf(c.id, "totalShares|1"); v != "" && v != "0" {
-			t.Fatalf("%s accepted epoch-1 shares from the outsider: %s", c.name, v)
+		if v := stateOf(c3ID, "totalShares|"+ch+"|1"); v != "" && v != "0" {
+			t.Fatalf("%s channel accepted epoch-1 shares from the outsider: %s", ch, v)
 		}
-		if v := stateOf(c.id, "status|1"); v != "" {
-			t.Fatalf("%s epoch 1 was finalized/cancelled by the outsider: %s", c.name, v)
+		if v := stateOf(c3ID, "status|"+ch+"|1"); v != "" {
+			t.Fatalf("%s channel epoch 1 was finalized/cancelled by the outsider: %s", ch, v)
 		}
+	}
+	// The outsider also tried to register a channel of their own. A channel is what
+	// authorises a reporter and names a funding bucket, so one they control would let
+	// them mint shares legitimately — check no trace of it exists.
+	if v := stateOf(c3ID, "ch_bucket|pirate"); v != "" {
+		t.Fatalf("the outsider registered their own channel, bucket=%s", v)
+	}
+	// C1 keeps no share book, so its equivalent is a yield payout against an epoch the
+	// outsider never staked in.
+	if v := stateOf(c1ID, "y_claimed|0|hive:"+outsider); v != "" && v != "0" {
+		t.Fatalf("C1 paid yield to the outsider: %s", v)
 	}
 	if v := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+outsider); v.Sign() != 0 {
 		t.Fatalf("outsider ended up holding %s tokens", v)

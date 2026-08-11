@@ -220,7 +220,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 
 	// reporter (owner acct) pushes shares to the attacker + a third party, then finalizes
 	mustCall(1, c3ID, "submitShares", fmt.Sprintf(
-		`{"epoch":"0","page":"0","entries":"hive:%s:75,hive:%s3:25"}`, attacker, d.cfg.WitnessPrefix), "c3.submitShares")
+		`{"channel":"author","epoch":"0","page":"0","entries":"hive:%s:75,hive:%s3:25"}`, attacker, d.cfg.WitnessPrefix), "c3.submitShares")
 	shares := waitKey(c3ID, "totalShares|author|0", "c3 shares recorded")
 	t.Logf("C3 epoch-0 totalShares = %s", shares)
 	mustCall(1, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "c3.finalizeEpoch")

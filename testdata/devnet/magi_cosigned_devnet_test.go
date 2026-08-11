@@ -177,7 +177,7 @@ func TestDevnetMagiCosigned(t *testing.T) {
 	call(c3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "C3 pull e0")
 	waitKey(c3ID, "funded|author|0", "C3 funded")
 
-	const shares = `{"epoch":"0","page":"0","entries":"hive:coa:60,hive:cob:40"}`
+	const shares = `{"channel":"author","epoch":"0","page":"0","entries":"hive:coa:60,hive:cob:40"}`
 
 	// ONE authority must NOT reach a 2-of-2 threshold, even though that account IS a
 	// configured reporter. This is the assertion that separates Cosigned from Single.

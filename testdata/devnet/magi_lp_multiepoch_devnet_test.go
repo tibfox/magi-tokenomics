@@ -487,7 +487,7 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		before := bal(cl.acct)
 		for ep := 0; ep < 3; ep++ {
 			if _, err := d.CallContract(ctx, cl.node, c5ID, "claim",
-				fmt.Sprintf(`{"epoch":"%d"}`, ep)); err != nil {
+				fmt.Sprintf(`{"channel":"lp","epoch":"%d"}`, ep)); err != nil {
 				t.Fatalf("%s claim epoch %d failed to broadcast: %v", cl.acct, ep, err)
 			}
 			if !waitStateKeyPresent(t, d, ctx, 1, c5ID,

@@ -227,7 +227,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// ================= EPOCH 0 =================
 	waitEpochClosed(0)
 	call(c2ID, "distributeEpoch", `{}`, "poke epoch 0")
-	waitValue(c2ID, "owed|contract:"+c3ID+"|0", contentSlice, "epoch0 content owed")
+	waitValue(c2ID, "owed|content|0", contentSlice, "epoch0 content owed")
 
 	// Epoch 1 has just begun. Change the stake NOW so the change is genuinely inside
 	// epoch 1: C7 credits min(stakeAt(epochStart), stakeAt(epochEnd)), so a top-up
@@ -239,7 +239,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	call(c3ID, "pullFunding", `{"channel":"content","epoch":"0"}`, "C3 pull e0")
 	call(c1ID, "pullFunding", `{"epoch":"0"}`, "C7 pull e0")
 	call(c3ID, "submitShares", fmt.Sprintf(
-		`{"epoch":"0","page":"0","entries":"hive:%s:50,hive:%s:50"}`, owner, holderB), "C3 shares e0")
+		`{"channel":"content","epoch":"0","page":"0","entries":"hive:%s:50,hive:%s:50"}`, owner, holderB), "C3 shares e0")
 	call(c3ID, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "C3 finalize e0")
 	waitValue(c3ID, "funded|content|0", contentSlice, "C3 funded e0")
 	waitValue(c1ID, "y_funded|0", yieldSlice, "C7 funded e0")
@@ -251,17 +251,17 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// ================= EPOCH 2: one poke must catch up 1 AND 2 =================
 	waitEpochClosed(2)
 	call(c2ID, "distributeEpoch", `{}`, "single poke — must catch up epochs 1 and 2")
-	waitValue(c2ID, "owed|contract:"+c3ID+"|1", contentSlice, "epoch1 content owed (caught up)")
-	waitValue(c2ID, "owed|contract:"+c3ID+"|2", contentSlice, "epoch2 content owed (caught up)")
-	waitValue(c2ID, "owed|contract:"+c1ID+"|1", yieldSlice, "epoch1 yield owed (caught up)")
-	waitValue(c2ID, "owed|contract:"+c1ID+"|2", yieldSlice, "epoch2 yield owed (caught up)")
+	waitValue(c2ID, "owed|content|1", contentSlice, "epoch1 content owed (caught up)")
+	waitValue(c2ID, "owed|content|2", contentSlice, "epoch2 content owed (caught up)")
+	waitValue(c2ID, "owed|yield|1", yieldSlice, "epoch1 yield owed (caught up)")
+	waitValue(c2ID, "owed|yield|2", yieldSlice, "epoch2 yield owed (caught up)")
 	t.Logf("CATCH-UP OK: one poke funded both missed epochs at the flat rate")
 
 	for _, ep := range []string{"1", "2"} {
 		call(c3ID, "pullFunding", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 pull e"+ep)
 		call(c1ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
 		call(c3ID, "submitShares", fmt.Sprintf(
-			`{"epoch":"%s","page":"0","entries":"hive:%s:50,hive:%s:50"}`, ep, owner, holderB),
+			`{"channel":"content","epoch":"%s","page":"0","entries":"hive:%s:50,hive:%s:50"}`, ep, owner, holderB),
 			"C3 shares e"+ep)
 		call(c3ID, "finalizeEpoch", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 finalize e"+ep)
 	}

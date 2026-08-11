@@ -236,7 +236,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	// role. What must hold is that the lie is *containable*.
 	t.Logf("PHASE A: rogue reporter publishes a fraudulent report on C3")
 	callN(1, c3ID, "submitShares", fmt.Sprintf(
-		`{"epoch":"0","page":"0","entries":"hive:%s:1000000"}`, rogue), "rogue submits 100%% to itself")
+		`{"channel":"content","epoch":"0","page":"0","entries":"hive:%s:1000000"}`, rogue), "rogue submits 100%% to itself")
 	callN(1, c3ID, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "rogue finalizes its own fraud")
 	waitValue(c3ID, "totalShares|content|0", "1000000", "C3 totalShares (fraudulent)")
 	if st := waitKey(c3ID, "status|content|0", "C3 status"); st != "finalized" {
@@ -273,8 +273,8 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// ================= PHASE B: rogue in Attest 2-of-3 =================
 	t.Logf("PHASE B: rogue attests alone on C5 (2-of-3)")
-	fraud := fmt.Sprintf(`{"epoch":"0","page":"0","entries":"hive:%s:999999"}`, rogue)
-	honest := fmt.Sprintf(`{"epoch":"0","page":"0","entries":"hive:%s:600,hive:%s:400"}`, honestB, honestC)
+	fraud := fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:999999"}`, rogue)
+	honest := fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:600,hive:%s:400"}`, honestB, honestC)
 
 	callN(1, c3ID, "submitShares", fraud, "rogue attests its fraudulent page")
 	time.Sleep(15 * time.Second)
