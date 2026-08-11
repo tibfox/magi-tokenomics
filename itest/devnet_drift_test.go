@@ -1,6 +1,7 @@
 package itest_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -473,30 +474,77 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 	// ch_bucket|<ch> ends at the channel, while funded|<ch>|<ep> continues. Only the
 	// second kind needs a separator after the channel, so requiring one everywhere
 	// would flag every correct ch_bucket| read.
-	scoped, withEpoch := map[string]bool{}, map[string]bool{}
-	for _, m := range regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|"\s*\+\s*ch\b\s*(\+\s*"\|")?`).FindAllStringSubmatch(distSrc, -1) {
+	// Count the separators the CONTRACT puts in each key rather than asking whether
+	// there is "at least one more". claimed| is built as claimed|<ch>|<ep>|<acct> —
+	// three separators — and a suite reading claimed|<ep>|<acct> has two, so a
+	// "contains another |" rule accepts it. It did, for six waits that could never
+	// have returned.
+	scoped, wantPipes := map[string]bool{}, map[string]int{}
+	reBuild := regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|"((?:\s*\+\s*[A-Za-z_]\w*\s*\+\s*"\|")*)`)
+	for _, m := range reBuild.FindAllStringSubmatch(distSrc, -1) {
+		if !strings.Contains(m[2], "ch") && !strings.Contains(m[0], "+ ch") && !strings.Contains(m[0], "+ch") {
+			continue
+		}
 		scoped[m[1]] = true
-		if m[2] != "" {
-			withEpoch[m[1]] = true
+		if n := 1 + strings.Count(m[2], `"|"`); n > wantPipes[m[1]] {
+			wantPipes[m[1]] = n
 		}
 	}
 	assert.NotEmpty(t, scoped, "no channel-scoped key prefixes found — the scan is broken")
-	assert.NotEmpty(t, withEpoch, "no channel+epoch key prefixes found — the scan is broken")
+
+	// Actions the OTHER contracts also export cannot be judged without knowing which
+	// contract a call targets — C1 has its own pullFunding taking only an epoch. The
+	// rest are distributor-only, so they need a channel no matter how the call is
+	// written. That distinction is what lets the check see through a helper that takes
+	// the contract id as a parameter: `claim` routed through callN(node, id, "claim",
+	// ...) sent no channel for six calls and this could not see it.
+	shared := map[string]bool{}
+	for name, src := range contractSourcesByName(t) {
+		if name == "c3-distributor" {
+			continue
+		}
+		for _, m := range regexp.MustCompile(`//go:wasmexport (\w+)`).FindAllStringSubmatch(src, -1) {
+			shared[m[1]] = true
+		}
+	}
 
 	reDistVar := regexp.MustCompile(`\b(c3ID|c5ID|distID)\s*,\s*"(\w+)"`)
+	reAnyAction := regexp.MustCompile(`"(\w+)"\s*,`)
 	checkedCalls, checkedKeys := 0, 0
 
-	for name, src := range devnetSources(t) {
+	for name, rawSrc := range devnetSources(t) {
+		// Comments describe bugs as often as they contain them: the note explaining
+		// why claimed|0|hive: was wrong itself contains the string claimed|0|hive:.
+		src := stripLineComments(rawSrc)
 		bad := []string{}
 
 		// --- calls: the payload that follows must mention "channel" ---
+		//
+		// Two ways to reach a call site. Named-variable sites (c3ID, "claim", ...) are
+		// unambiguous. Sites reached through a helper hide the contract, so those are
+		// only judged for actions ONLY the distributor exports.
+		type callSite struct{ payloadAt, actAt, actEnd int }
+		sites := []callSite{}
 		for _, m := range reDistVar.FindAllStringSubmatchIndex(src, -1) {
-			act := src[m[4]:m[5]]
+			sites = append(sites, callSite{m[1], m[4], m[5]})
+		}
+		seen := map[int]bool{}
+		for _, s := range sites {
+			seen[s.actAt] = true
+		}
+		for _, m := range reAnyAction.FindAllStringSubmatchIndex(src, -1) {
+			if act := src[m[2]:m[3]]; needChannel[act] && !shared[act] && !seen[m[2]] {
+				sites = append(sites, callSite{m[1], m[2], m[3]})
+			}
+		}
+
+		for _, s := range sites {
+			act := src[s.actAt:s.actEnd]
 			if !needChannel[act] {
 				continue
 			}
 			checkedCalls++
-			tail := src[m[1]:min(m[1]+400, len(src))]
+			tail := src[s.payloadAt:min(s.payloadAt+400, len(src))]
 			payload := ""
 			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
 				payload = bt[1]
@@ -518,19 +566,20 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 			}
 		}
 
-		// --- keys: a channel-scoped prefix needs a component after the prefix ---
-		for _, m := range regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|([^"]*)"`).FindAllStringSubmatch(src, -1) {
-			if !scoped[m[1]] {
+		// --- keys: as many separators as the contract writes ---
+		for _, m := range regexp.MustCompile(`"([a-z][A-Za-z0-9_]*)\|([^"]*)"`).FindAllStringSubmatchIndex(src, -1) {
+			prefix := src[m[2]:m[3]]
+			if !scoped[prefix] {
 				continue
 			}
 			checkedKeys++
-			// "prefix|" alone is a concatenation — the channel comes from a variable
-			if m[2] == "" || !withEpoch[m[1]] {
-				continue
-			}
-			// a channel+epoch key needs a separator after the channel
-			if !strings.Contains(m[2], "|") {
-				bad = append(bad, "key \""+m[1]+"|"+m[2]+"\" has no channel component")
+			// Count across the WHOLE expression, not the first literal: a key built as
+			// "share|lp|" + ep + "|" + who carries its last separator in a later
+			// fragment, and counting only the first would condemn a correct read.
+			expr, pipes := keyExpression(src, m[0])
+			if pipes < wantPipes[prefix] {
+				bad = append(bad, fmt.Sprintf("key %s has %d separators, the contract writes %d — a component is missing",
+					trunc(expr, 46), pipes, wantPipes[prefix]))
 			}
 		}
 
@@ -630,4 +679,71 @@ func TestDevnetDrift_ReporterConfigKeysExist(t *testing.T) {
 		}
 	}
 	assert.NotZero(t, checked, "found no reporter.json config literal — this guard is vacuous")
+}
+
+// stripLineComments blanks // comments, keeping byte offsets stable so index-based
+// scanning still lines up. String literals are left alone — a // inside a URL is not
+// a comment.
+func stripLineComments(src string) string {
+	out := []byte(src)
+	inStr, inRaw := byte(0), false
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		switch {
+		case inRaw:
+			if c == '`' {
+				inRaw = false
+			}
+		case inStr != 0:
+			if c == '\\' {
+				i++
+			} else if c == inStr {
+				inStr = 0
+			}
+		case c == '`':
+			inRaw = true
+		case c == '"' || c == '\'':
+			inStr = c
+		case c == '/' && i+1 < len(out) && out[i+1] == '/':
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		}
+	}
+	return string(out)
+}
+
+// keyExpression returns the full concatenated key expression starting at the string
+// literal at `start`, plus the number of "|" separators across all its literal parts.
+//
+// State keys are frequently assembled — "share|lp|" + epoch + "|" + account — so a
+// count taken from the first fragment alone understates the real key and flags correct
+// reads as broken.
+func keyExpression(src string, start int) (string, int) {
+	i, depth := start, 0
+	for ; i < len(src); i++ {
+		switch src[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			if depth == 0 {
+				goto done
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				goto done
+			}
+		case '\n':
+			goto done
+		}
+	}
+done:
+	expr := src[start:i]
+	pipes := 0
+	for _, m := range regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(expr, -1) {
+		pipes += strings.Count(m[1], "|")
+	}
+	return strings.TrimSpace(expr), pipes
 }

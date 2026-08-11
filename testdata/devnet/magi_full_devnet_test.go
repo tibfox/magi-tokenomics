@@ -461,23 +461,37 @@ func TestDevnetMagiFull(t *testing.T) {
 		holderA: stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderA),
 		holderB: stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+holderB),
 	}
-	claim := func(node int, id, what string) { callN(node, id, "claim", `{"epoch":"0"}`, what) }
-	claim(1, c3ID, "A claims content")
-	claim(2, c3ID, "B claims content")
-	claim(1, c3ID, "A claims LP")
-	claim(2, c3ID, "B claims LP")
-	claim(1, c1ID, "A claims yield")
-	claim(2, c1ID, "B claims yield")
+	// A claim is per (contract, channel), and one shared helper cannot express that:
+	// content and lp are two CHANNELS on one distributor, while yield is a different
+	// contract with a different entrypoint. The single `claim(node, id, what)` helper
+	// that used to be here sent {"epoch":"0"} to everything, which meant the two
+	// distributor claims were the same call issued twice and the yield claim named an
+	// action C1 does not export (it has claimYield, not claim).
+	claimDist := func(node int, ch, what string) {
+		callN(node, c3ID, "claim", fmt.Sprintf(`{"channel":"%s","epoch":"0"}`, ch), what)
+	}
+	claimDist(1, "content", "A claims content")
+	claimDist(2, "content", "B claims content")
+	claimDist(1, "lp", "A claims LP")
+	claimDist(2, "lp", "B claims LP")
+	callN(1, c1ID, "claimYield", `{"epoch":"0"}`, "A claims yield")
+	callN(2, c1ID, "claimYield", `{"epoch":"0"}`, "B claims yield")
 
 	// Every claim must be CONFIRMED on chain before anything is compared. A single
 	// immediate read here is what failed run 4: the last claim had been broadcast
 	// only ~9s earlier and its state was not queryable yet, which looked identical
 	// to "the claim was rejected".
-	for _, c := range []struct{ id, name string }{
-		{c3ID, "content"}, {c3ID, "LP"}, {c1ID, "yield"},
+	// Each of the three carries its OWN key shape: the distributor scopes by channel
+	// (claimed|<ch>|<ep>|<acct>) and C1's yield does not (y_claimed|<ep>|<acct>). The
+	// shared "claimed|0|hive:" key used here before matched neither, so all six waits
+	// polled a key nothing ever writes.
+	for _, c := range []struct{ id, prefix, name string }{
+		{c3ID, "claimed|content|0|hive:", "content"},
+		{c3ID, "claimed|lp|0|hive:", "LP"},
+		{c1ID, "y_claimed|0|hive:", "yield"},
 	} {
 		for _, acct := range []string{holderA, holderB} {
-			if !waitStateKeyPresent(t, d, ctx, 1, c.id, "claimed|0|hive:"+acct, 3*time.Minute) {
+			if !waitStateKeyPresent(t, d, ctx, 1, c.id, c.prefix+acct, 3*time.Minute) {
 				t.Fatalf("%s never claimed %s", acct, c.name)
 			}
 		}
@@ -491,7 +505,11 @@ func TestDevnetMagiFull(t *testing.T) {
 	// the claims, since holderA also holds the undrawn emission pool.
 	c3TotalN := bigOf(c3Total)
 	c5TotalN := bigOf(waitKey(c3ID, "totalShares|lp|0", "C5 totalShares"))
-	share := func(id, acct string) *big.Int { return bigOf(stateOf(id, "share|0|hive:"+acct)) }
+	// Shares are per CHANNEL. Taking the contract id instead made the content and lp
+	// share books the same book, so the two channels compared identical numbers.
+	share := func(ch, acct string) *big.Int {
+		return bigOf(stateOf(c3ID, "share|"+ch+"|0|hive:"+acct))
+	}
 	payout := func(funded string, sh, total *big.Int) *big.Int {
 		if total.Sign() == 0 {
 			return new(big.Int)
@@ -500,8 +518,8 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	stakeOf := map[string]*big.Int{holderA: big.NewInt(600), holderB: big.NewInt(400)}
 	for _, acct := range []string{holderA, holderB} {
-		content := payout(c3Funded, share(c3ID, acct), c3TotalN)
-		lp := payout(c5Funded, share(c3ID, acct), c5TotalN)
+		content := payout(c3Funded, share("content", acct), c3TotalN)
+		lp := payout(c5Funded, share("lp", acct), c5TotalN)
 		// C7 is trustless pro-rata over C1 stake, not over submitted shares
 		yield := payout(c7Funded, stakeOf[acct], big.NewInt(1000))
 		want := new(big.Int).Add(content, new(big.Int).Add(lp, yield))
@@ -522,8 +540,8 @@ func TestDevnetMagiFull(t *testing.T) {
 		a, b   *big.Int
 		name   string
 	}{
-		{c3Funded, payout(c3Funded, share(c3ID, holderA), c3TotalN), payout(c3Funded, share(c3ID, holderB), c3TotalN), "content"},
-		{c5Funded, payout(c5Funded, share(c3ID, holderA), c5TotalN), payout(c5Funded, share(c3ID, holderB), c5TotalN), "lp"},
+		{c3Funded, payout(c3Funded, share("content", holderA), c3TotalN), payout(c3Funded, share("content", holderB), c3TotalN), "content"},
+		{c5Funded, payout(c5Funded, share("lp", holderA), c5TotalN), payout(c5Funded, share("lp", holderB), c5TotalN), "lp"},
 		{c7Funded, payout(c7Funded, big.NewInt(600), big.NewInt(1000)), payout(c7Funded, big.NewInt(400), big.NewInt(1000)), "yield"},
 	} {
 		paid := new(big.Int).Add(c.a, c.b)
