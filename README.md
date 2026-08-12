@@ -25,7 +25,8 @@ fee, so roles that share a balance and a history share a contract.
 | C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
 | C3 | `c3-distributor` | reward **channels** — content, LP, or anything else a tenant adds. Each channel has its own funding bucket, share book, challenge window and reporter authority, so one deployed contract serves them all. |
 | — | `reporter/` | off-chain service that turns Hive activity (or DEX liquidity history) into share lists ([README](reporter/README.md)) |
-| — | `auth/`, `adapter/` | shared modules: multi-party authorisation, value-asset abstraction |
+| — | `auth/`, `adapter/`, `events/` | shared modules: multi-party authorisation, value-asset abstraction, contract log emission |
+| — | `indexer/` | drop-in mappings so magi-mongo-indexer picks up any deployment ([README](indexer/README.md)) |
 
 **Why yield and the airdrop live in C1.** Yield never read anything except C1 — stake
 at two heights, and the exact `Σ min(aᵢ,bᵢ)` denominator from its drawdown
@@ -62,7 +63,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 103 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 119 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 120 reporter tests, no network
 ```
 
@@ -274,7 +275,7 @@ checkout to run; `testdata/` keeps them versioned here without breaking the buil
 | `magi_tokenomics_devnet_test.go` | C0+C2+C3 + 13 outsider attacks | 10 min |
 | `magi_stake_lp_airdrop_devnet_test.go` | staking+yield+airdrop and an LP channel + outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real reporter binary driving C3 | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + reporter**, then 14 staked-holder + 34 outsider attacks | 30 min |
+| `magi_full_devnet_test.go` | **the token + all three contracts + reporter**, then 14 staked-holder + 32 outsider attacks | 30 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: catch-up, flat emission, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained, refilled, backlog paid in full | 17 min |
@@ -296,7 +297,7 @@ Every role has been turned against the system on a live devnet chain:
 
 | attacker | attempts | what it establishes |
 |---|---|---|
-| pure outsider | 34 | every privileged action on all 7 contracts is refused |
+| pure outsider | 32 | every privileged action on the token and all three contracts is refused |
 | staked holder | 14 | a real position (stake + shares + a collected claim) buys no extra power — double-claims, epoch aliasing, early withdrawal and sweeps all fail |
 | **rogue reporter** | 3 phases | a fraudulent report is *accepted*, then **contained**: guardian veto, funding rolled forward and recovered, Attest quorum unbroken |
 | hostile contract | 16 relayed | a contract cannot borrow its caller's authority |
@@ -355,10 +356,16 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All 6 contracts + reporter are complete, audited, and green: **103 contract tests, 120
+All three contracts + reporter are complete, audited, and green: **119 contract tests, 120
 reporter tests, and ten devnet suites** — the full-system run, the adversarial
 suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
 passthrough.
+
+Every state transition is emitted as a contract log in the format
+`magi-mongo-indexer` ingests, so a deployment is queryable over GraphQL without
+touching contract state — see [`indexer/`](indexer/). Watch the two `skip` tables in
+particular: they record entries a contract dropped inside a transaction that
+succeeded, which is the only loss the chain cannot otherwise show you.
 
 **Not done, stated plainly:**
 
@@ -376,6 +383,25 @@ passthrough.
   accounts share an active authority, so ONE signature satisfies a two-account
   `required_auths` list. That proves the CONTRACT's threshold logic — which is what
   mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
+- **Attest mode keeps the payload of a vote that never reaches its threshold.**
+  `auth.attest` stores the attested bytes under `<prefix>|acanon|<action>|<hash>` — up
+  to 4,096 bytes, a whole share page for `submitShares` — and deletes it only on the
+  transaction that commits. A coalition that stalls (two of three reporters attest, the
+  third never arrives, the epoch is re-run under a different page number) leaves that
+  blob in state permanently.
+
+  It is storage growth, not a vulnerability: bounded by authorities × distinct actions,
+  paid for in the attester's own RC, and it blocks nothing. Note that transaction
+  revert does **not** clean it up, because a partial attestation is a SUCCESSFUL
+  transaction — that persistence is the mechanism, since an async M-of-N vote has to
+  survive until the next reporter arrives in a later transaction. (Revert does cover
+  the *failed* paths: a double-attest aborts after the canon write and unwinds it.)
+
+  The blob exists only because `auth.Hash` is a 128-bit double-FNV and is documented as
+  not collision-resistant, so the code pins the first attestation's exact bytes and
+  rejects any mismatch. A collision-resistant digest would make the byte-compare
+  unnecessary and take the record from 4,096 bytes to 32 — which is the real fix, and
+  it means pulling a proper hash into a tinygo wasm contract. Not judged worth it yet.
 - Per-tenant config values and the governance DAO are out of scope here.
 
 ### Two suites worth knowing about

@@ -40,57 +40,78 @@ then check the per-day total against capacity ÷ 5.
 
 ## Fixed-cost functions
 
-| contract | action | RC |
-|---|---|---:|
-| C0 token | `init` | 642 |
-| C0 token | `mint` | 273 |
-| C0 token | `transfer` (to contract) | 340 |
-| C0 token | `transfer` (to account) | 214 |
-| C0 token | `approve` | 243 |
-| C0 token | `changeOwner` | 863 |
-| C1 | `init` (staking + yield + airdrop) | 1,851 |
-| C1 | `stake` (first, creates history) | 1,175 |
-| C1 | `stake` (subsequent) | 1,046 |
-| C1 | `stakeFor` | 1,093 |
-| C1 | `unstake` | 628 |
-| C1 | `claimUnstaked` | 505 |
-| C1 | `pullFunding` (yield) | 853 |
-| C1 | `claimYield` | 870 |
-| C2 emission | `init` (3 buckets) | 8,730 |
-| C2 emission | `distributeEpoch` (1 epoch, 3 buckets) | 1,537 |
-| C2 emission | `queueTokenOp` | 163 |
-| C2 emission | `cancelTokenOp` | 100 |
-| C2 emission | `executeTokenOp` (calls token.pause) | 333 |
-| distributor | `init` | 2,330 |
-| distributor | `addChannel` | 661–911 |
-| distributor | `pullFunding` (cross-contract) | 821–923 |
-| distributor | `finalizeEpoch` | 343–347 |
-| distributor | `claim` | 532–609 |
+| contract | action | RC | was |
+|---|---|---:|---:|
+| C0 token | `init` | 642 | — |
+| C0 token | `mint` | 273 | — |
+| C0 token | `transfer` (to contract) | 340 | — |
+| C0 token | `transfer` (to account) | 214 | — |
+| C0 token | `approve` | 243 | — |
+| C0 token | `changeOwner` | 863 | — |
+| C1 | `init` (staking + yield + airdrop) | 2,197 | 1,851 |
+| C1 | `stake` (first, creates history) | 1,309 | 1,175 |
+| C1 | `stake` (subsequent) | 1,179 | 1,046 |
+| C1 | `stakeFor` | 1,226 | 1,093 |
+| C1 | `unstake` | 785 | 628 |
+| C1 | `claimUnstaked` (1 matured entry) | 610 | 505 |
+| C1 | `claimUnstaked` (5 matured entries) | 821 | — |
+| C1 | `pullFunding` (yield) | 1,140 | 853 |
+| C1 | `claimYield` | 1,014 | 870 |
+| C2 emission | `init` (3 buckets) | 9,288 | 8,730 |
+| C2 emission | `distributeEpoch` (1 epoch, 3 buckets) | 1,990 | 1,537 |
+| C2 emission | `queueTokenOp` | 311 | 163 |
+| C2 emission | `cancelTokenOp` | 240 | 100 |
+| C2 emission | `executeTokenOp` (calls token.pause) | 482 | 333 |
+| distributor | `init` | 2,623 | 2,330 |
+| distributor | `addChannel` | 832–1,097 | 661–911 |
+| distributor | `pullFunding` (cross-contract) | 1,103–1,225 | 821–923 |
+| distributor | `finalizeEpoch` | 554–630 | 343–347 |
+| distributor | `claim` | 678–764 | 532–609 |
 
-Read-only queries (`stakeOf`, `stakeAtHeight`, `scheduleInfo`, `owedOf`, `shareOf`,
-`fundedOf`, `minStakeSum`) all land at the **100 RC floor**.
+Read-only queries (`stakeOf`, `scheduleInfo`, `owedOf`, `fundedOf`, `minStakeSum`) land
+at the **100 RC floor**; `stakeAtHeight` 101 and `shareOf` 126.
 
-**What the merge changed.** Yield now reads the stake history in the same contract
-rather than across a boundary, so `claimYield` costs **870** where the cross-contract
-version cost 980 — cheaper for the operation users perform most. `C1.init` rose to
-1,851 because one init now configures three roles, and `C2.init` to 8,730 because
-each bucket also writes a name→target index (that index is what lets several buckets
-pay one distributor).
+**The `was` column is event emission.** The contracts now log every state transition
+for the indexer (see [`indexer/README.md`](../indexer/README.md)), and a log costs gas
+in proportion to its bytes. The flat additions are 100–350 RC on writing entrypoints
+and nothing on queries, which do not log. Two paths were deliberately shaped to keep
+that cost flat rather than per-item — see `submitShares` and `airdropBatch` below.
 
-`distributor.init` FELL to 2,330: the per-channel policy moved out of it. Each channel
-then costs 661–911 once, at registration.
+**Two C1 costs drift over a deployment's life, and only one of them is bounded.**
 
-**The one to watch is `submitShares`.** Channel-scoping added a component to every
-state key it writes, so the fixed base per call went from ~200 to **~465** while the
-marginal rate stayed ~91 RC/entry. Small pages therefore cost proportionally more than
-they used to, and the reporter's rc_limit coherence check had to be re-based — at the
-old constant it demanded 354 RC for a one-entry page that really costs 697, which
-would have let a config load and then revert every page it sent.
+`ckpt|` (a global checkpoint of `total_staked`, appended on *every* stake mutation by
+*any* account) and `hist|acct|` are append-only and never pruned. `stakeAtHeight`,
+`claimYield`, `minStakeSum` and `sweepEmptyEpoch` binary-search them at one host state
+read per probe, so those costs grow with **log₂(entries)** — about one extra probe per
+doubling. The figures above are measured on short arrays; a deployment three years in
+pays a few probes more per claim. Size for that rather than for week one.
+
+What is bounded is same-block growth: several mutations in one block now collapse to a
+single entry, since the search can only reach the last of them anyway. That matters
+most where it used to be worst — a 25-recipient `airdropStaked` batch appended 25
+global checkpoints and now appends one, measured at **13,549 RC against 15,836
+before** — and it holds generally, because any two accounts staking in the same block
+used to add two entries where one was reachable. The cost is one state read per
+mutation that has a predecessor, which is why a repeat `stake` is ~37 RC dearer and a
+first stake is unchanged.
+
+**`claimUnstaked` is the one that got cheaper per unit.** Each matured entry used to
+carry its own token transfer to the same recipient; they are now summed into one. Five
+entries cost 821 RC — about **53 RC per additional entry**, against the 214 RC a
+transfer to a plain account costs on its own. A full 20-entry claim is now roughly
+1,600 RC rather than roughly 4,600.
+
+**What the merge changed** (unchanged by this work). Yield reads the stake history in
+the same contract rather than across a boundary, so `claimYield` is cheaper than the
+cross-contract version was. `C1.init` is large because one init configures three roles,
+and `C2.init` because each bucket also writes a name→target index — that index is what
+lets several buckets pay one distributor. `distributor.init` is small because the
+per-channel policy moved out of it into `addChannel`.
 
 No single fixed-cost call is large. The whole deployment sequence — four `init`s, two
-`addChannel`s, `adoptSchedule` and the token handover — totals roughly **16,000 RC**, and it happens back to back
-with no time for anything to thaw, so the deployer needs capacity for the lot at
-once. About 10 HBD deposited is ample.
+`addChannel`s, `adoptSchedule` and the token handover — totals roughly **18,000 RC**,
+and it happens back to back with no time for anything to thaw, so the deployer needs
+capacity for the lot at once. About 10 HBD deposited is ample.
 
 ---
 
@@ -98,48 +119,78 @@ once. About 10 HBD deposited is ample.
 
 ### `submitShares` — scales with entries per page
 
-| entries | RC | RC/entry |
-|---:|---:|---:|
-| 1 | 697 | — |
-| 10 | 1,376 | ~91 |
-| 30 | 3,310 | ~91 |
-| 60 | 5,942 | ~91 |
+| entries | RC | RC/entry | was |
+|---:|---:|---:|---:|
+| 1 | 558 | — | 697 |
+| 10 | 1,901 | ~133 | 1,376 |
+| 30 | 4,595 | ~133 | 3,310 |
+| 60 | 8,369 | ~133 | 5,942 |
 
-Roughly **~91 RC per entry over a ~465 fixed base**. The default page size of 60
-entries costs ~5,900 RC; the 4096-byte payload cap usually binds before RC does.
+Roughly **~133 RC per entry over a ~425 fixed base**, up from ~91 over ~465. The
+default page size of 60 entries costs ~8,400 RC; the 4096-byte payload cap usually
+binds before RC does.
+
+> **These figures moved for two reasons, and the second is easy to miss.** Event
+> emission is one. The other is that the fixture now uses account names of the maximum
+> length a Hive account can have (`hive:` + 16 characters) instead of the shorter
+> synthetic ids it used before. **Per-entry cost scales with entry BYTES**, not just
+> entry count — the call writes a state key per account and logs the submitted list
+> verbatim — so the old numbers understated a realistic page by about 5% at 30 entries.
+> A page of `did:` recipients, whose ids are longer again, costs more still; measure
+> rather than extrapolate if you paginate those.
 
 The base is the number to keep honest — it is what the reporter's coherence check is
-sized from, and a stale one under-covers small pages rather than large ones.
+sized from, and a stale one under-covers small pages rather than large ones. That check
+now lives in `reporter/submit/rccost.go` and is bound to a real measurement by
+`TestRC_ReporterRcLimitFormulaCoversAFullPage`, which fails if a page outgrows what the
+constants predict *or* if the headroom multiplier stops meaning anything. Both have
+happened before, the second silently.
 
-**Sizing a real epoch:** 500 earners at 60/page = 9 pages ≈ **44,000 RC**, sent within
-minutes of each other. A reporter serving a tribe that size needs capacity for the
-whole epoch at once, and enough headroom that the next epoch is not waiting on the
-thaw — so roughly 40 HBD or more on the ledger.
+> **Why the page emits one log and not one per entry.** The obvious shape — a `share`
+> event per accepted entry — was built and measured first: it took the marginal rate to
+> **229 RC/entry** and a 60-entry page to **14,127 RC**, past the free tier, turning a
+> 500-earner epoch into ~127,000 RC. `submitShares` is the most-repeated privileged
+> call in the system and the reporter is its heaviest consumer, so the page-level form
+> won: one `shares` log carrying the submitted entries verbatim, plus a `skip` log for
+> anything dropped. Applied = submitted − skipped, so the per-account share book is
+> still reconstructible exactly — for a quarter of the added cost.
+
+**Sizing a real epoch:** 500 earners at 60/page = 9 pages ≈ **70,000 RC** (was
+~44,000), sent within minutes of each other. A reporter serving a tribe that size needs
+capacity for the whole epoch at once, and enough headroom that the next epoch is not
+waiting on the thaw — so roughly 65 HBD or more on the ledger.
 
 ### `distributeEpoch` — scales with epochs caught up × buckets
 
-| epochs | buckets | RC |
-|---:|---:|---:|
-| 1 | 1 | 1,279 |
-| 5 | 1 | 5,242 |
-| 10 | 1 | 10,196 |
-| 25 | 1 | 25,134 |
-| 50 | 1 | 50,004 |
-| 1 | 3 | 1,537 |
-| 10 | 3 | 14,587 |
-| 50 | 3 | 72,122 |
+| epochs | buckets | RC | was | change |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 1,463 | 1,279 | +14% |
+| 5 | 1 | 2,492 | 5,242 | **−52%** |
+| 10 | 1 | 3,782 | 10,196 | **−63%** |
+| 25 | 1 | 7,722 | 25,134 | **−69%** |
+| 50 | 1 | 14,256 | 50,004 | **−71%** |
+| 1 | 3 | 1,911 | 1,537 | +24% |
+| 10 | 3 | 7,104 | 14,587 | **−51%** |
+| 50 | 3 | 30,594 | 72,122 | **−58%** |
 
-About **~995 RC per epoch** with one bucket and **~1,437** with three, over a fixed
-base of ~280. This is the cost that catches operators out: a keeper that stops for a
-fortnight and then pokes once has to catch up every missed epoch in a single
-transaction.
+About **~261 RC per epoch** with one bucket and **~585** with three, down from ~995 and
+~1,437. A single-epoch poke costs slightly more than it did — that is the event
+emission — and everything beyond one epoch costs dramatically less.
 
-> **Why a poke is not cheap.** C2 does not mint. Each epoch costs a cross-contract
-> `transferFrom` against the pool, plus two reads (`allowance`, `balanceOf`) per poke.
+> **Why the catch-up got cheap.** C2 does not mint: each epoch's emission is pulled
+> from the approved pool with a cross-contract `transferFrom`, and that call dominated
+> the cost. Source, destination and asset are identical on every iteration, so the poke
+> now *plans* the catch-up first — walking forward while the pool still covers the
+> running total, which is the same all-or-nothing-per-epoch test evaluated ahead of
+> time — and makes **one** pull for the whole run. The schedule parameters and bucket
+> table are read once instead of once per epoch, which is the rest of the saving.
+>
+> All-or-nothing per epoch is unchanged: a partially funded epoch is still never marked
+> done, and a starved poke still writes no state and resumes on refill.
 >
 > **Trusting these numbers:** `rc_measure_test.go` only measures real emission if the
 > fixture funds a pool first — an unfunded one returns `{"distributed":"0",
-> "starved":true}` and the table records a ~271-RC no-op instead. The test asserts
+> "starved":true}` and the table records a no-op instead. The test asserts
 > `distributed` now, but if these figures ever look suspiciously flat, check the
 > `ret=` column shows a non-zero `distributed` before believing them.
 
@@ -159,17 +210,24 @@ headroom.
 
 ### `airdropBatch` — scales with recipients
 
-| recipients | RC |
-|---:|---:|
-| 1 | 697 |
-| 10 | 4,030 |
-| 25 | 9,471 |
-| 50 | 18,566 |
+| recipients | RC | was |
+|---:|---:|---:|
+| 1 | 897 | 697 |
+| 10 | 4,145 | 4,030 |
+| 25 | 9,585 | 9,471 |
+| 50 | 18,680 | 18,566 |
 
-About **~370 RC per recipient**. ~10–25 per batch is a comfortable size: batches are
-idempotent per `batchId`, so there is no penalty for splitting. A migration of 1,000
-holders is ~370,000 RC in total, which is the number to size the deposit against — a
-run of back-to-back batches gives the earlier ones no time to thaw.
+About **~370 RC per recipient**, unchanged: the per-recipient cost is one token
+transfer and events did not touch it. The batch emits ONE `airdrop` summary — a flat
+~115 RC however many recipients it carries — because the liquid path's per-recipient
+record already exists as the token's own indexed `transfer` log, and the
+`airdropStaked` path emits a `stake` event per recipient anyway. Restating either would
+be paying RC for a row the indexer already has.
+
+~10–25 per batch is a comfortable size: batches are idempotent per `batchId`, so there
+is no penalty for splitting. A migration of 1,000 holders is ~370,000 RC in total,
+which is the number to size the deposit against — a run of back-to-back batches gives
+the earlier ones no time to thaw.
 
 ---
 
@@ -177,11 +235,11 @@ run of back-to-back batches gives the earlier ones no time to thaw.
 
 | role | typical per-epoch cost | capacity to hold |
 |---|---|---|
-| keeper (`distributeEpoch` + 3 `pullFunding`) | ~4,100 RC | small, **provided it never falls behind** — a long catch-up lands in one transaction |
-| reporter (pages + `finalizeEpoch`) | ~5,200 RC for 60 earners; ~44,000 for 500 | size to a full epoch's pages, sent together |
-| claimant | ~500–1,100 RC per claim | negligible, one call at a time |
+| keeper (`distributeEpoch` + 3 `pullFunding`) | ~5,400 RC | small, and a catch-up is now ~2.4× cheaper — but it still lands in one transaction |
+| reporter (pages + `finalizeEpoch`) | ~9,000 RC for 60 earners; ~70,000 for 500 | size to a full epoch's pages, sent together |
+| claimant | ~600–1,100 RC per claim | negligible, one call at a time |
 | deployer (one-off) | ~18,000 RC | the whole sequence at once; ~10 HBD is ample |
-| migration (per 25-holder batch) | ~9,300 RC | the run, not the batch — back-to-back batches do not thaw in between |
+| migration (per 25-holder batch) | ~9,600 RC | the run, not the batch — back-to-back batches do not thaw in between |
 
 Three rules follow from the numbers:
 
