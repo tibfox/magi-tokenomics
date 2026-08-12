@@ -1,0 +1,521 @@
+# ===============================
+# MAGI TOKENOMICS — AUTO-DISCOVERED MAPPINGS
+# ===============================
+#
+# Copy into magi-mongo-indexer's internal/config/events/ and restart the indexer.
+# It will backfill from MongoDB and then follow new blocks.
+#
+# DISCOVERY, NOT ADDRESSES. This is a deploy-per-project framework: every tenant
+# deploys its own C1/C2/C3, so a static `address:` list would need editing for each
+# one. Each contract instead announces itself with an init event that carries its
+# whole configuration, and the indexer adopts it the same way it adopts DEX pools
+# via pool_init. Nothing here needs changing when a new tribe launches.
+#
+# WIRE FORMAT. Every log is
+#   {"type":"<log_type>","attributes":{...}}
+# with EVERY attribute a JSON string — matching magi_token-contract, and required:
+# the indexer decodes numbers as float64, which would silently round a uint64 epoch
+# or a big.Int amount. `numeric` columns below receive those strings and cast.
+#
+# Emitted by magi-tokenomics contracts; see indexer/README.md in that repo.
+
+contracts:
+  # =========================================================
+  # C1 — staking, staking yield, launch airdrop
+  # =========================================================
+  - discoverEvent: "c1_init"
+    events:
+      - log_type: "c1_init"
+        table: "magi_tokenomics_c1_init_events"
+        schema:
+          token: string
+          owner: string
+          cooldown: numeric
+          epoch_len: numeric
+          funder: string
+          genesis: numeric
+          treasury: string
+          max_airdrop: string
+          airdrop_staked: bool
+          allow: string
+        parse: "json"
+        fields:
+          token: "$.attributes.token"
+          owner: "$.attributes.owner"
+          cooldown: "$.attributes.cooldown"
+          epoch_len: "$.attributes.epoch_len"
+          funder: "$.attributes.funder"
+          genesis: "$.attributes.genesis"
+          treasury: "$.attributes.treasury"
+          max_airdrop: "$.attributes.max_airdrop"
+          airdrop_staked: "$.attributes.airdrop_staked"
+          allow: "$.attributes.allow"
+
+      # Stake credited — from stake, stakeFor, or an airdrop paid into stake.
+      # `via` is what separates a purchase from a migration credit.
+      - log_type: "stake"
+        table: "magi_tokenomics_stake_events"
+        schema:
+          acct: string
+          via: string
+          amount: numeric
+          new_stake: numeric
+          new_total: numeric
+          height: numeric
+        parse: "json"
+        fields:
+          acct: "$.attributes.acct"
+          via: "$.attributes.via"
+          amount: "$.attributes.amount"
+          new_stake: "$.attributes.new_stake"
+          new_total: "$.attributes.new_total"
+          height: "$.attributes.height"
+
+      # Stake removed and queued for cooldown. Weight drops at `height`; the tokens
+      # become withdrawable at `ready_height`.
+      - log_type: "unstake"
+        table: "magi_tokenomics_unstake_events"
+        schema:
+          acct: string
+          amount: numeric
+          new_stake: numeric
+          new_total: numeric
+          height: numeric
+          ready_height: numeric
+          queue_idx: numeric
+        parse: "json"
+        fields:
+          acct: "$.attributes.acct"
+          amount: "$.attributes.amount"
+          new_stake: "$.attributes.new_stake"
+          new_total: "$.attributes.new_total"
+          height: "$.attributes.height"
+          ready_height: "$.attributes.ready_height"
+          queue_idx: "$.attributes.queue_idx"
+
+      # Matured entries withdrawn. One event per CALL, not per entry — the call
+      # pays them in a single transfer.
+      - log_type: "unstake_claim"
+        table: "magi_tokenomics_unstake_claim_events"
+        schema:
+          acct: string
+          amount: numeric
+          entries: numeric
+          new_head: numeric
+        parse: "json"
+        fields:
+          acct: "$.attributes.acct"
+          amount: "$.attributes.amount"
+          entries: "$.attributes.entries"
+          new_head: "$.attributes.new_head"
+
+      # The epoch drawdown accumulator — the ONE value that cannot be recomputed
+      # from the outside, because it telescopes across every mutation in an epoch.
+      # claimYield divides by (total at epoch start − new_dd), so this is what makes
+      # a yield payout auditable.
+      - log_type: "drawdown"
+        table: "magi_tokenomics_drawdown_events"
+        schema:
+          epoch: numeric
+          acct: string
+          delta: numeric
+          new_dd: numeric
+        parse: "json"
+        fields:
+          epoch: "$.attributes.epoch"
+          acct: "$.attributes.acct"
+          delta: "$.attributes.delta"
+          new_dd: "$.attributes.new_dd"
+
+      - log_type: "yield_funded"
+        table: "magi_tokenomics_yield_funded_events"
+        schema:
+          epoch: numeric
+          received: numeric
+          cumulative: numeric
+          outstanding: numeric
+        parse: "json"
+        fields:
+          epoch: "$.attributes.epoch"
+          received: "$.attributes.received"
+          cumulative: "$.attributes.cumulative"
+          outstanding: "$.attributes.outstanding"
+
+      # payout = funded * stake_used / denominator, all four emitted so the payout
+      # can be re-derived rather than trusted.
+      - log_type: "yield_claim"
+        table: "magi_tokenomics_yield_claim_events"
+        schema:
+          epoch: numeric
+          acct: string
+          payout: numeric
+          stake_used: numeric
+          denominator: numeric
+          funded: numeric
+        parse: "json"
+        fields:
+          epoch: "$.attributes.epoch"
+          acct: "$.attributes.acct"
+          payout: "$.attributes.payout"
+          stake_used: "$.attributes.stake_used"
+          denominator: "$.attributes.denominator"
+          funded: "$.attributes.funded"
+
+      - log_type: "yield_sweep"
+        table: "magi_tokenomics_yield_sweep_events"
+        schema:
+          epoch: numeric
+          residual: numeric
+          funded: numeric
+          to: string
+        parse: "json"
+        fields:
+          epoch: "$.attributes.epoch"
+          residual: "$.attributes.residual"
+          funded: "$.attributes.funded"
+          to: "$.attributes.to"
+
+      # Batch summary only. Per-recipient rows already exist: the liquid path emits
+      # the token's own `transfer` log, and the staked path emits `stake` above.
+      - log_type: "airdrop"
+        table: "magi_tokenomics_airdrop_events"
+        schema:
+          batch_id: string
+          recipients: numeric
+          sum: numeric
+          cum_total: numeric
+          staked: bool
+        parse: "json"
+        fields:
+          batch_id: "$.attributes.batch_id"
+          recipients: "$.attributes.recipients"
+          sum: "$.attributes.sum"
+          cum_total: "$.attributes.cum_total"
+          staked: "$.attributes.staked"
+
+      - log_type: "sweep_unobligated"
+        table: "magi_tokenomics_sweep_unobligated_events"
+        schema:
+          amount: numeric
+          to: string
+        parse: "json"
+        fields:
+          amount: "$.attributes.amount"
+          to: "$.attributes.to"
+
+      - log_type: "schedule_adopted"
+        table: "magi_tokenomics_schedule_adopted_events"
+        schema:
+          funder: string
+          genesis: numeric
+          epoch_len: numeric
+          bucket: string
+        parse: "json"
+        fields:
+          funder: "$.attributes.funder"
+          genesis: "$.attributes.genesis"
+          epoch_len: "$.attributes.epoch_len"
+          bucket: "$.attributes.bucket"
+
+      # Airdrop entries the contract dropped. Watch this table: the batch SUCCEEDS
+      # and the recipient is never paid, so a row here is a migration entry that
+      # needs re-sending in a corrected batch.
+      - log_type: "skip"
+        table: "magi_tokenomics_airdrop_skip_events"
+        schema:
+          scope: string
+          batch_id: string
+          raw_entry: string
+          reason: string
+        parse: "json"
+        fields:
+          scope: "$.attributes.scope"
+          batch_id: "$.attributes.batch_id"
+          raw_entry: "$.attributes.raw_entry"
+          reason: "$.attributes.reason"
+
+  # =========================================================
+  # C2 — emission controller
+  # =========================================================
+  - discoverEvent: "c2_init"
+    events:
+      - log_type: "c2_init"
+        table: "magi_tokenomics_c2_init_events"
+        schema:
+          token: string
+          source: string
+          owner: string
+          genesis: numeric
+          epoch_len: numeric
+          base_annual: numeric
+          blocks_per_year: numeric
+          dust_bucket: string
+          timelock: numeric
+          bucket_count: numeric
+          buckets: string
+          emission_per_epoch: numeric
+        parse: "json"
+        fields:
+          token: "$.attributes.token"
+          source: "$.attributes.source"
+          owner: "$.attributes.owner"
+          genesis: "$.attributes.genesis"
+          epoch_len: "$.attributes.epoch_len"
+          base_annual: "$.attributes.base_annual"
+          blocks_per_year: "$.attributes.blocks_per_year"
+          dust_bucket: "$.attributes.dust_bucket"
+          timelock: "$.attributes.timelock"
+          bucket_count: "$.attributes.bucket_count"
+          buckets: "$.attributes.buckets"
+          emission_per_epoch: "$.attributes.emission_per_epoch"
+
+      # One row per epoch actually emitted. A catch-up poke emits several.
+      - log_type: "emit"
+        table: "magi_tokenomics_emit_events"
+        schema:
+          epoch: numeric
+          emission: numeric
+        parse: "json"
+        fields:
+          epoch: "$.attributes.epoch"
+          emission: "$.attributes.emission"
+
+      # One row per keeper poke that moved. `starved` means the pool could not cover
+      # the next epoch — not terminal, a refill resumes and pays the backlog.
+      - log_type: "poke"
+        table: "magi_tokenomics_poke_events"
+        schema:
+          from_epoch: numeric
+          last_epoch: numeric
+          epochs: numeric
+          pulled: numeric
+          starved: bool
+        parse: "json"
+        fields:
+          from_epoch: "$.attributes.from_epoch"
+          last_epoch: "$.attributes.last_epoch"
+          epochs: "$.attributes.epochs"
+          pulled: "$.attributes.pulled"
+          starved: "$.attributes.starved"
+
+      # Per-(bucket, epoch) allocation. The dust bucket can produce TWO rows for one
+      # epoch — its weighted slice and the remainder — which sum to its owed record.
+      - log_type: "alloc"
+        table: "magi_tokenomics_alloc_events"
+        schema:
+          bucket: string
+          epoch: numeric
+          amount: numeric
+          is_dust: bool
+        parse: "json"
+        fields:
+          bucket: "$.attributes.bucket"
+          epoch: "$.attributes.epoch"
+          amount: "$.attributes.amount"
+          is_dust: "$.attributes.is_dust"
+
+      - log_type: "bucket_claim"
+        table: "magi_tokenomics_bucket_claim_events"
+        schema:
+          bucket: string
+          epoch: numeric
+          amount: numeric
+          target: string
+        parse: "json"
+        fields:
+          bucket: "$.attributes.bucket"
+          epoch: "$.attributes.epoch"
+          amount: "$.attributes.amount"
+          target: "$.attributes.target"
+
+      # Guardian passthrough. `phase` is queue / cancel / execute; `committed` is
+      # false while an Attest-mode action is still short of its threshold, which is
+      # the state an operator most needs to see.
+      - log_type: "tokenop"
+        table: "magi_tokenomics_tokenop_events"
+        schema:
+          phase: string
+          op: string
+          nonce: string
+          op_key: string
+          new_owner: string
+          ready_height: numeric
+          committed: bool
+        parse: "json"
+        fields:
+          phase: "$.attributes.phase"
+          op: "$.attributes.op"
+          nonce: "$.attributes.nonce"
+          op_key: "$.attributes.op_key"
+          new_owner: "$.attributes.new_owner"
+          ready_height: "$.attributes.ready_height"
+          committed: "$.attributes.committed"
+
+  # =========================================================
+  # C3 — channel distributor
+  # =========================================================
+  - discoverEvent: "c3_init"
+    events:
+      - log_type: "c3_init"
+        table: "magi_tokenomics_c3_init_events"
+        schema:
+          token: string
+          owner: string
+          funder: string
+          treasury: string
+          genesis: numeric
+          epoch_len: numeric
+          guardian_mode: string
+          guardian_auth: string
+          guardian_threshold: numeric
+        parse: "json"
+        fields:
+          token: "$.attributes.token"
+          owner: "$.attributes.owner"
+          funder: "$.attributes.funder"
+          treasury: "$.attributes.treasury"
+          genesis: "$.attributes.genesis"
+          epoch_len: "$.attributes.epoch_len"
+          guardian_mode: "$.attributes.guardian_mode"
+          guardian_auth: "$.attributes.guardian_auth"
+          guardian_threshold: "$.attributes.guardian_threshold"
+
+      # Channels are append-only, so this table is the channel registry.
+      - log_type: "channel"
+        table: "magi_tokenomics_channel_events"
+        schema:
+          channel: string
+          bucket: string
+          window: numeric
+          role: string
+          reporter_mode: string
+          reporter_auth: string
+          reporter_threshold: numeric
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          bucket: "$.attributes.bucket"
+          window: "$.attributes.window"
+          role: "$.attributes.role"
+          reporter_mode: "$.attributes.reporter_mode"
+          reporter_auth: "$.attributes.reporter_auth"
+          reporter_threshold: "$.attributes.reporter_threshold"
+
+      - log_type: "pull"
+        table: "magi_tokenomics_pull_events"
+        schema:
+          channel: string
+          epoch: numeric
+          received: numeric
+          cumulative: numeric
+          funded_at: numeric
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          received: "$.attributes.received"
+          cumulative: "$.attributes.cumulative"
+          funded_at: "$.attributes.funded_at"
+
+      # One row per PAGE. `submitted` is the reporter's entry list verbatim; the
+      # per-account share book is (submitted − whatever the skip table names for the
+      # same channel/epoch/page). One log per page rather than per entry keeps a
+      # 60-entry page at ~7,300 RC instead of ~14,100.
+      - log_type: "shares"
+        table: "magi_tokenomics_shares_events"
+        schema:
+          channel: string
+          epoch: numeric
+          page: numeric
+          entries: numeric
+          page_total: numeric
+          new_total: numeric
+          submitted: string
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          page: "$.attributes.page"
+          entries: "$.attributes.entries"
+          page_total: "$.attributes.page_total"
+          new_total: "$.attributes.new_total"
+          submitted: "$.attributes.submitted"
+
+      # THE TABLE TO ALERT ON. A skipped entry is a no-op inside a transaction that
+      # SUCCEEDED: the page applied, totalShares looks right, and that earner is
+      # never paid. Nothing else on chain records it.
+      - log_type: "skip"
+        table: "magi_tokenomics_share_skip_events"
+        schema:
+          scope: string
+          channel: string
+          epoch: numeric
+          page: numeric
+          raw_entry: string
+          reason: string
+        parse: "json"
+        fields:
+          scope: "$.attributes.scope"
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          page: "$.attributes.page"
+          raw_entry: "$.attributes.raw_entry"
+          reason: "$.attributes.reason"
+
+      # status is finalized | cancelled. rolled_amount is non-zero only on a cancel,
+      # where the funding moves to the channel's unallocated pool.
+      - log_type: "epoch_status"
+        table: "magi_tokenomics_epoch_status_events"
+        schema:
+          channel: string
+          epoch: numeric
+          status: string
+          challenge_height: numeric
+          total_shares: numeric
+          funded: numeric
+          rolled_amount: numeric
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          status: "$.attributes.status"
+          challenge_height: "$.attributes.challenge_height"
+          total_shares: "$.attributes.total_shares"
+          funded: "$.attributes.funded"
+          rolled_amount: "$.attributes.rolled_amount"
+
+      - log_type: "sweep_unallocated"
+        table: "magi_tokenomics_sweep_unallocated_events"
+        schema:
+          channel: string
+          amount: numeric
+          to: string
+          nonce: string
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          amount: "$.attributes.amount"
+          to: "$.attributes.to"
+          nonce: "$.attributes.nonce"
+
+      # payout = funded * share / total_shares, all four emitted so a claimant can
+      # check what they were paid instead of taking the amount on faith.
+      - log_type: "claim"
+        table: "magi_tokenomics_claim_events"
+        schema:
+          channel: string
+          epoch: numeric
+          acct: string
+          payout: numeric
+          share: numeric
+          total_shares: numeric
+          funded: numeric
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          acct: "$.attributes.acct"
+          payout: "$.attributes.payout"
+          share: "$.attributes.share"
+          total_shares: "$.attributes.total_shares"
+          funded: "$.attributes.funded"

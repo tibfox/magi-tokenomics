@@ -182,7 +182,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+a.name)
 		t.Logf("ledger balance hive:%-14s hbd=%d  -> RC ~%d", a.name, b.Hbd, b.Hbd+10000)
 		if a.node == 3 && b.Hbd < 10000 {
-			t.Fatalf("attacker ledger hbd=%d is too thin: the 34-attack sweep needs RC "+
+			t.Fatalf("attacker ledger hbd=%d is too thin: the PHASE 8 outsider sweep needs RC "+
 				"well past the free tier or it fails on RC, not on authority", b.Hbd)
 		}
 	}
@@ -877,6 +877,6 @@ func TestDevnetMagiFull(t *testing.T) {
 	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")
 	t.Logf("PASSTHROUGH OK: and unpaused again — the retained power works in both directions")
 
-	t.Logf("FULL SYSTEM DEVNET PASSED — 7 contracts + reporter, one emission split 3 ways")
+	t.Logf("FULL SYSTEM DEVNET PASSED — the token + all three contracts + reporter, one emission split 3 ways")
 	t.Logf("hive fixture calls: %v", fixture.hits)
 }

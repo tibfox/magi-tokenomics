@@ -7,6 +7,7 @@ package main
 import (
 	"magi_token/adapter"
 	"magi_token/auth"
+	"magi_token/events"
 	"magi_token/sdk"
 	"math/big"
 	"strconv"
@@ -79,6 +80,18 @@ func Init(payload *string) *string {
 	// Reward channels are added afterwards with addChannel, because verifying each
 	// one's bucket requires calling the funder and a deployment may carry several.
 	set(kInit, "1")
+	// Discovery anchor for the indexer — see the note on c2_init.
+	events.New("c3_init").
+		Str("token", f(payload, "token")).
+		Str("owner", *owner).
+		Str("funder", f(payload, "funder")).
+		Str("treasury", tre).
+		Str("genesis", sg).
+		Str("epoch_len", se).
+		Str("guardian_mode", f(payload, "guardianMode")).
+		Str("guardian_auth", f(payload, "guardianAuth")).
+		Str("guardian_threshold", f(payload, "guardianThreshold")).
+		Emit()
 	return ok()
 }
 
@@ -101,6 +114,13 @@ func PullFunding(payload *string) *string {
 	if !present("fundedAt|" + ch + "|" + ep) {
 		set("fundedAt|"+ch+"|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
 	}
+	events.New("pull").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Big("received", got).
+		Big("cumulative", getBig(k)).
+		U64("funded_at", getU("fundedAt|"+ch+"|"+ep)).
+		Emit()
 	return str(`{"funded":"` + getBig(k).String() + `"}`)
 }
 
@@ -128,16 +148,38 @@ func SubmitShares(payload *string) *string {
 			sdk.Abort("page already applied")
 		}
 		set(ak, "1")
-		applyEntries(ch, ep, entries)
+		applyEntries(ch, ep, page, entries)
 	}
 	return str(`{"applied":` + boolStr(committed) + `}`)
 }
 
-func applyEntries(ch, ep, entries string) {
+// emitSkip records an entry that submitShares silently dropped.
+//
+// This is the most valuable log this contract emits. A skipped entry is a no-op
+// inside a transaction that SUCCEEDS: the page is marked applied, totalShares
+// looks correct, and the earner is simply never paid. Nothing in the return value
+// or the state records that the entry was ever present, so a reporter shipping
+// one typo'd account produced an invisible loss. Logs survive only successful
+// transactions — which is precisely this case.
+func emitSkip(ch, ep, page, raw, reason string) {
+	events.New("skip").
+		Str("scope", "shares").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("page", page).
+		Str("raw_entry", raw).
+		Str("reason", reason).
+		Emit()
+}
+
+func applyEntries(ch, ep, page, entries string) {
 	total := getBig("totalShares|" + ch + "|" + ep)
+	counted := 0
+	pageTotal := new(big.Int)
 	for _, e := range splitComma(entries) {
 		acct, sh := split2(e)
 		if acct == "" {
+			emitSkip(ch, ep, page, e, "no account")
 			continue
 		}
 		validateAddr(acct)
@@ -148,17 +190,43 @@ func applyEntries(ch, ep, entries string) {
 		// finds nothing — so it silently diluted everyone else and stranded that
 		// slice of the funding permanently.
 		if !isLedgerAddr(acct) {
+			emitSkip(ch, ep, page, e, "not a ledger address")
 			continue
 		}
 		s := parseBig(sh)
 		if s.Sign() <= 0 {
+			emitSkip(ch, ep, page, e, "shares not positive")
 			continue
 		}
 		sk := "share|" + ch + "|" + ep + "|" + acct
 		setBig(sk, new(big.Int).Add(getBig(sk), s))
 		total.Add(total, s)
+		counted++
+		pageTotal.Add(pageTotal, s)
 	}
 	setBig("totalShares|"+ch+"|"+ep, total)
+	// ONE log per page carrying the submitted entries verbatim, rather than one log
+	// per entry.
+	//
+	// Both shapes reconstruct the share book exactly — applied = submitted minus
+	// whatever the skip logs above named — but the per-entry shape cost 229 RC an
+	// entry against 91 before, taking a 60-entry page from 5,942 RC to 14,127 and a
+	// 500-earner epoch from ~44,000 to ~127,000. submitShares is the single
+	// most-repeated privileged call in the system and the reporter is its heaviest
+	// RC consumer, so the page-level form is the right default: it holds the same
+	// information for a fraction of the spend.
+	//
+	// The entries string is bounded by the 4,096-byte payload cap that already binds
+	// before RC does, so this log cannot grow unboundedly either.
+	events.New("shares").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("page", page).
+		Int("entries", counted).
+		Big("page_total", pageTotal).
+		Big("new_total", total).
+		Str("submitted", entries).
+		Emit()
 }
 
 // finalizeEpoch — reporter freezes the epoch and opens the challenge window.
@@ -200,7 +268,17 @@ func FinalizeEpoch(payload *string) *string {
 		return str(`{"finalized":false}`) // pending more attestations
 	}
 	set("status|"+ch+"|"+ep, "finalized")
-	set("chal|"+ch+"|"+ep, strconv.FormatUint(blockHeight()+getU("ch_window|"+ch), 10))
+	chal := blockHeight() + getU("ch_window|"+ch)
+	set("chal|"+ch+"|"+ep, strconv.FormatUint(chal, 10))
+	events.New("epoch_status").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("status", "finalized").
+		U64("challenge_height", chal).
+		Big("total_shares", getBig("totalShares|"+ch+"|"+ep)).
+		Big("funded", getBig("funded|"+ch+"|"+ep)).
+		Big("rolled_amount", new(big.Int)).
+		Emit()
 	return ok()
 }
 
@@ -259,10 +337,21 @@ func CancelEpoch(payload *string) *string {
 	// Roll the pulled funding forward into the unallocated pool (M-B/R11) so it
 	// is not stranded — recoverable via sweepUnallocated.
 	fk := "funded|" + ch + "|" + ep
+	rolled := new(big.Int)
 	if amt := getBig(fk); amt.Sign() > 0 {
-		setBig("unalloc|" + ch, new(big.Int).Add(getBig("unalloc|" + ch), amt))
+		setBig("unalloc|"+ch, new(big.Int).Add(getBig("unalloc|"+ch), amt))
 		setBig(fk, new(big.Int))
+		rolled = amt
 	}
+	events.New("epoch_status").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("status", "cancelled").
+		U64("challenge_height", getU("chal|"+ch+"|"+ep)).
+		Big("total_shares", getBig("totalShares|"+ch+"|"+ep)).
+		Big("funded", new(big.Int)).
+		Big("rolled_amount", rolled).
+		Emit()
 	return ok()
 }
 
@@ -290,8 +379,14 @@ func SweepUnallocated(payload *string) *string {
 	if amt.Sign() <= 0 {
 		sdk.Abort("nothing to sweep")
 	}
-	setBig("unalloc|" + ch, new(big.Int)) // CEI before transfer
+	setBig("unalloc|"+ch, new(big.Int)) // CEI before transfer
 	adapter.Transfer(asset(), to, amt)
+	events.New("sweep_unallocated").
+		Str("channel", ch).
+		Big("amount", amt).
+		Str("to", to).
+		Str("nonce", nonce).
+		Emit()
 	return str(`{"swept":"` + amt.String() + `"}`)
 }
 
@@ -334,6 +429,17 @@ func Claim(payload *string) *string {
 	// CEI: mark claimed before external transfer
 	set(ck, "1")
 	adapter.Transfer(asset(), c, payout)
+	// share and total_shares travel with the payout so funded*share/totalShares can
+	// be re-derived off-chain — an amount on its own cannot be checked by anyone.
+	events.New("claim").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("acct", c).
+		Big("payout", payout).
+		Big("share", share).
+		Big("total_shares", ts).
+		Big("funded", funded).
+		Emit()
 	return str(`{"claimed":"` + payout.String() + `"}`)
 }
 
@@ -382,9 +488,22 @@ func canon(s, name string) string {
 func statusOf(ch, ep string) string { return getStr("status|" + ch + "|" + ep) }
 
 // epochEnd: last block of the given epoch, from the funder's schedule.
+//
+// `ep` is caller-supplied and canon() only bounds it to 19 digits, so g + (n+1)*el can
+// wrap uint64. A wrapped end is SMALL, which would make cancelEpoch's stale-rescue
+// anchor tiny and open the guardian's rescue window immediately for an epoch that does
+// not exist. Nothing can reach it — the rescue path requires funded > 0 first, and
+// funding only exists for epochs C2 distributed — but that is a precondition
+// elsewhere, not a check here, and C1 carries the same guard in epochBounds.
 func epochEnd(ep string) uint64 {
 	g, el := getU("cfg_genesis"), getU("cfg_epochLen")
 	n, _ := strconv.ParseUint(ep, 10, 64)
+	if el == 0 {
+		sdk.Abort("no schedule adopted")
+	}
+	if n+1 < n || n+1 > (^uint64(0)-g)/el {
+		sdk.Abort("epoch out of range")
+	}
 	return g + (n+1)*el - 1
 }
 
@@ -666,7 +785,8 @@ func selfAddr() string {
 // flight.
 
 // addChannel: {"channel","bucket","window","reporterMode","reporterAuth",
-//              "reporterThreshold","role"} — owner-only, once per name.
+//
+//	"reporterThreshold","role"} — owner-only, once per name.
 //
 //go:wasmexport addChannel
 func AddChannel(payload *string) *string {
@@ -751,6 +871,15 @@ func AddChannel(payload *string) *string {
 	set("ch_window|"+ch, w)
 	set("ch_forbucket|"+bucket, ch)
 	set("ch_bucket|"+ch, bucket) // written LAST: it is what mustChannel tests
+	events.New("channel").
+		Str("channel", ch).
+		Str("bucket", bucket).
+		Str("window", w).
+		Str("role", getStr("ch_role|"+ch)).
+		Str("reporter_mode", f(payload, "reporterMode")).
+		Str("reporter_auth", f(payload, "reporterAuth")).
+		Str("reporter_threshold", f(payload, "reporterThreshold")).
+		Emit()
 	return ok()
 }
 
