@@ -9,6 +9,7 @@ import (
 
 	"magi_token/reporter/hivesrc"
 	"magi_token/reporter/sharecore"
+	"magi_token/reporter/submit"
 )
 
 // Config is the reporter's whole configuration.
@@ -233,23 +234,16 @@ func (c *Config) Validate() error {
 	// whoever happened to be on the last page; now it produces a loud refusal, but
 	// only after burning RC on every failed page. Catch it at config load instead.
 	//
-	// Measured at ~91 RC per entry over a ~465 fixed base (docs/rc-costs.md); the
-	// constants below round both up, because the FIRST entry costs more than the
-	// marginal rate and a base of exactly 465 still under-covers a one-entry page. The 20% headroom covers metering variance between pages of different
-	// byte lengths.
-	//
-	// The BASE is the part to keep honest. It was ~200 while each share key was
-	// `share|<epoch>|<acct>`; channel-scoping added a component to every key the call
-	// writes and pushed the fixed cost to ~465. Leaving 200 in place made this check
-	// UNDER-estimate small pages — a one-entry page validated against 354 RC while
-	// really costing ~697, so a config could pass load and then revert every single
-	// page, which is precisely the failure this check exists to prevent.
-	const perEntryRC, baseRC = 95, 500
-	if want := (baseRC + perEntryRC*c.Page.MaxEntries) * 12 / 10; c.Submit.RcLimit < want {
+	// The cost constants live in submit/rccost.go, next to nothing else, because they
+	// describe the CONTRACT and not the reporter — and because itest binds them to a
+	// real metered measurement. They have gone stale twice (channel-scoping, then
+	// event emission); a stale one makes this check UNDER-estimate a page, so a config
+	// loads cleanly and then reverts every full page it sends.
+	if want := submit.RCForPage(c.Page.MaxEntries); c.Submit.RcLimit < want {
 		return fmt.Errorf("submit.rc_limit %d cannot fit a full page of %d entries (needs ~%d: "+
 			"~%d RC/entry over a ~%d base, plus headroom). Every full page would revert while the "+
 			"cheap calls succeeded — raise rc_limit or lower page.max_entries",
-			c.Submit.RcLimit, c.Page.MaxEntries, want, perEntryRC, baseRC)
+			c.Submit.RcLimit, c.Page.MaxEntries, want, submit.RCPerEntry, submit.RCBase)
 	}
 	if c.Submit.Keeper && c.Contracts.Funder == "" {
 		return fmt.Errorf("submit.keeper requires contracts.funder (the C2 contract id)")
