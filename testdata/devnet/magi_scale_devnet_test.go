@@ -312,15 +312,19 @@ func TestDevnetMagiScale(t *testing.T) {
 		ownerNode[id] = node
 		return id
 	}
-	tokenID := dep("magi-token", magiTokenWasm, 1)
-	c2ID := dep("magi-c2-emission", magiWasm(t, "c2-emission/artifacts/main.wasm"), 1)
-	c3ID := dep("magi-distributor", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 1)
-	c1ID := dep("magi-c1-staking", magiWasm(t, "c1-staking/artifacts/main.wasm"), 2)
+	// NOT node 1. Every deploy costs 10 HBD of the DEPLOYER's L1 balance, and L1
+	// balance is what becomes RC — so deploying from the reporter's account spends
+	// the capacity it needs for nine share pages. Node 1 reports and does nothing
+	// else; the deploys are spread across two other funded accounts.
+	tokenID := dep("magi-token", magiTokenWasm, 2)
+	c2ID := dep("magi-c2-emission", magiWasm(t, "c2-emission/artifacts/main.wasm"), 2)
+	c3ID := dep("magi-distributor", magiWasm(t, "c3-distributor/artifacts/main.wasm"), 3)
+	c1ID := dep("magi-c1-staking", magiWasm(t, "c1-staking/artifacts/main.wasm"), 3)
 
 	// The reporter carries the whole epoch: ~9 share pages at ~5,900 RC each. Fund it
 	// as heavily as L1 allows or it runs out mid-epoch, which looks like a rejected
 	// page rather than an empty wallet.
-	for _, node := range []int{1, 2} {
+	for _, node := range []int{1, 2, 3} {
 		moved := 0
 		for round := 0; round < 4; round++ {
 			progressed := false
@@ -506,15 +510,37 @@ func TestDevnetMagiScale(t *testing.T) {
 	}
 
 	// ---------------- PHASE 5: put 500 earners on chain ----------------
+	// Send the share pages FIRST and confirm them, then finalize.
+	//
+	// finalizeEpoch is irreversible and the contract cannot tell a complete report
+	// from a partial one — it only checks that SOMETHING was submitted. Broadcasting
+	// the plan straight through means finalizing over whatever happened to have
+	// landed, which pays the whole epoch to a fraction of the earners. The reporter's
+	// own `run` gates on this for the same reason; a suite that broadcasts the plan
+	// blindly has to do it by hand.
 	pages := 0
+	var finalizeCall struct{ id, action, payload string }
 	for i, c := range plan.Calls {
-		if c.Action == "submitShares" {
-			pages++
+		if c.Action == "finalizeEpoch" {
+			finalizeCall = struct{ id, action, payload string }{c.ContractID, c.Action, c.Payload}
+			continue
 		}
+		pages++
 		callN(1, c.ContractID, c.Action, c.Payload, fmt.Sprintf("plan[%d] %s", i, c.Action))
 	}
 	t.Logf("submitted %d share pages for %d accounts", pages, expected.Accounts)
 
+	// Every page must be on chain before the epoch closes. If this times out the
+	// pages did not all apply — almost always the reporter running out of RC — and
+	// finalizing anyway would lock in a partial payout.
+	waitValue(c3ID, "totalShares|content|0", expected.TotalShares,
+		"all share pages applied before finalize")
+	t.Logf("all %d pages applied: totalShares=%s", pages, expected.TotalShares)
+
+	if finalizeCall.id == "" {
+		t.Fatal("the plan contained no finalizeEpoch — set submit.finalize")
+	}
+	callN(1, finalizeCall.id, finalizeCall.action, finalizeCall.payload, "finalizeEpoch")
 	waitKey(c3ID, "status|content|0", "epoch finalized")
 	waitValue(c3ID, "totalShares|content|0", expected.TotalShares, "chain totalShares")
 	t.Logf("SEAM OK: chain totalShares == reporter totalShares == %s", expected.TotalShares)
