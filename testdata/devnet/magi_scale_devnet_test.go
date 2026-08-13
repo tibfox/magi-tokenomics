@@ -472,39 +472,41 @@ func TestDevnetMagiScale(t *testing.T) {
 			"staked_bps":        5000,
 		},
 		"page": map[string]any{"max_entries": 60, "max_bytes": 3800},
-		"submit": map[string]any{"account": owner, "rc_limit": 30000,
+		// finalize:true puts finalizeEpoch in the PLAN. Without it the plan is share
+		// pages only, and the epoch never reaches "finalized" — which surfaces as a
+		// timeout waiting for a status key rather than as a missing call.
+		"submit": map[string]any{"account": owner, "rc_limit": 30000, "finalize": true,
 			"progress_file": filepath.Join(workDir, "progress.json")},
 	}, "", "  ")
 	if err := os.WriteFile(cfgPath, blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	planStart := time.Now()
-	out, err := exec.CommandContext(ctx, reporterBin, "plan", "-config", cfgPath, "-epoch", "0", "-json").Output()
-	if err != nil {
-		t.Fatalf("reporter [plan -json] failed: %v\n%s", err, out)
+	// Reuse the package's own plan/compute helpers rather than re-declaring the JSON
+	// shapes: `plan` carries only {epoch, calls} and the totals come from `compute`.
+	// Getting that wrong is what cost this suite its first devnet run.
+	runReporter := func(args ...string) []byte {
+		full := append([]string{"-config", cfgPath}, args...)
+		out, rerr := exec.CommandContext(ctx, reporterBin, full...).Output()
+		if rerr != nil {
+			t.Fatalf("reporter %v failed: %v\n%s", args, rerr, out)
+		}
+		return out
 	}
-	var plan struct {
-		Epoch uint64 `json:"epoch"`
-		Calls []struct {
-			ContractID string `json:"contract_id"`
-			Action     string `json:"action"`
-			Payload    string `json:"payload"`
-		} `json:"calls"`
-		Expected struct {
-			TotalShares string `json:"total_shares"`
-			Accounts    int    `json:"accounts"`
-		} `json:"expected"`
-	}
-	if err := json.Unmarshal(out, &plan); err != nil {
-		t.Fatalf("reporter plan json: %v\n%s", err, out)
-	}
-	t.Logf("REPORTER: %d accounts, totalShares=%s, %d calls, computed in %s",
-		plan.Expected.Accounts, plan.Expected.TotalShares, len(plan.Calls), time.Since(planStart).Round(time.Millisecond))
 
-	if plan.Expected.Accounts < 400 {
+	planStart := time.Now()
+	var plan reporterPlan
+	if err := json.Unmarshal(runReporter("plan", "-epoch", "0", "-json"), &plan); err != nil {
+		t.Fatalf("reporter plan json: %v", err)
+	}
+	expected := reporterCompute(t, runReporter, "0")
+	t.Logf("REPORTER: %d accounts, totalShares=%s, %d calls, computed in %s",
+		expected.Accounts, expected.TotalShares, len(plan.Calls),
+		time.Since(planStart).Round(time.Millisecond))
+
+	if expected.Accounts < 400 {
 		t.Fatalf("expected the epoch to pay hundreds of accounts, got %d — the walk is "+
-			"dropping posts or the fixture is not being read", plan.Expected.Accounts)
+			"dropping posts or the fixture is not being read", expected.Accounts)
 	}
 
 	// ---------------- PHASE 5: put 500 earners on chain ----------------
@@ -515,11 +517,11 @@ func TestDevnetMagiScale(t *testing.T) {
 		}
 		callN(1, c.ContractID, c.Action, c.Payload, fmt.Sprintf("plan[%d] %s", i, c.Action))
 	}
-	t.Logf("submitted %d share pages for %d accounts", pages, plan.Expected.Accounts)
+	t.Logf("submitted %d share pages for %d accounts", pages, expected.Accounts)
 
 	waitKey(c3ID, "status|content|0", "epoch finalized")
-	waitValue(c3ID, "totalShares|content|0", plan.Expected.TotalShares, "chain totalShares")
-	t.Logf("SEAM OK: chain totalShares == reporter totalShares == %s", plan.Expected.TotalShares)
+	waitValue(c3ID, "totalShares|content|0", expected.TotalShares, "chain totalShares")
+	t.Logf("SEAM OK: chain totalShares == reporter totalShares == %s", expected.TotalShares)
 
 	// ---------------- PHASE 6: claim, split 50/50 liquid and staked ----------------
 	time.Sleep(20 * time.Second) // challenge window
@@ -555,7 +557,7 @@ func TestDevnetMagiScale(t *testing.T) {
 	}
 
 	t.Logf("SCALE RUN OK: %d posts, %d votes, %d accounts, %d pages, %d funded",
-		fx.totalPosts(), fx.totalPosts()*scaleVotesPost, plan.Expected.Accounts, pages, scaleEmission)
+		fx.totalPosts(), fx.totalPosts()*scaleVotesPost, expected.Accounts, pages, scaleEmission)
 	t.Logf("hive rpc calls: %v", fx.hits)
 }
 
@@ -623,7 +625,7 @@ func TestScalePreflight(t *testing.T) {
 			"muted": []string{}, "staked_bps": 5000,
 		},
 		"page":   map[string]any{"max_entries": 60, "max_bytes": 3800},
-		"submit": map[string]any{"account": "magi.test1", "rc_limit": 30000},
+		"submit": map[string]any{"account": "magi.test1", "rc_limit": 30000, "finalize": true},
 	}, "", "  ")
 	if err := os.WriteFile(cfgPath, blob, 0o644); err != nil {
 		t.Fatal(err)
@@ -674,4 +676,39 @@ func TestScalePreflight(t *testing.T) {
 		t.Fatalf("votes fetched %d times for %d posts — a post reachable under several "+
 			"tags must be collected once", got, scalePosts)
 	}
+
+	// PARSE THE PLAN TOO. compute and plan emit DIFFERENT shapes — plan carries only
+	// {epoch, calls} and epoch is a STRING — and checking only compute is what let a
+	// wrong plan struct survive to a devnet run and fail thirteen minutes in. The
+	// call list is what actually gets broadcast, so it is the half worth validating.
+	pcmd := exec.Command(reporterBin, "plan", "-config", cfgPath, "-epoch", "0", "-json")
+	var pstderr bytes.Buffer
+	pcmd.Stderr = &pstderr
+	pout, perr := pcmd.Output()
+	if perr != nil {
+		t.Fatalf("reporter plan failed: %v\nstderr: %s", perr, pstderr.String())
+	}
+	var plan reporterPlan
+	if err := json.Unmarshal(pout, &plan); err != nil {
+		t.Fatalf("plan json does not match reporterPlan: %v\n%s", err, pout)
+	}
+	shares := 0
+	for _, c := range plan.Calls {
+		if c.Action == "submitShares" {
+			shares++
+		}
+		if c.ContractID == "" || c.Payload == "" {
+			t.Fatalf("plan call %q has an empty contract or payload — it would broadcast nothing", c.Action)
+		}
+	}
+	if shares != len(res.Pages) {
+		t.Fatalf("plan has %d submitShares calls for %d computed pages", shares, len(res.Pages))
+	}
+	// The epoch has to be CLOSED by the plan, or the devnet run waits forever on a
+	// status key that nothing writes.
+	if len(plan.Calls) != shares+1 || plan.Calls[len(plan.Calls)-1].Action != "finalizeEpoch" {
+		t.Fatalf("the plan must end in finalizeEpoch, got %d calls ending in %q",
+			len(plan.Calls), plan.Calls[len(plan.Calls)-1].Action)
+	}
+	t.Logf("PLAN: %d calls (%d share pages) for epoch %s", len(plan.Calls), shares, plan.Epoch)
 }
