@@ -518,21 +518,59 @@ func TestDevnetMagiScale(t *testing.T) {
 	// landed, which pays the whole epoch to a fraction of the earners. The reporter's
 	// own `run` gates on this for the same reason; a suite that broadcasts the plan
 	// blindly has to do it by hand.
+	type call struct{ id, action, payload string }
 	pages := 0
-	var finalizeCall struct{ id, action, payload string }
+	var finalizeCall call
+	var sharePages []call
 	for i, c := range plan.Calls {
 		if c.Action == "finalizeEpoch" {
-			finalizeCall = struct{ id, action, payload string }{c.ContractID, c.Action, c.Payload}
+			finalizeCall = call{c.ContractID, c.Action, c.Payload}
 			continue
 		}
+		sharePages = append(sharePages, call{c.ContractID, c.Action, c.Payload})
 		pages++
 		callN(1, c.ContractID, c.Action, c.Payload, fmt.Sprintf("plan[%d] %s", i, c.Action))
 	}
 	t.Logf("submitted %d share pages for %d accounts", pages, expected.Accounts)
 
-	// Every page must be on chain before the epoch closes. If this times out the
-	// pages did not all apply — almost always the reporter running out of RC — and
-	// finalizing anyway would lock in a partial payout.
+	// Confirm each page INDIVIDUALLY and resend the ones that did not land.
+	//
+	// Run 20 lost roughly a fifth of the shares here — one page of nine, while the
+	// pages after it applied — so it was not RC running out, which would have taken
+	// everything downstream with it. A single page reverting on L2 after a successful
+	// broadcast is a normal thing to survive, and `ssdone|<ch>|<ep>|<page>` is the
+	// receipt the contract writes only on application, so it can be checked per page
+	// instead of inferred from a total that is 80% of what it should be.
+	//
+	// submitShares is idempotent per (channel, epoch, page), so resending a page that
+	// DID apply is refused harmlessly. That makes resend-the-missing safe and is
+	// exactly what `reporter run` does.
+	pageApplied := func(i int) bool {
+		return stateOf(c3ID, fmt.Sprintf("ssdone|content|0|%d", i)) != ""
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		var missing []int
+		for i := 0; i < pages; i++ {
+			if !pageApplied(i) {
+				missing = append(missing, i)
+			}
+		}
+		if len(missing) == 0 {
+			break
+		}
+		t.Logf("attempt %d: pages not applied: %v — resending", attempt, missing)
+		if attempt == 3 {
+			t.Fatalf("pages %v never applied after 3 attempts; chain totalShares=%s want %s",
+				missing, stateOf(c3ID, "totalShares|content|0"), expected.TotalShares)
+		}
+		for _, i := range missing {
+			callN(1, sharePages[i].id, sharePages[i].action, sharePages[i].payload,
+				fmt.Sprintf("resend page %d", i))
+		}
+		time.Sleep(20 * time.Second)
+	}
+
+	// Only now is the epoch complete enough to close.
 	waitValue(c3ID, "totalShares|content|0", expected.TotalShares,
 		"all share pages applied before finalize")
 	t.Logf("all %d pages applied: totalShares=%s", pages, expected.TotalShares)
