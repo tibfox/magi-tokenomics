@@ -138,6 +138,36 @@ Roughly **~133 RC per entry over a ~425 fixed base**, up from ~91 over ~465. The
 default page size of 60 entries costs ~8,400 RC; the 4096-byte payload cap usually
 binds before RC does.
 
+> ### ★ THE TABLE ABOVE IS A FLOOR, AND A REAL EPOCH COSTS MORE
+>
+> Those entries pair a maximum-length account name with a SMALL share value. In a
+> real epoch the share is the accumulated weight of every vote an account cast, which
+> runs to eighteen digits — and cost scales with entry BYTES. Measured against the
+> shape a live pool actually emits (`hive:u123:521226084116000`):
+>
+> | entries | payload | RC | vs the table above |
+> |---:|---:|---:|---:|
+> | 10 | 259 B | 4,292 | +126% |
+> | 30 | 779 B | 9,070 | +97% |
+> | 60 | 1,559 B | **15,309** | **+83%** |
+>
+> **~215 RC per entry over a ~1,900 base.** Reproduce with
+> `TestRC_RealisticSharePageCost`.
+>
+> This is not academic. It is what a 500-earner epoch costs and therefore what a
+> reporter must hold:
+>
+>     502 earners x ~215 RC   ~= 108,000    (the floor: pagination barely moves it)
+>     + per-page base x 9     ~=  17,000
+>     + poke and pull         ~=   2,500
+>                                --------
+>                                ~127,500 RC  ~= 125 HBD on the reporter's ledger
+>
+> A devnet witness tops out near 100 HBD, which is why an epoch this size cannot be
+> proven on one devnet account and has to pool balances from idle ones. On mainnet it
+> is simply a deposit. **Size the reporter from the number of EARNERS, not the number
+> of posts** — a busy tribe with few voters is cheap and a quiet one with many is not.
+
 > **These figures moved for two reasons, and the second is easy to miss.** Event
 > emission is one. The other is that the fixture now uses account names of the maximum
 > length a Hive account can have (`hive:` + 16 characters) instead of the shorter

@@ -324,7 +324,7 @@ func TestDevnetMagiScale(t *testing.T) {
 	// The reporter carries the whole epoch: ~9 share pages at ~5,900 RC each. Fund it
 	// as heavily as L1 allows or it runs out mid-epoch, which looks like a rejected
 	// page rather than an empty wallet.
-	for _, node := range []int{1, 2, 3} {
+	for _, node := range []int{1, 2, 3, 4, 5} {
 		moved := 0
 		for round := 0; round < 4; round++ {
 			progressed := false
@@ -340,10 +340,30 @@ func TestDevnetMagiScale(t *testing.T) {
 				break
 			}
 		}
-		if moved == 0 {
+		if moved == 0 && node <= 3 {
 			t.Fatalf("node %d could not deposit — it would run on the 10k free tier alone", node)
 		}
 	}
+	// POOL the idle accounts' balance into the reporter.
+	//
+	// RC capacity is the account's L2 HBD balance plus the 10,000 free tier, and one
+	// witness can only deposit what it holds on L1 — about 100 HBD, i.e. ~110,000 RC.
+	// A 500-earner epoch costs ~125,000: 502 entries at ~215 RC each is the floor, and
+	// pagination barely moves it. Run 22 died exactly there, seven pages in, with
+	// 109,667 of 110,000 spent.
+	//
+	// Nodes 4 and 5 appear in this suite only as a treasury and a guardian ADDRESS —
+	// neither of them signs anything — so their balances are dead weight. Moving them
+	// to the reporter is what makes an epoch this size affordable at all on devnet.
+	time.Sleep(20 * time.Second) // let the deposits credit before moving them
+	for _, from := range []int{4, 5} {
+		if _, terr := d.Transfer(from, 1, "95.000", "hbd", "fund the reporter"); terr != nil {
+			t.Logf("could not pool node %d's balance: %v", from, terr)
+		} else {
+			t.Logf("pooled 95 HBD from node %d into the reporter", from)
+		}
+	}
+
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
 		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+owner)
