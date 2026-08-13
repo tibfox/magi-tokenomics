@@ -100,3 +100,77 @@ func TestCompute_AppTaxWithoutBeneficiaryIsNotCollected(t *testing.T) {
 		t.Fatalf("with no beneficiary nothing may be skimmed, got total %v", got)
 	}
 }
+
+// The dust threshold is the main cost lever: every earner costs ~311 RC of on-chain
+// state whatever they are owed, so a long tail earning a rounding error can be most
+// of a reporter's bill.
+func TestCompute_MinShareDropsTheDustTail(t *testing.T) {
+	// one whale and three dust voters on the same post
+	posts := []Post{{
+		Author: "hive:author", Permlink: "p",
+		Votes: []Vote{
+			v("hive:whale", 1_000_000, 0),
+			v("hive:dust1", 10, 1),
+			v("hive:dust2", 10, 2),
+			v("hive:dust3", 10, 3),
+		},
+	}}
+
+	all := ComputeShares(posts, linear)
+	cfg := linear
+	cfg.MinShareBps = 100 // 1% of the epoch
+	cut := ComputeShares(posts, cfg)
+
+	if len(cut.Shares) >= len(all.Shares) {
+		t.Fatalf("the threshold must drop somebody: %d earners before, %d after",
+			len(all.Shares), len(cut.Shares))
+	}
+	for _, who := range []string{"hive:dust1", "hive:dust2", "hive:dust3"} {
+		if _, ok := cut.Shares[who]; ok {
+			t.Fatalf("%s is dust and should have been dropped", who)
+		}
+	}
+	if _, ok := cut.Shares["hive:whale"]; !ok {
+		t.Fatal("the whale must survive the threshold")
+	}
+}
+
+// NOTHING IS STRANDED. Payout is funded*share/totalShares, so dropping small shares
+// shrinks the denominator and their value redistributes pro-rata to whoever remains.
+// If Total did not fall with them, the dropped amount would simply never be paid.
+func TestCompute_DroppedDustRedistributesRatherThanStranding(t *testing.T) {
+	posts := []Post{{
+		Author: "hive:author", Permlink: "p",
+		Votes: []Vote{v("hive:whale", 1_000_000, 0), v("hive:dust", 10, 1)},
+	}}
+	cfg := linear
+	cfg.MinShareBps = 100
+	cut := ComputeShares(posts, cfg)
+
+	sum := new(big.Int)
+	for _, s := range cut.Shares {
+		sum.Add(sum, s)
+	}
+	if sum.Cmp(cut.Total) != 0 {
+		t.Fatalf("Total must equal the sum of the SURVIVING shares (%v vs %v) — "+
+			"otherwise the dropped slice is divided by a denominator that still counts "+
+			"it, and that fraction of the epoch is never paid to anyone", cut.Total, sum)
+	}
+}
+
+// The app-tax beneficiary is exempt: its cut is a policy transfer rather than
+// something earned, and a tax vanishing under a dust threshold would be a very
+// confusing way to discover this setting exists.
+func TestCompute_MinShareExemptsTheAppTaxBeneficiary(t *testing.T) {
+	cfg := linear
+	cfg.AppTaxBeneficiary = "hive:treasury"
+	cfg.MinShareBps = 100
+	r := ComputeShares([]Post{{
+		Author: "hive:author", Permlink: "p",
+		Votes:  []Vote{v("hive:whale", 1_000_000, 0)},
+		TaxBps: 1, // 0.01% — far below the 1% threshold
+	}}, cfg)
+	if _, ok := r.Shares["hive:treasury"]; !ok {
+		t.Fatal("the app-tax beneficiary must survive the dust threshold")
+	}
+}

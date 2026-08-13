@@ -154,6 +154,15 @@ type Config struct {
 		AuthorCurve     string   `json:"author_curve"`   // "num/den", e.g. "1/1"
 		CurationCurve   string   `json:"curation_curve"` // "1/2" = sqrt = early voters win
 		Muted           []string `json:"muted"`
+		// MinShareBps drops earners below this many basis points of the epoch total.
+		// 0 pays everyone. This is the main cost lever: every earner costs ~311 RC of
+		// on-chain state whatever they are owed, so a long tail of accounts earning a
+		// rounding error can be most of a reporter's bill. It is a policy choice —
+		// a dropped account receives nothing — and the value redistributes pro-rata
+		// to those who remain rather than being stranded.
+		//
+		// With emission E per epoch, B basis points is a floor of E*B/10000 tokens.
+		MinShareBps int `json:"min_share_bps"`
 		// StakedBps is the share of every payout delivered as STAKE rather than
 		// liquid tokens. The reporter only records it so `epoch` can cross-check the
 		// distributor's own setting — the split itself happens on-chain at claim,
@@ -357,6 +366,18 @@ func (c *Config) validateSource() error {
 			return fmt.Errorf("source.cashout_days must be 1..30 (0 selects Hive's 7), got %d",
 				c.Source.CashoutDays)
 		}
+		if c.Shares.MinShareBps < 0 || c.Shares.MinShareBps > 10000 {
+			return fmt.Errorf("shares.min_share_bps must be 0..10000 (0 pays everyone), got %d",
+				c.Shares.MinShareBps)
+		}
+		// A threshold at or near the whole pot pays one account and drops the rest.
+		// Almost certainly a units mistake — 100 meaning "1%" rather than 100 bps.
+		if c.Shares.MinShareBps >= 1000 {
+			return fmt.Errorf("shares.min_share_bps=%d would drop every earner below %d%% of "+
+				"the epoch — that is a tenth of the pot per account and almost certainly a "+
+				"units error (basis points, so 1%% is 100)",
+				c.Shares.MinShareBps, c.Shares.MinShareBps/100)
+		}
 		if err := c.validateAppTax(); err != nil {
 			return err
 		}
@@ -428,6 +449,7 @@ func (c *Config) ShareConfig() sharecore.Config {
 		CurationCurveNum: cn,
 		CurationCurveDen: cd,
 		Muted:            c.Shares.Muted,
+		MinShareBps:      c.Shares.MinShareBps,
 		// Only when a rate is actually set: passing a beneficiary with no rate would
 		// put an account into the share book that never earns, and validateAppTax
 		// already refuses a rate without a beneficiary.
@@ -466,6 +488,7 @@ const ExampleConfig = `{
     "author_curve":      "1/1",
     "curation_curve":    "1/2",
     "muted":             [],
+    "min_share_bps":     0,
     "staked_bps":        0,
     "app_tax":           { "bps": 0, "apps": [], "beneficiary": "" }
   },

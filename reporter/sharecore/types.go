@@ -76,6 +76,24 @@ type Config struct {
 	// slice, shrinking the epoch's total shares and quietly paying it to everyone
 	// else, so the collector refuses that configuration upstream.
 	AppTaxBeneficiary string
+
+	// MinShareBps drops any account whose share is below this many basis points of
+	// the epoch's total. 0 pays everyone.
+	//
+	// WHY IT EXISTS: cost. Every earner costs ~311 RC of state on chain whatever they
+	// are owed, so a long tail of accounts earning a rounding error is the single
+	// largest line in a reporter's bill — for 500 earners it IS the bill. Dropping
+	// them is the one lever that scales it down.
+	//
+	// It is a POLICY choice, not a technicality: a dropped account receives nothing.
+	// Expressed relative to the epoch's total rather than in tokens because the
+	// reporter computes shares before it knows what the epoch was funded with — with
+	// emission E, a threshold of B basis points is a floor of E*B/10000 tokens.
+	//
+	// Nothing is stranded. Payout is funded*share/totalShares and dropped shares
+	// leave totalShares, so the amount simply redistributes pro-rata to everyone who
+	// remains rather than sitting unclaimable.
+	MinShareBps int
 }
 
 // Result is the deterministic output for one epoch.

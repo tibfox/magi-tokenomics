@@ -152,5 +152,36 @@ func ComputeShares(posts []Post, cfg Config) Result {
 	for _, k := range keys {
 		total.Add(total, acc[k])
 	}
+
+	// Apply the dust threshold LAST, against the finished total.
+	//
+	// It has to be last: an account's share is the sum of everything it earned across
+	// the whole epoch, so judging any single post's contribution would drop someone
+	// who earned a little from each of forty posts. That is the opposite of the
+	// intent — the threshold is for accounts that earned almost nothing in total, not
+	// for small individual votes.
+	if cfg.MinShareBps > 0 && total.Sign() > 0 {
+		floor := new(big.Int).Mul(total, big.NewInt(int64(cfg.MinShareBps)))
+		floor.Div(floor, big.NewInt(10000))
+		if floor.Sign() > 0 {
+			kept := make(map[string]*big.Int, len(acc))
+			newTotal := new(big.Int)
+			for _, k := range keys {
+				// The app-tax beneficiary is exempt. Its cut is a policy transfer
+				// rather than something earned, and a tax that silently vanished
+				// because it fell under a dust threshold would be a very confusing
+				// way to discover this setting.
+				if acc[k].Cmp(floor) < 0 && k != cfg.AppTaxBeneficiary {
+					continue
+				}
+				kept[k] = acc[k]
+				newTotal.Add(newTotal, acc[k])
+			}
+			// Nothing is stranded: payout is funded*share/totalShares, and the
+			// dropped shares leave the denominator, so their value redistributes
+			// pro-rata to everyone remaining.
+			acc, total = kept, newTotal
+		}
+	}
 	return Result{Shares: acc, Total: total}
 }
