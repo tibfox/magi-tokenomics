@@ -179,3 +179,36 @@ func TestStakedPayout_OnlyTheAllowlistedContractMayCreditStake(t *testing.T) {
 	st := call(t, ct, spC1, "stakeOf", `{"account":"hive:mallory"}`, "hive:probe", 3, true)
 	assert.NotContains(t, st.Ret, `"1000"`, "a refused stakeFor must credit nothing: "+st.Ret)
 }
+
+// What the staked split COSTS. A liquid claim is one token transfer; a staked claim
+// adds an approve and a cross-contract stakeFor, and the claimant pays for both.
+//
+// Measured rather than asserted against a fixed number: the point is the DELTA and
+// that it stays within a claimant's means, not a figure that would need editing
+// every time the contracts change.
+func TestRC_StakedClaimCost(t *testing.T) {
+	liquid := func() int64 {
+		ct := spSetup(t, "")
+		spRunEpoch(t, ct, "hive:earner")
+		return call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`,
+			"hive:earner", 3, true).RcUsed
+	}()
+	staked := func() int64 {
+		ct := spSetup(t, "5000")
+		spRunEpoch(t, ct, "hive:earner")
+		return call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`,
+			"hive:earner", 3, true).RcUsed
+	}()
+	t.Logf("claim RC: liquid=%d staked=%d (+%d)", liquid, staked, staked-liquid)
+
+	if staked <= liquid {
+		t.Fatalf("a staked claim does strictly more work, so it cannot cost less: "+
+			"liquid=%d staked=%d", liquid, staked)
+	}
+	// A claim is the one call an ORDINARY holder makes, so it has to fit comfortably
+	// inside the free tier — someone who has earned a reward may hold no HBD at all.
+	if staked > 10000 {
+		t.Fatalf("a staked claim at %d RC no longer fits the 10k free tier, so an "+
+			"earner with no HBD could not collect their reward", staked)
+	}
+}

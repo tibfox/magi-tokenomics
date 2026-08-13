@@ -66,10 +66,18 @@ then check the per-day total against capacity ÷ 5.
 | distributor | `addChannel` | 832–1,097 | 661–911 |
 | distributor | `pullFunding` (cross-contract) | 1,103–1,225 | 821–923 |
 | distributor | `finalizeEpoch` | 554–630 | 343–347 |
-| distributor | `claim` | 678–764 | 532–609 |
+| distributor | `claim` (liquid) | 678–764 | 532–609 |
+| distributor | `claim` (part staked) | 2,967 | — |
 
 Read-only queries (`stakeOf`, `scheduleInfo`, `owedOf`, `fundedOf`, `minStakeSum`) land
 at the **100 RC floor**; `stakeAtHeight` 101 and `shareOf` 126.
+
+**A staked claim costs 3.6× a liquid one** — 2,967 against 828 in the same fixture.
+The extra 2,139 RC buys an `approve` and a cross-contract `stakeFor` on top of the
+plain transfer, and the claimant pays it. That is the number to keep an eye on,
+because a claim is the one call an ORDINARY holder makes: someone who has earned a
+reward may hold no HBD at all and be running on the 10,000 free tier alone. At 2,967
+there is room, and `TestRC_StakedClaimCost` fails if it ever stops fitting.
 
 **The `was` column is event emission.** The contracts now log every state transition
 for the indexer (see [`indexer/README.md`](../indexer/README.md)), and a log costs gas

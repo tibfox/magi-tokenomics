@@ -304,6 +304,49 @@ Every role has been turned against the system on a live devnet chain:
 | economic (in-process) | 4 | donation, Sybil split, mid-epoch exit/restake and allowance theft are all unprofitable or impossible |
 | posting-key (in-process) | 3 | a posting key cannot satisfy an active-authority role |
 
+### Reward-pool settings
+
+The knobs a pool is configured with. Most live in the reporter's config; the staked
+split is the exception, because only the distributor ever holds the tokens.
+
+| setting | where | what it does |
+|---|---|---|
+| `source.tags` | reporter | up to 5 tags/communities to index. A post matching several is collected **once** |
+| `source.excluded_tags` | reporter | drops a post carrying any of them, applied **after** the tag walk |
+| `source.limit` | reporter | max posts per epoch |
+| `source.exclude` | reporter | **accounts** that earn nothing (not tags) |
+| `source.cashout_days` | reporter | how long a post collects votes before it pays. 0 = Hive's 7 |
+| `source.ignore_declined_payout` | reporter | pay authors who declined their Hive payout. Default honours the decline |
+| `source.disable_downvotes` | reporter | drop negative votes instead of letting them net off |
+| `source.weight` | reporter | `hive_rshares` (inherits Hive's stake and mana) or `token_stake` |
+| `source.vote_*` / `downvote_*` | reporter | the vote budget, **required** for `token_stake` |
+| `shares.author_reward_bps` | reporter | author's cut; the rest goes to curators |
+| `shares.author_curve` / `curation_curve` | reporter | exact rationals. Curation `1/2` favours early voters, `1/1` is order-neutral |
+| `shares.muted` | reporter | accounts that earn nothing |
+| `shares.app_tax` | reporter | skim from posts published outside a designated app |
+| `stakedBps` + `stakeContract` | **C3 init** | how much of each claim arrives as stake |
+| `baseAnnual` / `blocksPerYear` / `epochLen` | **C2 init** | emission rate; flat, no decay schedule |
+
+Three of these deserve a warning rather than a row:
+
+**`token_stake` needs its vote budget, which is why those four are required rather
+than optional.** A staked balance is not consumed by being used, so with no budget one
+account votes every post in an epoch at full weight and the curation curve stops
+meaning anything. They are *refused* for `hive_rshares`, where the rshares already
+carry Hive's own mana and a second budget would charge the same vote twice. The budget
+is replayed per epoch, every voter starting full — SCOT carries mana forever, but
+reporter-side state that two Attest machines could disagree about is worse than a
+budget that resets.
+
+**The app tax matches on self-declared metadata.** A client writes its own `app` into
+`json_metadata`, so anyone posting via the API can claim any app they like. It shapes
+the behaviour of ordinary users on ordinary front-ends and does nothing to anyone
+motivated to avoid it.
+
+**A staked claim costs 3.6× a liquid one** (2,967 RC against 828), because it adds an
+`approve` and a cross-contract `stakeFor`. The claimant pays that, and a claimant may
+hold no HBD at all — see [docs/rc-costs.md](docs/rc-costs.md).
+
 ### What the reporter can and cannot do
 
 The reporter is the only component that is trusted at runtime, and it is worth being
