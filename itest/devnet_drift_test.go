@@ -834,3 +834,52 @@ func TestDevnetDrift_ActionsExistOnTheContractTheyAreSentTo(t *testing.T) {
 	}
 	assert.NotZero(t, checked, "attributed no calls to a contract — this guard is vacuous")
 }
+
+// ---------------------------------------------------------------------------
+// The reporter BINARY must be newer than the reporter's sources.
+//
+// Three devnet suites run the real compiled binary rather than the library, so a
+// stale one is not a slightly-old build — it is a different program. Renaming a
+// config key is the case that bites: the suites write the NEW key, the old binary
+// decodes with DisallowUnknownFields and refuses to start, and the run dies at the
+// reporter phase with `unknown field "tags"` after twenty minutes of setup.
+//
+// This was one attentive moment away from happening: source.tag became source.tags
+// and the binary on disk predated the change.
+func TestDevnetDrift_ReporterBinaryIsNewerThanItsSources(t *testing.T) {
+	bin, err := os.Stat(filepath.Join("..", "reporter", "bin", "reporter"))
+	if err != nil {
+		t.Skipf("reporter binary not built: %v — devnet suites that run it will fail", err)
+	}
+
+	newest, newestPath := int64(0), ""
+	walkErr := filepath.WalkDir(filepath.Join("..", "reporter"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		// tests do not go into the binary
+		if strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		st, serr := d.Info()
+		if serr != nil {
+			return nil
+		}
+		if m := st.ModTime().Unix(); m > newest {
+			newest, newestPath = m, p
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk reporter sources: %v", walkErr)
+	}
+	assert.NotZero(t, newest, "found no reporter sources — the scan is broken, not the binary")
+
+	if bin.ModTime().Unix() < newest {
+		t.Errorf("reporter/bin/reporter is OLDER than %s — the devnet suites run this binary, "+
+			"so they would exercise the previous program. A renamed config key makes it refuse "+
+			"to start mid-run. Rebuild with:\n"+
+			"  GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter",
+			newestPath)
+	}
+}
