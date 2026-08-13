@@ -113,7 +113,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	rawPosts, rawVotes := realisticEpoch()
 	opt := hivesrc.Options{
-		Tag:             "hive-167922",
+		Tags:            []string{"hive-167922"},
 		Mode:            hivesrc.WeightHiveRshares,
 		ExcludeAccounts: []string{"hive:erin"}, // muted author
 	}

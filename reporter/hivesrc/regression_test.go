@@ -43,7 +43,7 @@ func TestRegression_PinnedPostsMustNotTerminateTheWalk(t *testing.T) {
 	since, _ := ParseHiveTime("2026-07-25T00:00:00")
 	until, _ := ParseHiveTime("2026-07-25T23:59:59")
 
-	got, err := FetchPosts(tr, Options{Tag: "hive-167922", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"hive-167922"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestRegression_AllPinnedPageDoesNotEndTheWalk(t *testing.T) {
 	since, _ := ParseHiveTime("2026-07-25T00:00:00")
 	until, _ := ParseHiveTime("2026-07-25T23:59:59")
 
-	got, err := FetchPosts(tr, Options{Tag: "x", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestRegression_OrganicOlderPageStopsTheWalk(t *testing.T) {
 	since, _ := ParseHiveTime("2026-07-25T00:00:00")
 	until, _ := ParseHiveTime("2026-07-25T23:59:59")
 
-	got, err := FetchPosts(tr, Options{Tag: "x", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestRegression_PaidOutPostsAreScorable(t *testing.T) {
 	until, _ := ParseHiveTime("2023-03-16T23:59:59")
 
 	got, err := Collect(tr, Options{
-		Tag: "x", Mode: WeightHiveRshares,
+		Tags: []string{"x"}, Mode: WeightHiveRshares,
 		Since: mustTime("2023-03-09T00:00:00"), Until: mustTime("2023-03-09T23:59:59"),
 		PayoutSince: since, PayoutUntil: until,
 	})
@@ -212,7 +212,7 @@ func TestRegression_UnpaidPostUnderCashoutIsRefused(t *testing.T) {
 	tr := &fakeTransport{feeds: [][]RawPost{{p}, {}}}
 
 	_, err := Collect(tr, Options{
-		Tag: "x", Mode: WeightHiveRshares,
+		Tags: []string{"x"}, Mode: WeightHiveRshares,
 		Since: mustTime("2026-07-25T00:00:00"), Until: mustTime("2026-07-25T23:59:59"),
 	})
 	if err == nil {

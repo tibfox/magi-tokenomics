@@ -389,7 +389,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		"vsc":       map[string]any{"api": d.GQLEndpoint(1), "net_id": "vsc-devnet"},
 		"contracts": map[string]any{"distributor": c3ID, "channel": "content", "funder": c2ID, "stake": c1ID},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
-		"source": map[string]any{"tag": "magitribe", "limit": 100,
+		"source": map[string]any{"tags": []string{"magitribe"}, "limit": 100,
 			"weight": "hive_rshares", "exclude": []string{}},
 		"shares": map[string]any{"author_reward_bps": 5000, "author_curve": "1/1",
 			"curation_curve": "1/2", "muted": []string{}},

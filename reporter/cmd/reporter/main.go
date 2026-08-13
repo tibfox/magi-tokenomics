@@ -454,20 +454,39 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 	}
 
 	opt := hivesrc.Options{
-		Tag:             a.cfg.Source.Tag,
-		Limit:           a.cfg.Source.Limit,
-		Mode:            hivesrc.WeightMode(a.cfg.Source.Weight),
-		SnapshotHeight:  win.EndBlock,
-		ExcludeAccounts: a.cfg.Source.Exclude,
+		Tags:                 a.cfg.Source.Tags,
+		Limit:                a.cfg.Source.Limit,
+		Mode:                 hivesrc.WeightMode(a.cfg.Source.Weight),
+		SnapshotHeight:       win.EndBlock,
+		ExcludeAccounts:      a.cfg.Source.Exclude,
+		ExcludedTags:         a.cfg.Source.ExcludedTags,
+		PayoutWindow:         a.cfg.PayoutWindow(),
+		IgnoreDeclinedPayout: a.cfg.Source.IgnoreDeclinedPayout,
+		DisableDownvotes:     a.cfg.Source.DisableDownvotes,
+	}
+	if t := a.cfg.Shares.AppTax; t.Bps > 0 {
+		opt.AppTax = &hivesrc.AppTaxPolicy{
+			Bps: t.Bps, Apps: t.Apps, Beneficiary: t.Beneficiary,
+		}
+	}
+	// Mana applies to token_stake only; hive_rshares already carries Hive's own.
+	if opt.Mode == hivesrc.WeightTokenStake {
+		opt.Mana = &hivesrc.ManaPolicy{
+			RegenDays:           a.cfg.Source.VoteRegenDays,
+			Consumption:         a.cfg.Source.VotePowerConsumption,
+			DownvoteRegenDays:   a.cfg.Source.DownvoteRegenDays,
+			DownvoteConsumption: a.cfg.Source.DownvotePowerConsumption,
+		}
 	}
 	// The epoch is defined by PAYOUT time, but the feed can only be paged by creation
 	// time — so walk the window shifted back one payout period and let
 	// PayoutSince/Until decide actual membership. The margin absorbs posts whose
 	// payout_at is not exactly created+7d.
 	const margin = time.Hour
+	payout := a.cfg.PayoutWindow()
 	opt.PayoutSince, opt.PayoutUntil = win.StartTime, win.EndTime
-	opt.Since = win.StartTime.Add(-hivesrc.PayoutPeriod - margin)
-	opt.Until = win.EndTime.Add(-hivesrc.PayoutPeriod + margin)
+	opt.Since = win.StartTime.Add(-payout - margin)
+	opt.Until = win.EndTime.Add(-payout + margin)
 	if opt.Mode == hivesrc.WeightTokenStake {
 		opt.Stake = vscapi.NewStakeSource(a.vsc, a.cfg.Contracts.Stake)
 	}

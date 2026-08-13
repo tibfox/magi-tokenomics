@@ -67,9 +67,36 @@ func ComputeShares(posts []Post, cfg Config) Result {
 			continue // unvoted post earns nothing
 		}
 
-		postWeight := PowRational(total, cfg.AuthorCurveNum, cfg.AuthorCurveDen)
+		// Downvotes net off the post's total BEFORE the curve, so they reduce what
+		// the post earns without ever entering the curation split below — a
+		// downvoter is not a curator. A post voted into the ground earns nothing
+		// rather than something negative: the contract has no way to take shares
+		// back, so the floor is zero.
+		net := new(big.Int).Set(total)
+		if p.Downweight != nil && p.Downweight.Sign() > 0 {
+			net.Sub(net, p.Downweight)
+			if net.Sign() <= 0 {
+				continue
+			}
+		}
+
+		postWeight := PowRational(net, cfg.AuthorCurveNum, cfg.AuthorCurveDen)
 		if postWeight.Sign() == 0 {
 			continue
+		}
+
+		// The app tax comes off the top, before author and curators divide what is
+		// left, so both bear it in proportion rather than the author alone.
+		if p.TaxBps > 0 && cfg.AppTaxBeneficiary != "" {
+			tax := new(big.Int).Mul(postWeight, big.NewInt(int64(p.TaxBps)))
+			tax.Div(tax, big.NewInt(10000))
+			if tax.Sign() > 0 {
+				add(cfg.AppTaxBeneficiary, tax)
+				postWeight = new(big.Int).Sub(postWeight, tax)
+				if postWeight.Sign() <= 0 {
+					continue
+				}
+			}
 		}
 
 		authorCut := new(big.Int).Mul(postWeight, big.NewInt(int64(cfg.AuthorRewardBps)))

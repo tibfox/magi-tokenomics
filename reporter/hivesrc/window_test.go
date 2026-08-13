@@ -173,7 +173,7 @@ func TestParseHiveTime(t *testing.T) {
 func post(author, permlink, created string) RawPost {
 	pa := ""
 	if t, err := ParseHiveTime(created); err == nil {
-		pa = t.Add(PayoutPeriod).Format("2006-01-02T15:04:05")
+		pa = t.Add(DefaultPayoutPeriod).Format("2006-01-02T15:04:05")
 	}
 	return RawPost{
 		Author: author, Permlink: permlink, Created: created, Depth: 0,
@@ -192,7 +192,7 @@ func TestFetchPosts_FiltersToTheEpochWindow(t *testing.T) {
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
 	until, _ := ParseHiveTime("2026-01-02T23:59:59")
 
-	got, err := FetchPosts(tr, Options{Tag: "x", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestFetchPosts_SkipsComments(t *testing.T) {
 	tr := &fakeTransport{feeds: [][]RawPost{{c, post("b", "a-post", "2026-01-02T12:00:00")}}}
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
 	until, _ := ParseHiveTime("2026-01-02T23:59:59")
-	got, err := FetchPosts(tr, Options{Tag: "x", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestFetchPosts_PagesThroughTheFeed(t *testing.T) {
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
 	until, _ := ParseHiveTime("2026-01-02T23:59:59")
 
-	got, err := FetchPosts(tr, Options{Tag: "x", Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestFetchPosts_RespectsLimit(t *testing.T) {
 	tr := &fakeTransport{feeds: [][]RawPost{page, page, {}}}
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
 	until, _ := ParseHiveTime("2026-01-02T23:59:59")
-	got, err := FetchPosts(tr, Options{Tag: "x", Limit: 7, Since: since, Until: until})
+	got, err := FetchPosts(tr, Options{Tags: []string{"x"}, Limit: 7, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestFetchPosts_TerminatesOnStalledCursor(t *testing.T) {
 	done := make(chan struct{})
 	var got []RawPost
 	var err error
-	go func() { got, err = FetchPosts(tr, Options{Tag: "x", Since: since, Until: until}); close(done) }()
+	go func() { got, err = FetchPosts(tr, Options{Tags: []string{"x"}, Since: since, Until: until}); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -297,7 +297,7 @@ func TestFetchPosts_TerminatesOnStalledCursor(t *testing.T) {
 func TestFetchPosts_UnparseableCreatedIsAnError(t *testing.T) {
 	tr := &fakeTransport{feeds: [][]RawPost{{post("a", "p", "not-a-time")}}}
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
-	_, err := FetchPosts(tr, Options{Tag: "x", Since: since})
+	_, err := FetchPosts(tr, Options{Tags: []string{"x"}, Since: since})
 	if err == nil || !strings.Contains(err.Error(), "@a/p") {
 		t.Fatalf("a post that cannot be placed in time must fail loudly, got %v", err)
 	}
@@ -316,7 +316,7 @@ func TestCollect_EndToEndWithFakeTransport(t *testing.T) {
 	}
 	since, _ := ParseHiveTime("2026-01-02T00:00:00")
 	until, _ := ParseHiveTime("2026-01-02T23:59:59")
-	posts, err := Collect(tr, Options{Tag: "x", Mode: WeightHiveRshares, Since: since, Until: until})
+	posts, err := Collect(tr, Options{Tags: []string{"x"}, Mode: WeightHiveRshares, Since: since, Until: until})
 	if err != nil {
 		t.Fatal(err)
 	}

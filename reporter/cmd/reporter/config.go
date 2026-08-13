@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"magi_token/reporter/hivesrc"
 	"magi_token/reporter/sharecore"
@@ -102,17 +103,50 @@ type Config struct {
 	} `json:"epoch"`
 
 	Source struct {
-		Tag   string `json:"tag"`
-		Limit int    `json:"limit"`
+		// Tags are the tags or communities that pull a post into this pool. A post
+		// matching ANY of them is indexed once — matching several does not pay twice.
+		Tags  []string `json:"tags"`
+		Limit int      `json:"limit"`
+		// ExcludedTags are checked AFTER Tags: a post carrying any of them is dropped
+		// even if it also carries an included tag. This is the escape hatch for a tag
+		// that is broad enough to be useful and broad enough to drag in noise.
+		ExcludedTags []string `json:"excluded_tags"`
 		// A post is ALWAYS scored in the epoch its Hive payout falls in, once voting
 		// has closed, so every vote is counted exactly once by its weight. There is
 		// no setting for scoring earlier — see the rule at the top of hivesrc.
-		Weight  string   `json:"weight"` // hive_rshares | token_stake
+		Weight string `json:"weight"` // hive_rshares | token_stake
+		// Exclude is a list of ACCOUNTS, not tags — they earn nothing and their votes
+		// carry no weight. ExcludedTags above is the tag-shaped filter.
 		Exclude []string `json:"exclude"`
 		// Kind selects the data source: "content" (default) reads Hive posts/votes
 		// for C3; "lp" replays liquidity events from the indexer for C5. The rest of
 		// the pipeline — canonicalisation, pagination, submission, Attest — is shared.
 		Kind string `json:"kind"`
+		// CashoutDays is how long a post collects votes before it pays. It sets both
+		// the window this pool reads and the vote cutoff, so changing it changes which
+		// votes count, not merely when. 0 selects Hive's own 7 days.
+		CashoutDays int `json:"cashout_days"`
+		// IgnoreDeclinedPayout=true pays an author who declined their Hive payout.
+		// The default (false) honours the decline, which is what an author who set
+		// max_accepted_payout to zero asked for.
+		IgnoreDeclinedPayout bool `json:"ignore_declined_payout"`
+		// DisableDownvotes=true drops negative votes entirely, so a downvote cannot
+		// reduce a payout. False lets them net off against the positive rshares —
+		// see hivesrc for what a downvote can and cannot do to curation.
+		DisableDownvotes bool `json:"disable_downvotes"`
+		// Vote mana, and ONLY meaningful for weight=token_stake.
+		//
+		// hive_rshares already carries Hive's own mana inside the rshares figure, so
+		// setting these there would tax a vote twice. token_stake has no such budget:
+		// without one an account votes at full stake as often as it likes, which is
+		// why these are required in that mode rather than optional.
+		//
+		// Consumption is in hundredths of a percent of full power, matching SCOT:
+		// 200 = 2% per full vote = 50 votes to empty.
+		VoteRegenDays            int `json:"vote_regen_days"`
+		VotePowerConsumption     int `json:"vote_power_consumption"`
+		DownvoteRegenDays        int `json:"downvote_regen_days"`
+		DownvotePowerConsumption int `json:"downvote_power_consumption"`
 	} `json:"source"`
 
 	Shares struct {
@@ -120,6 +154,23 @@ type Config struct {
 		AuthorCurve     string   `json:"author_curve"`   // "num/den", e.g. "1/1"
 		CurationCurve   string   `json:"curation_curve"` // "1/2" = sqrt = early voters win
 		Muted           []string `json:"muted"`
+		// StakedBps is the share of every payout delivered as STAKE rather than
+		// liquid tokens. The reporter only records it so `epoch` can cross-check the
+		// distributor's own setting — the split itself happens on-chain at claim,
+		// because that is the only place the tokens exist to be split.
+		StakedBps int `json:"staked_bps"`
+		// AppTax skims a percentage from posts published outside a designated app
+		// and pays it to Beneficiary.
+		//
+		// The `app` it matches on is SELF-DECLARED in the post's json_metadata: a
+		// client can put any string there, so this shapes the behaviour of ordinary
+		// users on ordinary front-ends and does nothing to anyone posting via the
+		// API. Treat it as an incentive, never as enforcement.
+		AppTax struct {
+			Bps         int      `json:"bps"`
+			Apps        []string `json:"apps"`        // designated apps, matched on the part before "/"
+			Beneficiary string   `json:"beneficiary"` // where the skim goes; "hive:acct"
+		} `json:"app_tax"`
 	} `json:"shares"`
 
 	Page struct {
@@ -283,14 +334,48 @@ func (c *Config) validateSource() error {
 		}
 		return nil
 	case SourceContent:
-		if c.Source.Tag == "" {
-			return fmt.Errorf("source.tag is required")
+		if len(c.Source.Tags) == 0 {
+			return fmt.Errorf("source.tags is required (at least one tag or community)")
+		}
+		if len(c.Source.Tags) > MaxTags {
+			return fmt.Errorf("source.tags allows at most %d, got %d", MaxTags, len(c.Source.Tags))
+		}
+		if len(c.Source.ExcludedTags) > MaxTags {
+			return fmt.Errorf("source.excluded_tags allows at most %d, got %d", MaxTags, len(c.Source.ExcludedTags))
+		}
+		// A tag on both lists can never index anything: excluded is applied after
+		// included, so the pool would silently read an empty feed.
+		for _, in := range c.Source.Tags {
+			for _, ex := range c.Source.ExcludedTags {
+				if in == ex {
+					return fmt.Errorf("source.tags and source.excluded_tags both contain %q — "+
+						"exclusion is applied second, so that tag could never index a post", in)
+				}
+			}
+		}
+		if c.Source.CashoutDays < 0 || c.Source.CashoutDays > 30 {
+			return fmt.Errorf("source.cashout_days must be 1..30 (0 selects Hive's 7), got %d",
+				c.Source.CashoutDays)
+		}
+		if err := c.validateAppTax(); err != nil {
+			return err
 		}
 		switch hivesrc.WeightMode(c.Source.Weight) {
 		case hivesrc.WeightHiveRshares:
+			// Hive's rshares already embed Hive's mana. A second budget here would
+			// charge the same vote twice, so refuse rather than silently ignore.
+			if c.Source.VoteRegenDays != 0 || c.Source.VotePowerConsumption != 0 ||
+				c.Source.DownvoteRegenDays != 0 || c.Source.DownvotePowerConsumption != 0 {
+				return fmt.Errorf("source.weight=hive_rshares does not use the vote-mana settings — " +
+					"rshares already carry Hive's own mana, so applying a second budget would " +
+					"charge the same vote twice")
+			}
 		case hivesrc.WeightTokenStake:
 			if c.Contracts.Stake == "" {
 				return fmt.Errorf("source.weight=token_stake requires contracts.stake (the C1 contract id)")
+			}
+			if err := c.validateMana(); err != nil {
+				return err
 			}
 		default:
 			return fmt.Errorf("source.weight must be %q or %q, got %q",
@@ -343,6 +428,15 @@ func (c *Config) ShareConfig() sharecore.Config {
 		CurationCurveNum: cn,
 		CurationCurveDen: cd,
 		Muted:            c.Shares.Muted,
+		// Only when a rate is actually set: passing a beneficiary with no rate would
+		// put an account into the share book that never earns, and validateAppTax
+		// already refuses a rate without a beneficiary.
+		AppTaxBeneficiary: func() string {
+			if c.Shares.AppTax.Bps > 0 {
+				return c.Shares.AppTax.Beneficiary
+			}
+			return ""
+		}(),
 	}
 }
 
@@ -358,16 +452,22 @@ const ExampleConfig = `{
   },
   "epoch":  { "genesis": 0, "len": 28800 },
   "source": {
-    "tag":     "yourtribe",
-    "limit":   1000,
-    "weight":  "hive_rshares",
-    "exclude": []
+    "tags":                   ["yourtribe"],
+    "excluded_tags":          [],
+    "limit":                  1000,
+    "weight":                 "hive_rshares",
+    "exclude":                [],
+    "cashout_days":           7,
+    "ignore_declined_payout": false,
+    "disable_downvotes":      false
   },
   "shares": {
     "author_reward_bps": 5000,
     "author_curve":      "1/1",
     "curation_curve":    "1/2",
-    "muted":             []
+    "muted":             [],
+    "staked_bps":        0,
+    "app_tax":           { "bps": 0, "apps": [], "beneficiary": "" }
   },
   "page":   { "max_entries": 60, "max_bytes": 3800 },
   "submit": {
@@ -420,3 +520,90 @@ const ExampleLPConfig = `{
   }
 }
 `
+
+// MaxTags mirrors the tag limit tribes are used to from SCOT's admin panel. It is a
+// policy cap rather than a technical one: each tag costs one feed walk per epoch.
+const MaxTags = 5
+
+// validateMana checks the four token_stake vote-budget settings.
+//
+// They are REQUIRED in that mode, not optional. token_stake weighs a vote by the
+// voter's staked balance, and with no budget attached that weight is reusable without
+// limit — one account can vote every post in the epoch at full stake. The budget is
+// what makes a vote cost something.
+func (c *Config) validateMana() error {
+	type k struct {
+		name string
+		val  int
+		hi   int
+	}
+	for _, f := range []k{
+		{"vote_regen_days", c.Source.VoteRegenDays, 30},
+		{"downvote_regen_days", c.Source.DownvoteRegenDays, 30},
+	} {
+		if f.val < 1 || f.val > f.hi {
+			return fmt.Errorf("source.%s must be 1..%d when weight=token_stake, got %d",
+				f.name, f.hi, f.val)
+		}
+	}
+	for _, f := range []k{
+		{"vote_power_consumption", c.Source.VotePowerConsumption, 10000},
+		{"downvote_power_consumption", c.Source.DownvotePowerConsumption, 10000},
+	} {
+		if f.val < 1 || f.val > f.hi {
+			return fmt.Errorf("source.%s must be 1..%d (hundredths of a percent) "+
+				"when weight=token_stake, got %d", f.name, f.hi, f.val)
+		}
+	}
+	// A downvote budget is only spendable if downvotes count at all.
+	if c.Source.DisableDownvotes && c.Source.DownvotePowerConsumption > 0 {
+		// not an error — SCOT panels ship this combination — but it is inert, and an
+		// operator tuning a number that does nothing deserves to know.
+		return nil
+	}
+	return nil
+}
+
+// validateAppTax rejects a tax that cannot be collected. Every field is load-bearing:
+// a rate with no beneficiary skims into nothing, and a rate with no designated app
+// taxes every post in the pool including those from the operator's own front-end.
+func (c *Config) validateAppTax() error {
+	t := c.Shares.AppTax
+	if t.Bps == 0 && len(t.Apps) == 0 && t.Beneficiary == "" {
+		return nil // not configured: capability follows config
+	}
+	if t.Bps < 1 || t.Bps > 10000 {
+		return fmt.Errorf("shares.app_tax.bps must be 1..10000 when app_tax is configured, got %d", t.Bps)
+	}
+	if len(t.Apps) == 0 {
+		return fmt.Errorf("shares.app_tax.apps is required when a tax rate is set — " +
+			"with no designated app every post is taxed, including those from your own front-end")
+	}
+	if t.Beneficiary == "" {
+		return fmt.Errorf("shares.app_tax.beneficiary is required when a tax rate is set — " +
+			"the skim has to be paid to someone or it is burned")
+	}
+	if !strings.HasPrefix(t.Beneficiary, "hive:") {
+		return fmt.Errorf("shares.app_tax.beneficiary must carry a ledger domain, e.g. hive:acct, got %q",
+			t.Beneficiary)
+	}
+	for _, a := range t.Apps {
+		if a == "" {
+			return fmt.Errorf("shares.app_tax.apps contains an empty entry")
+		}
+	}
+	return nil
+}
+
+// PayoutWindow is how long a post collects votes before it pays.
+//
+// It sets BOTH the creation window the feed is walked over and the vote cutoff, so
+// it decides which votes count, not merely when they are counted. Zero selects
+// Hive's own seven days, which is what a pool wants unless it deliberately runs a
+// shorter cycle than the chain it reads.
+func (c *Config) PayoutWindow() time.Duration {
+	if c.Source.CashoutDays > 0 {
+		return time.Duration(c.Source.CashoutDays) * 24 * time.Hour
+	}
+	return hivesrc.DefaultPayoutPeriod
+}

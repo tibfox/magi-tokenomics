@@ -379,7 +379,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 		"contracts": map[string]any{"distributor": c3ID, "channel": "author", "funder": c2ID, "stake": ""},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{
-			"tag": "magitribe", "limit": 100,
+			"tags": []string{"magitribe"}, "limit": 100,
 			"weight": "hive_rshares", "exclude": []string{},
 		},
 		"shares": map[string]any{
