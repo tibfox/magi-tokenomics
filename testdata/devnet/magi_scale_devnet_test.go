@@ -364,15 +364,33 @@ func TestDevnetMagiScale(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(4 * time.Minute)
+	// Wait for the POOLED balance, not merely a non-zero one.
+	//
+	// An L2 transfer takes a few blocks to credit, and the reporter's own deposits
+	// have already made its balance non-zero — so a check that stops at "> 0" reports
+	// the pre-pool figure and lets the run proceed believing it has three times the
+	// capacity it actually holds. It would then die at page seven, which is precisely
+	// the failure the pooling exists to prevent, and would look like the pooling had
+	// not worked rather than like the check had been too eager.
+	//
+	// An epoch of this size needs ~127,500 RC; require comfortably more than that.
+	const wantHbd = 200_000 // millis, i.e. 200 HBD -> ~210,000 RC
+	deadline := time.Now().Add(5 * time.Minute)
 	for {
 		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+owner)
-		if b != nil && b.Hbd > 0 {
-			t.Logf("reporter ledger hbd=%d -> RC ~%d", b.Hbd, b.Hbd+10000)
+		if b != nil && b.Hbd >= wantHbd {
+			t.Logf("reporter ledger hbd=%d -> RC ~%d (pooled)", b.Hbd, b.Hbd+10000)
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("deposits never credited — the reporter cannot fund 9 share pages on the free tier")
+			have := int64(0)
+			if b != nil {
+				have = b.Hbd
+			}
+			t.Fatalf("the reporter holds %d HBD-millis (~%d RC) but this epoch needs ~127,500: "+
+				"the pooled transfers from nodes 4 and 5 did not credit. Nine pages at 15,309 "+
+				"RC each cannot be paid for out of one witness's own deposit",
+				have, have+10000)
 		}
 		time.Sleep(6 * time.Second)
 	}
