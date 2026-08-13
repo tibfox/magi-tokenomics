@@ -29,6 +29,12 @@ func (f *fakeState) StateGet(_ string, keys []string) (map[string]string, error)
 	return out, nil
 }
 
+// NOTE ON THE KEYS BELOW. They carry the CHANNEL — funded|content|41, not
+// funded|41 — because that is what the distributor writes now that one contract
+// serves several channels. An earlier version of this file used the channel-less
+// form, which matched a reporter that read the channel-less form, so the tests
+// agreed with the code and both were wrong: every key addressed nothing on a real
+// chain, and "not funded / no pages applied" is the answer an absent key gives.
 func gateApp(t *testing.T, kv map[string]string, err error) (*app, *fakeState) {
 	t.Helper()
 	c, cerr := LoadConfig(writeCfg(t, ExampleConfig))
@@ -61,10 +67,10 @@ func itoa(i int) string { return string(rune('0' + i)) }
 // the whole epoch to whoever landed, and the missing accounts can never be added.
 func TestGate_RefusesFinalizeWhenPagesRevertedAndWereNotSentThisRun(t *testing.T) {
 	a, _ := gateApp(t, map[string]string{
-		"funded|41":   "5000",
-		"status|41":   "",
-		"cfg_rMode":   "0",
-		"ssdone|41|4": "1", // only the last page applied
+		"funded|content|41":   "5000",
+		"status|content|41":   "",
+		"ch_rMode|content": "0",
+		"ssdone|content|41|4": "1", // only the last page applied
 	}, nil)
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 5), map[string]bool{}, true)
 	if proceed {
@@ -82,9 +88,9 @@ func TestGate_RefusesFinalizeWhenPagesRevertedAndWereNotSentThisRun(t *testing.T
 
 // All pages confirmed and funded: proceed.
 func TestGate_ProceedsWhenEveryPageIsConfirmed(t *testing.T) {
-	kv := map[string]string{"funded|41": "5000", "status|41": "", "cfg_rMode": "0"}
+	kv := map[string]string{"funded|content|41": "5000", "status|content|41": "", "ch_rMode|content": "0"}
 	for i := 0; i < 5; i++ {
-		kv["ssdone|41|"+itoa(i)] = "1"
+		kv["ssdone|content|41|"+itoa(i)] = "1"
 	}
 	a, _ := gateApp(t, kv, nil)
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 5), map[string]bool{}, true)
@@ -97,7 +103,7 @@ func TestGate_ProceedsWhenEveryPageIsConfirmed(t *testing.T) {
 // next run — do not alarm, and do not finalize.
 func TestGate_DefersQuietlyForPagesSentThisRun(t *testing.T) {
 	a, _ := gateApp(t, map[string]string{
-		"funded|41": "5000", "status|41": "", "cfg_rMode": "0",
+		"funded|content|41": "5000", "status|content|41": "", "ch_rMode|content": "0",
 	}, nil)
 	sent := map[string]bool{"submitShares/0": true}
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 2), sent, true)
@@ -113,7 +119,7 @@ func TestGate_DefersQuietlyForPagesSentThisRun(t *testing.T) {
 // last. Erroring there would fire on every healthy run and be ignored.
 func TestGate_AttestModeDefersInsteadOfErroring(t *testing.T) {
 	a, _ := gateApp(t, map[string]string{
-		"funded|41": "5000", "status|41": "", "cfg_rMode": "2",
+		"funded|content|41": "5000", "status|content|41": "", "ch_rMode|content": "2",
 	}, nil)
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 3), map[string]bool{}, true)
 	if proceed {
@@ -140,7 +146,7 @@ func TestGate_ReadErrorIsNotConfirmation(t *testing.T) {
 // Someone else finalized or cancelled it: stop cleanly, do not send a second finalize.
 func TestGate_StopsIfEpochAlreadyClosed(t *testing.T) {
 	a, _ := gateApp(t, map[string]string{
-		"funded|41": "5000", "status|41": "cancelled", "cfg_rMode": "0",
+		"funded|content|41": "5000", "status|content|41": "cancelled", "ch_rMode|content": "0",
 	}, nil)
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 2), map[string]bool{}, true)
 	if proceed || err != nil {
@@ -151,14 +157,14 @@ func TestGate_StopsIfEpochAlreadyClosed(t *testing.T) {
 // funded|ep is zeroed by cancelEpoch, so it must be read as "not funded" rather than
 // letting the gate pass on a cancelled epoch.
 func TestGate_ZeroFundedIsNotFunded(t *testing.T) {
-	kv := map[string]string{"funded|41": "0", "status|41": "", "cfg_rMode": "0"}
+	kv := map[string]string{"funded|content|41": "0", "status|content|41": "", "ch_rMode|content": "0"}
 	for i := 0; i < 2; i++ {
-		kv["ssdone|41|"+itoa(i)] = "1"
+		kv["ssdone|content|41|"+itoa(i)] = "1"
 	}
 	a, _ := gateApp(t, kv, nil)
 	proceed, _ := a.confirmBeforeFinalize(gatePlan("41", 2), map[string]bool{}, true)
 	if proceed {
-		t.Fatal("funded|ep == 0 must not satisfy the gate")
+		t.Fatal("funded|<ch>|<ep> == 0 must not satisfy the gate")
 	}
 }
 
@@ -240,9 +246,9 @@ func TestVerifyChainConfig_RoleMismatchIsReported(t *testing.T) {
 // to claim, and the pages still apply — so everything looks fine except that no money
 // arrived.
 func TestGate_UnfundedIsReportedAsFundingNotPages(t *testing.T) {
-	kv := map[string]string{"funded|41": "0", "status|41": "", "cfg_rMode": "0"}
+	kv := map[string]string{"funded|content|41": "0", "status|content|41": "", "ch_rMode|content": "0"}
 	for i := 0; i < 3; i++ {
-		kv["ssdone|41|"+itoa(i)] = "1" // every page applied
+		kv["ssdone|content|41|"+itoa(i)] = "1" // every page applied
 	}
 	a, _ := gateApp(t, kv, nil)
 	proceed, err := a.confirmBeforeFinalize(gatePlan("41", 3), map[string]bool{}, true)
@@ -264,10 +270,10 @@ func TestGate_UnfundedIsReportedAsFundingNotPages(t *testing.T) {
 // selected again and nothing else ever mentions it — its funding just sits there.
 func TestStrandedBelowWindow_FindsAbandonedEpochs(t *testing.T) {
 	kv := map[string]string{
-		"status|0": "finalized",
-		"status|1": "", // stranded
-		"status|2": "cancelled",
-		"status|3": "", // stranded
+		"status|content|0": "finalized",
+		"status|content|1": "", // stranded
+		"status|content|2": "cancelled",
+		"status|content|3": "", // stranded
 	}
 	a, _ := gateApp(t, kv, nil)
 	got := a.strandedBelowWindow(4)

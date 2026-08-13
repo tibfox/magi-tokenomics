@@ -207,14 +207,14 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	first := a.windowFloor(latest)
 	keys := make([]string, 0, latest-first+1)
 	for ep := first; ep <= latest; ep++ {
-		keys = append(keys, "status|"+strconv.FormatUint(ep, 10))
+		keys = append(keys, a.chKey("status", strconv.FormatUint(ep, 10)))
 	}
 	state, err := a.vsc.StateGet(a.cfg.Contracts.Distributor, keys)
 	if err != nil {
 		return 0, err
 	}
 	for ep := first; ep <= latest; ep++ {
-		if state["status|"+strconv.FormatUint(ep, 10)] == "" {
+		if state[a.chKey("status", strconv.FormatUint(ep, 10))] == "" {
 			return ep, nil
 		}
 	}
@@ -251,7 +251,7 @@ func (a *app) strandedBelowWindow(first uint64) []uint64 {
 	}
 	keys := make([]string, 0, first-lo)
 	for ep := lo; ep < first; ep++ {
-		keys = append(keys, "status|"+strconv.FormatUint(ep, 10))
+		keys = append(keys, a.chKey("status", strconv.FormatUint(ep, 10)))
 	}
 	if len(keys) == 0 {
 		return nil
@@ -266,7 +266,7 @@ func (a *app) strandedBelowWindow(first uint64) []uint64 {
 	}
 	var out []uint64
 	for ep := lo; ep < first; ep++ {
-		if state["status|"+strconv.FormatUint(ep, 10)] == "" {
+		if state[a.chKey("status", strconv.FormatUint(ep, 10))] == "" {
 			out = append(out, ep)
 		}
 	}
@@ -393,13 +393,14 @@ func (a *app) cmdEpoch(asJSON bool) error {
 	if targetErr == nil {
 		eps := strconv.FormatUint(target, 10)
 		st, err := a.vsc.StateGet(a.cfg.Contracts.Distributor,
-			[]string{"status|" + eps, "funded|" + eps, "totalShares|" + eps, "chal|" + eps})
+			[]string{a.chKey("status", eps), a.chKey("funded", eps),
+				a.chKey("totalShares", eps), a.chKey("chal", eps)})
 		if err == nil {
 			fmt.Printf("\nepoch %s on chain:\n", eps)
-			fmt.Printf("  status       %s\n", orDash(st["status|"+eps], "open"))
-			fmt.Printf("  funded       %s\n", orDash(st["funded|"+eps], "0"))
-			fmt.Printf("  totalShares  %s\n", orDash(st["totalShares|"+eps], "0"))
-			if c := st["chal|"+eps]; c != "" {
+			fmt.Printf("  status       %s\n", orDash(st[a.chKey("status", eps)], "open"))
+			fmt.Printf("  funded       %s\n", orDash(st[a.chKey("funded", eps)], "0"))
+			fmt.Printf("  totalShares  %s\n", orDash(st[a.chKey("totalShares", eps)], "0"))
+			if c := st[a.chKey("chal", eps)]; c != "" {
 				fmt.Printf("  challenge until block %s\n", c)
 			}
 		}
@@ -770,13 +771,34 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 // distributeEpoch has no per-epoch marker on the distributor — it is a keeper poke
 // on C2 — so it is treated as done once this epoch is funded, which is the only
 // thing the poke is needed for.
+// chKey builds a per-CHANNEL distributor state key.
+//
+// One distributor now serves several reward channels, so every per-epoch key it
+// writes carries the channel: funded|<ch>|<ep>, status|<ch>|<ep>,
+// ssdone|<ch>|<ep>|<page>, totalShares|<ch>|<ep>. A key built without it addresses
+// nothing — getStateByKeys returns null, which reads as "not funded", "not
+// finalized", "no pages applied". Every one of those is the SAFE-LOOKING answer,
+// which is what made this survive: nothing errors, the reporter just quietly
+// believes an epoch is untouched.
+//
+// Contract-wide config (cfg_genesis, cfg_epochLen, cfg_funder) is NOT channel-scoped
+// and must not go through here.
+func (a *app) chKey(prefix string, parts ...string) string {
+	k := prefix + "|" + a.cfg.Contracts.Channel
+	for _, p := range parts {
+		k += "|" + p
+	}
+	return k
+}
+
 func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, error) {
 	// cfg_rMode rides along: the finalize gate needs to know whether unapplied pages
 	// are a fault or the normal state of an Attest quorum that has not converged yet.
-	keys := []string{"funded|" + pl.Epoch, "status|" + pl.Epoch, "cfg_rMode"}
+	keys := []string{a.chKey("funded", pl.Epoch), a.chKey("status", pl.Epoch),
+		"ch_rMode|" + a.cfg.Contracts.Channel}
 	for _, c := range pl.Calls {
 		if c.Action == "submitShares" {
-			keys = append(keys, fmt.Sprintf("ssdone|%s|%d", pl.Epoch, submit.PageOf(c)))
+			keys = append(keys, a.chKey("ssdone", pl.Epoch, strconv.Itoa(submit.PageOf(c))))
 		}
 	}
 
@@ -793,8 +815,8 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, 
 		}
 	}
 
-	funded := state["funded|"+pl.Epoch] != "" && state["funded|"+pl.Epoch] != "0"
-	finalized := state["status|"+pl.Epoch] != ""
+	funded := state[a.chKey("funded", pl.Epoch)] != "" && state[a.chKey("funded", pl.Epoch)] != "0"
+	finalized := state[a.chKey("status", pl.Epoch)] != ""
 
 	out := map[string]bool{}
 	for _, c := range pl.Calls {
@@ -804,7 +826,7 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, 
 		case "distributeEpoch", "pullFunding":
 			out[k] = funded
 		case "submitShares":
-			out[k] = state[fmt.Sprintf("ssdone|%s|%d", pl.Epoch, page)] != ""
+			out[k] = state[a.chKey("ssdone", pl.Epoch, strconv.Itoa(page))] != ""
 		case "finalizeEpoch":
 			out[k] = finalized
 		}
@@ -897,9 +919,9 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 			return false, fmt.Errorf("cannot confirm share pages before finalizing epoch %s: %w "+
 				"(refusing to finalize on an unverified report)", pl.Epoch, err)
 		}
-		lastMode = state["cfg_rMode"]
+		lastMode = state["ch_rMode|"+a.cfg.Contracts.Channel]
 		// Someone else finalized or cancelled it while we were working.
-		if st := state["status|"+pl.Epoch]; st != "" {
+		if st := state[a.chKey("status", pl.Epoch)]; st != "" {
 			fmt.Printf("   epoch %s is already %s on chain — not finalizing again\n", pl.Epoch, st)
 			return false, nil
 		}
@@ -912,7 +934,7 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 				missing = append(missing, submit.PageOf(c))
 			}
 		}
-		fundedOK := state["funded|"+pl.Epoch] != "" && state["funded|"+pl.Epoch] != "0"
+		fundedOK := state[a.chKey("funded", pl.Epoch)] != "" && state[a.chKey("funded", pl.Epoch)] != "0"
 		lastFunded = fundedOK
 		if len(missing) == 0 && fundedOK {
 			return true, nil
