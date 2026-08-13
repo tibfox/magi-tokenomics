@@ -548,13 +548,29 @@ func TestDevnetMagiScale(t *testing.T) {
 	pageApplied := func(i int) bool {
 		return stateOf(c3ID, fmt.Sprintf("ssdone|content|0|%d", i)) != ""
 	}
-	for attempt := 1; attempt <= 3; attempt++ {
-		var missing []int
-		for i := 0; i < pages; i++ {
-			if !pageApplied(i) {
-				missing = append(missing, i)
+	// WAIT before calling a page missing. Broadcasting is not executing: the last
+	// page is only seconds old when the loop above ends, and a check taken right
+	// then reports almost everything as unapplied. Resending on that basis is not
+	// merely wasteful — nine pages cost ~75,000 RC and a needless resend of seven
+	// costs another ~59,000, which overruns the reporter's capacity and manufactures
+	// the very failure this is meant to survive.
+	missingPages := func(deadline time.Duration) []int {
+		dl := time.Now().Add(deadline)
+		for {
+			var missing []int
+			for i := 0; i < pages; i++ {
+				if !pageApplied(i) {
+					missing = append(missing, i)
+				}
 			}
+			if len(missing) == 0 || time.Now().After(dl) {
+				return missing
+			}
+			time.Sleep(10 * time.Second)
 		}
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		missing := missingPages(4 * time.Minute)
 		if len(missing) == 0 {
 			break
 		}
