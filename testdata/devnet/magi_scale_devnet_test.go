@@ -485,14 +485,10 @@ func TestDevnetMagiScale(t *testing.T) {
 	// Reuse the package's own plan/compute helpers rather than re-declaring the JSON
 	// shapes: `plan` carries only {epoch, calls} and the totals come from `compute`.
 	// Getting that wrong is what cost this suite its first devnet run.
-	runReporter := func(args ...string) []byte {
-		full := append([]string{"-config", cfgPath}, args...)
-		out, rerr := exec.CommandContext(ctx, reporterBin, full...).Output()
-		if rerr != nil {
-			t.Fatalf("reporter %v failed: %v\n%s", args, rerr, out)
-		}
-		return out
-	}
+	// Capture stderr. The reporter reports WHY it refuses on stderr and prints
+	// nothing on stdout, so .Output() alone turns an explained refusal into a bare
+	// "exit status 1" — and that costs a whole devnet run to re-learn.
+	runReporter := func(args ...string) []byte { return scaleReporter(t, cfgPath, args...) }
 
 	planStart := time.Now()
 	var plan reporterPlan
@@ -576,6 +572,25 @@ func TestDevnetMagiScale(t *testing.T) {
 // mismatch would report the wrong block range and then finalize it. The pre-flight
 // therefore needs a distributor to agree with, and this is the smallest thing that
 // can: four keys, no chain.
+// scaleReporter runs the reporter binary the way the CLI expects: SUBCOMMAND first,
+// -config as a flag on it. Both the pre-flight and the devnet run go through this,
+// deliberately — the first version had the devnet suite build its own command with
+// the flag first, which the CLI read as the command name. The pre-flight passed
+// because it happened to build the same call correctly and separately, so it proved
+// the pipeline while missing the harness that drives it. One helper, one chance to
+// get it wrong, and the cheap test covers it.
+func scaleReporter(t *testing.T, cfgPath string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(reporterBin, append(args, "-config", cfgPath)...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("reporter %v failed: %v\nstdout: %s\nstderr: %s", args, err, out, errBuf.String())
+	}
+	return out
+}
+
 func serveVSCStub(genesis, epochLen uint64) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -632,13 +647,7 @@ func TestScalePreflight(t *testing.T) {
 	}
 
 	start := time.Now()
-	cmd := exec.Command(reporterBin, "compute", "-config", cfgPath, "-epoch", "0", "-json")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("reporter compute failed: %v\nstdout: %s\nstderr: %s", err, out, stderr.String())
-	}
+	out := scaleReporter(t, cfgPath, "compute", "-epoch", "0", "-json")
 	var res struct {
 		Posts       int    `json:"posts"`
 		Accounts    int    `json:"accounts"`
@@ -681,13 +690,7 @@ func TestScalePreflight(t *testing.T) {
 	// {epoch, calls} and epoch is a STRING — and checking only compute is what let a
 	// wrong plan struct survive to a devnet run and fail thirteen minutes in. The
 	// call list is what actually gets broadcast, so it is the half worth validating.
-	pcmd := exec.Command(reporterBin, "plan", "-config", cfgPath, "-epoch", "0", "-json")
-	var pstderr bytes.Buffer
-	pcmd.Stderr = &pstderr
-	pout, perr := pcmd.Output()
-	if perr != nil {
-		t.Fatalf("reporter plan failed: %v\nstderr: %s", perr, pstderr.String())
-	}
+	pout := scaleReporter(t, cfgPath, "plan", "-epoch", "0", "-json")
 	var plan reporterPlan
 	if err := json.Unmarshal(pout, &plan); err != nil {
 		t.Fatalf("plan json does not match reporterPlan: %v\n%s", err, pout)
