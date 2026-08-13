@@ -136,6 +136,31 @@ func Transfer(a Asset, to string, amount *big.Int) {
 	}
 }
 
+// Approve lets `spender` pull up to `amount` from THIS contract.
+//
+// The mirror image of PullFrom, and the only way one contract can hand tokens to
+// another contract's custody: a plain Transfer moves the balance but tells the
+// receiver nothing, so it cannot credit anyone. Approve-then-call lets the receiver
+// PULL exactly what it was told about, which is what makes the amount verifiable
+// rather than asserted.
+//
+// Grant exactly what is about to be pulled and no more. A standing allowance is a
+// standing right to drain this contract up to it.
+func Approve(a Asset, spender string, amount *big.Int) {
+	if amount.Sign() <= 0 {
+		return
+	}
+	switch a.Kind {
+	case Fungible:
+		sdk.ContractCall(a.Contract, "approve",
+			`{"spender":"`+safe(spender)+`","amount":"`+amount.String()+`"}`, nil)
+	case EditionedNFT:
+		unsupported()
+	default:
+		sdk.Abort("adapter: unknown kind")
+	}
+}
+
 // PullFrom pulls `amount` from `acct` into THIS contract. `acct` must have first
 // approved this contract (token approve → transferFrom).
 func PullFrom(a Asset, acct string, amount *big.Int) {

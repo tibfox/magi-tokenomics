@@ -265,7 +265,13 @@ func StakeFor(payload *string) *string {
 	if !present("allow|" + c) {
 		sdk.Abort("caller not in stakeFor allowlist")
 	}
-	auth.RequireActive(c, reqAuths()) // CRIT-2
+	// UnlessContract, not RequireActive. The check exists to stop a posting key
+	// standing in for an active one, and a CONTRACT caller has no key at all — the
+	// runtime supplies "contract:<id>", which can never appear in required_auths.
+	// Insisting on it here would make stakeFor unreachable from another contract,
+	// which is precisely how a distributor pays a reward straight into stake. The
+	// allowlist above is what authorises a contract, and it is immutable after init.
+	auth.RequireActiveUnlessContract(c, reqAuths()) // CRIT-2
 	acct := field(payload, "acct")
 	if acct == "" {
 		sdk.Abort("acct required")

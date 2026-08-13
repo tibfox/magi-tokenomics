@@ -77,6 +77,29 @@ func Init(payload *string) *string {
 	}
 	set("cfg_genesis", sg)
 	set("cfg_epochLen", se)
+	// STAKED PAYOUTS. A pool may deliver part of every claim as stake rather than
+	// liquid tokens — SCOT's staked_reward_percentage — which ties earners to the
+	// token instead of handing them something sellable the moment it lands.
+	//
+	// Capability follows config: with no stakeContract there is no split and claim
+	// pays entirely liquid, exactly as before. Both are pinned here and immutable,
+	// because a redirectable stake target is a redirectable payout.
+	if sc := f(payload, "stakeContract"); sc != "" {
+		validateAddr(sc)
+		bpsStr := f(payload, "stakedBps")
+		bps, berr := strconv.ParseUint(bpsStr, 10, 64)
+		if berr != nil || bps == 0 || bps > 10000 {
+			sdk.Abort("stakedBps must be 1..10000 when stakeContract is set")
+		}
+		// The staking contract must agree about the asset, or a claim would credit
+		// stake denominated in something the claimant never earned.
+		si := sdk.ContractCall(sc, "scheduleInfo", "", nil)
+		if tok := pickField(si, "token"); tok != "" && tok != f(payload, "token") {
+			sdk.Abort("stakeContract holds a different token than this distributor")
+		}
+		set("cfg_stakeContract", sc)
+		set("cfg_stakedBps", bpsStr)
+	}
 	// Reward channels are added afterwards with addChannel, because verifying each
 	// one's bucket requires calling the funder and a deployment may carry several.
 	set(kInit, "1")
@@ -426,21 +449,71 @@ func Claim(payload *string) *string {
 	if payout.Sign() <= 0 {
 		sdk.Abort("payout rounds to zero")
 	}
-	// CEI: mark claimed before external transfer
+	// CEI: mark claimed before any external call
 	set(ck, "1")
-	adapter.Transfer(asset(), c, payout)
+	staked := stakedPart(payout)
+	liquid := new(big.Int).Sub(payout, staked)
+	if liquid.Sign() > 0 {
+		adapter.Transfer(asset(), c, liquid)
+	}
+	if staked.Sign() > 0 {
+		creditStake(c, staked)
+	}
 	// share and total_shares travel with the payout so funded*share/totalShares can
 	// be re-derived off-chain — an amount on its own cannot be checked by anyone.
+	// The liquid/staked split travels too, because the two are not interchangeable
+	// to the recipient and a single total hides which they got.
 	events.New("claim").
 		Str("channel", ch).
 		Str("epoch", ep).
 		Str("acct", c).
 		Big("payout", payout).
+		Big("liquid", liquid).
+		Big("staked", staked).
 		Big("share", share).
 		Big("total_shares", ts).
 		Big("funded", funded).
 		Emit()
-	return str(`{"claimed":"` + payout.String() + `"}`)
+	return str(`{"claimed":"` + payout.String() +
+		`","liquid":"` + liquid.String() +
+		`","staked":"` + staked.String() + `"}`)
+}
+
+// stakedPart is how much of a payout is delivered as stake. Zero unless the pool
+// configured a stake contract.
+//
+// Rounding goes to the LIQUID side by floor division. Both directions are
+// defensible; this one is chosen because the liquid part is what the claimant can
+// act on, and a dust unit locked into a cooldown is worth less to them than a dust
+// unit in hand.
+func stakedPart(payout *big.Int) *big.Int {
+	if !present("cfg_stakeContract") {
+		return new(big.Int)
+	}
+	bps := getU("cfg_stakedBps")
+	if bps == 0 {
+		return new(big.Int)
+	}
+	out := new(big.Int).Mul(payout, big.NewInt(int64(bps)))
+	return out.Div(out, big.NewInt(10000))
+}
+
+// creditStake hands `amt` to the staking contract as stake held FOR acct.
+//
+// Approve-then-stakeFor rather than a plain transfer: a transfer would move the
+// tokens and leave the staking contract with no idea whose they are. stakeFor PULLS
+// exactly what it was told about, so the amount credited and the amount moved are
+// the same number by construction rather than by trust — and the allowance granted
+// is exactly this payout, never standing.
+//
+// This contract must appear in the staking contract's stakeFor allowlist, which is
+// fixed at ITS init. That is the authorisation: a contract caller carries no key and
+// so can never satisfy the active-authority check.
+func creditStake(acct string, amt *big.Int) {
+	sc := getStr("cfg_stakeContract")
+	adapter.Approve(asset(), "contract:"+sc, amt)
+	sdk.ContractCall(sc, "stakeFor",
+		`{"acct":"`+acct+`","amount":"`+amt.String()+`"}`, nil)
 }
 
 // ---- queries -------------------------------------------------------------
