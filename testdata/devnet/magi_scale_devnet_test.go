@@ -556,18 +556,30 @@ func TestDevnetMagiScale(t *testing.T) {
 	// landed, which pays the whole epoch to a fraction of the earners. The reporter's
 	// own `run` gates on this for the same reason; a suite that broadcasts the plan
 	// blindly has to do it by hand.
+	// Three kinds of call, and only ONE of them is a page.
+	//
+	// submitRoot writes no ssdone marker, so counting it as a page made the
+	// applied-check look for ssdone|content|0|9 — an index no page ever occupies —
+	// and then "resend" it three times before giving up. Split them explicitly.
 	type call struct{ id, action, payload string }
 	pages := 0
-	var finalizeCall call
+	var finalizeCall, rootCall call
 	var sharePages []call
 	for i, c := range plan.Calls {
-		if c.Action == "finalizeEpoch" {
+		switch c.Action {
+		case "finalizeEpoch":
 			finalizeCall = call{c.ContractID, c.Action, c.Payload}
 			continue
+		case "submitRoot":
+			rootCall = call{c.ContractID, c.Action, c.Payload}
+		default:
+			sharePages = append(sharePages, call{c.ContractID, c.Action, c.Payload})
+			pages++
 		}
-		sharePages = append(sharePages, call{c.ContractID, c.Action, c.Payload})
-		pages++
 		callN(1, c.ContractID, c.Action, c.Payload, fmt.Sprintf("plan[%d] %s", i, c.Action))
+	}
+	if rootCall.id == "" {
+		t.Fatal("the plan committed no root — no claim could ever verify")
 	}
 	t.Logf("submitted %d share pages for %d accounts", pages, expected.Accounts)
 
