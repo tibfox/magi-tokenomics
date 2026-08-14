@@ -533,15 +533,32 @@ func TestDevnetMagiReporter(t *testing.T) {
 		node int
 		acct string
 	}{{1, owner}, {2, w2}} {
-		key := "claimed|author|0|hive:" + cl.acct
-		st, err := d.GetStateByKeys(ctx, 1, c3ID, []string{key})
-		if err != nil {
-			t.Fatalf("read %s: %v", key, err)
+		// The share comes from the PROOF, because the chain no longer stores it.
+		// This used to read claimed|author|0|<acct> as though it held a share — a
+		// key the contract writes only AFTER a successful claim, and whose value is
+		// "1". Before the merkle migration there was a share| key holding the real
+		// number; the rename kept the arithmetic pointing at a key that could not
+		// answer it, so every account looked like it "earned no on-chain share".
+		var pf struct {
+			Share        string `json:"share"`
+			ClaimPayload string `json:"claim_payload"`
 		}
-		raw := fmt.Sprintf("%v", st[key])
-		share, good := new(big.Int).SetString(raw, 10)
+		pfOut := runReporter("proof", "-epoch", plan.Epoch, "-account", "hive:"+cl.acct, "-json")
+		if err := json.Unmarshal(pfOut, &pf); err != nil {
+			t.Fatalf("reporter proof for %s is not json: %v\n%s", cl.acct, err, pfOut)
+		}
+		share, good := new(big.Int).SetString(pf.Share, 10)
 		if !good || share.Sign() <= 0 {
-			t.Fatalf("%s earned no on-chain share (%q) — the fixture should have paid them", cl.acct, raw)
+			t.Fatalf("%s has no share in the reporter's book (%q) — the fixture should have paid them",
+				cl.acct, pf.Share)
+		}
+		// It must not have claimed yet: the guard below measures a payout delta, and
+		// a pre-existing claim would make that delta zero and read as a payout bug.
+		ck := "claimed|author|0|hive:" + cl.acct
+		if st, err := d.GetStateByKeys(ctx, 1, c3ID, []string{ck}); err == nil {
+			if v := fmt.Sprintf("%v", st[ck]); v != "" && v != "<nil>" {
+				t.Fatalf("%s had already claimed before this test claimed for them (%s=%q)", cl.acct, ck, v)
+			}
 		}
 		want := new(big.Int).Div(new(big.Int).Mul(fundedN, share), totalN)
 		t.Logf("hive:%s share=%s -> expected payout %s", cl.acct, share, want)
@@ -554,15 +571,8 @@ func TestDevnetMagiReporter(t *testing.T) {
 		// either way.
 		before := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
 
-		// The proof comes from the reporter recomputing the epoch from Hive — the
-		// same path a real claimant uses when they do not want to trust an indexer.
-		var pf struct {
-			ClaimPayload string `json:"claim_payload"`
-		}
-		pfOut := runReporter("proof", "-epoch", plan.Epoch, "-account", "hive:"+cl.acct, "-json")
-		if err := json.Unmarshal(pfOut, &pf); err != nil {
-			t.Fatalf("reporter proof for %s is not json: %v\n%s", cl.acct, err, pfOut)
-		}
+		// The same proof drives the claim — the path a real claimant uses when they
+		// do not want to trust an indexer.
 		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", pf.ClaimPayload); err != nil {
 			t.Fatalf("claim for %s failed to broadcast: %v", cl.acct, err)
 		}

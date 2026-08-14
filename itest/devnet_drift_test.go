@@ -1186,3 +1186,46 @@ func stripStructTags(body string) string {
 		return lit
 	})
 }
+
+// `claimed|<ch>|<ep>|<acct>` records THAT an account claimed, not what it earned.
+// The contract writes the literal "1" there, and only after a successful claim.
+//
+// Two devnet suites have now computed an expected payout from it — a leftover from
+// when share|<ch>|<ep>|<acct> held the real number and was deleted by the merkle
+// migration. Both failed in the same confusing way, reporting that every account
+// "earned no on-chain share" long after the chain had paid them, and both cost a
+// full devnet run to discover.
+//
+// So: a claimed| key may be tested for PRESENCE, never parsed as a number.
+func TestDevnetDrift_ClaimedKeyIsNeverReadAsAShare(t *testing.T) {
+	// numeric parses of a variable that was assigned from a claimed| lookup
+	reParse := regexp.MustCompile(`(?:SetString|ParseInt|ParseUint|Atoi)\(\s*(\w+)`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		for _, m := range regexp.MustCompile(`"claimed\|`).FindAllStringIndex(src, -1) {
+			checked++
+			// look at the statements around the lookup: within one screen, does a
+			// numeric parse consume something derived from it?
+			from := m[0]
+			to := min(from+700, len(src))
+			window := src[from:to]
+			if !reParse.MatchString(window) {
+				continue
+			}
+			// a presence check that happens to sit near unrelated arithmetic is
+			// fine; what is not fine is parsing the value the lookup produced
+			if regexp.MustCompile(`(?s)st\[\w+\].*?(SetString|ParseInt|ParseUint|Atoi)\(`).MatchString(window) ||
+				regexp.MustCompile(`(?s)(SetString|ParseInt|ParseUint|Atoi)\(\s*raw\b`).MatchString(window) {
+				t.Errorf("%s parses a claimed| value as a number: that key holds \"1\" and is "+
+					"written only AFTER a claim, so the arithmetic reads a presence flag as a "+
+					"share and every account looks like it earned nothing\n  near: %s",
+					name, trunc(strings.TrimSpace(window), 160))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no claimed| lookups in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d claimed| lookups", checked)
+}
