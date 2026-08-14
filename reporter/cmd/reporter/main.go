@@ -17,6 +17,7 @@ package main
 
 import (
 	"encoding/json"
+	"math/big"
 	"flag"
 	"fmt"
 	"os"
@@ -50,6 +51,7 @@ commands:
   plan      -config F      print the ordered calls that would be broadcast
   run       -config F      execute the plan (dry-run unless -broadcast)
   proof     -config F      print an account's share + merkle proof for an epoch
+  root      -entries "..."  commit-root for a share list you push by hand
 
 common flags:
   -config F                path to the config file (required except init-config)
@@ -83,6 +85,16 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
+	case "root":
+		// no config needed: this is pure arithmetic over the list given
+		fsRoot := flag.NewFlagSet("root", flag.ContinueOnError)
+		entries := fsRoot.String("entries", "", `"hive:a:100,hive:b:50"`)
+		acct := fsRoot.String("account", "", "also emit this account's proof")
+		asJSONRoot := fsRoot.Bool("json", false, "machine-readable output")
+		if err := fsRoot.Parse(rest); err != nil {
+			return err
+		}
+		return (&app{cfg: &Config{}}).cmdRoot(*entries, *acct, *asJSONRoot)
 	case "epoch", "compute", "plan", "run", "proof":
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
@@ -1060,5 +1072,85 @@ func (a *app) cmdProof(epochFlag, account string, asJSON bool) error {
 	fmt.Printf("\nclaim payload:\n%s\n", fmt.Sprintf(
 		`{"channel":"%s","epoch":"%d","share":"%s","proof":"%s"}`,
 		a.cfg.Contracts.Channel, c.Epoch, share, strings.Join(proof, ",")))
+	return nil
+}
+
+// cmdRoot computes the merkle commitment for a share list supplied on the command
+// line, and optionally a proof for one account.
+//
+// WHY THIS EXISTS. Not every share book comes out of the Hive pipeline. An operator
+// pushing a list by hand — an LP channel fed from their own numbers, a one-off
+// correction, a migration — still has to commit a root, and finalizeEpoch refuses an
+// epoch without one. Before this there was no way to compute that root outside the
+// reporter's own epoch machinery, which made direct submission impossible rather than
+// merely manual.
+//
+// It takes the SAME "acct:share,acct:share" string submitShares takes, so the root
+// provably covers what was published. Entries whose account carries no ledger domain
+// are dropped exactly as the contract drops them — a root over a set the chain would
+// not accept is a root no claim can use.
+func (a *app) cmdRoot(entries, account string, asJSON bool) error {
+	if entries == "" {
+		return fmt.Errorf("-entries is required, in the form \"hive:a:100,hive:b:50\"")
+	}
+	shares := map[string]*big.Int{}
+	skipped := []string{}
+	for _, e := range strings.Split(entries, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		cut := strings.LastIndex(e, ":")
+		if cut < 0 {
+			skipped = append(skipped, e+" (no amount)")
+			continue
+		}
+		acct, amt := e[:cut], e[cut+1:]
+		if !strings.HasPrefix(acct, "hive:") && !strings.HasPrefix(acct, "contract:") &&
+			!strings.HasPrefix(acct, "did:") {
+			skipped = append(skipped, e+" (no ledger domain)")
+			continue
+		}
+		v, ok := new(big.Int).SetString(amt, 10)
+		if !ok || v.Sign() <= 0 {
+			skipped = append(skipped, e+" (amount not a positive integer)")
+			continue
+		}
+		shares[acct] = v
+	}
+	if len(shares) == 0 {
+		return fmt.Errorf("no usable entries: %s", strings.Join(skipped, "; "))
+	}
+	tree := sharecore.BuildTree(shares)
+	total := new(big.Int)
+	for _, v := range shares {
+		total.Add(total, v)
+	}
+
+	out := map[string]any{
+		"root": tree.Root(), "total_shares": total.String(),
+		"accounts": len(shares), "skipped": skipped,
+	}
+	if account != "" {
+		if !strings.Contains(account, ":") {
+			account = "hive:" + account
+		}
+		proof, ok := tree.Proof(account)
+		if !ok {
+			return fmt.Errorf("%s is not in this share list", account)
+		}
+		out["account"] = account
+		out["share"] = shares[account].String()
+		out["proof"] = proof
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	fmt.Printf("root          %s\n", tree.Root())
+	fmt.Printf("total_shares  %s\n", total)
+	fmt.Printf("accounts      %d\n", len(shares))
+	for _, sk := range skipped {
+		fmt.Printf("SKIPPED       %s\n", sk)
+	}
 	return nil
 }

@@ -544,7 +544,11 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 				continue
 			}
 			checkedCalls++
-			tail := src[s.payloadAt:min(s.payloadAt+400, len(src))]
+			// Bound the scan to THIS call or table row. A fixed-width window walks
+			// into the next row, and then a claimYield row's {"epoch":"0"} gets read
+			// as the payload of the claim above it — the guard condemns a correct
+			// line and, worse, would clear a wrong one that sits next to a right one.
+			tail := enclosingArgs(src, s.payloadAt)
 			payload := ""
 			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
 				payload = bt[1]
@@ -559,6 +563,20 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 				}
 			}
 			if payload == "" {
+				// payload built by a helper — judge the helper's body instead, so a
+				// suite that moved its payloads behind a function is still covered
+				if fm := regexp.MustCompile(`^\s*,\s*([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
+					body, ok := helperBody(src, fm[1])
+					if !ok {
+						bad = append(bad, act+" payload helper "+fm[1]+" is not defined in this suite")
+						continue
+					}
+					_ = body
+					if why := helperWritesChannel(t, src, fm[1], map[string]string{}); why != "" {
+						bad = append(bad, act+" payload comes from "+fm[1]+", which "+why)
+					}
+					continue
+				}
 				continue // could not resolve; the key check below still covers this suite
 			}
 			if !strings.Contains(payload, `"channel"`) {
@@ -882,4 +900,103 @@ func TestDevnetDrift_ReporterBinaryIsNewerThanItsSources(t *testing.T) {
 			"  GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter",
 			newestPath)
 	}
+}
+
+// enclosingArgs returns the source from pos to the end of the call or composite
+// literal that encloses it — the closing paren or brace that pos sits inside.
+// Bounding matters: the guards below look for the payload nearest an action name,
+// and a fixed-width window silently reads the NEXT table row when a row builds its
+// payload with a helper instead of a literal.
+func enclosingArgs(src string, pos int) string {
+	depth, inStr := 0, byte(0)
+	for i := pos; i < len(src); i++ {
+		c := src[i]
+		if inStr != 0 {
+			if c == '\\' && inStr != '`' {
+				i++
+			} else if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			inStr = c
+		case '(', '{', '[':
+			depth++
+		case ')', '}', ']':
+			if depth == 0 {
+				return src[pos:i]
+			}
+			depth--
+		}
+	}
+	return src[pos:]
+}
+
+// helperBody returns the body of a func literal assigned to name — the shape the
+// devnet suites use for payload builders (name := func(...) string { ... }).
+func helperBody(src, name string) (string, bool) {
+	m := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*:?=\s*func\b[^{]*\{`).FindStringIndex(src)
+	if m == nil {
+		return "", false
+	}
+	return enclosingArgs(src, m[1]), true
+}
+
+// helperWritesChannel reports why a payload builder fails to scope its payload to a
+// channel, or "" if it does. Three ways it can: write the field itself, delegate to
+// another builder in the same suite, or take the payload the reporter emits — and the
+// last is checked against the reporter's own source, not waived.
+func helperWritesChannel(t *testing.T, src, name string, memo map[string]string) string {
+	t.Helper()
+	// Memoise the ANSWER, not the visit. Returning "" for an already-seen helper
+	// silently clears the whole chain the moment a builder calls the same helper
+	// twice — which is how this guard passed a suite whose payload had no channel
+	// at all. In-progress entries are held as a failure so a cycle cannot pass either.
+	if why, done := memo[name]; done {
+		return why
+	}
+	memo[name] = "is part of a call cycle the guard cannot resolve"
+	answer := ""
+	defer func() { memo[name] = answer }()
+	body, ok := helperBody(src, name)
+	if !ok {
+		answer = "is not defined in this suite"
+		return answer
+	}
+	if strings.Contains(body, `"channel"`) {
+		answer = ""
+		return answer
+	}
+	if strings.Contains(body, "ClaimPayload") || strings.Contains(body, "claim_payload") {
+		repb, err := os.ReadFile(filepath.Join("..", "reporter", "cmd", "reporter", "main.go"))
+		if err != nil {
+			t.Fatalf("read reporter main.go: %v", err)
+		}
+		rep := string(repb)
+		m := regexp.MustCompile("\"claim_payload\":[^`]*`([^`]*)`").FindStringSubmatch(rep)
+		if m == nil {
+			answer = "takes the reporter's claim_payload, which no longer exists"
+			return answer
+		}
+		if !strings.Contains(m[1], `"channel"`) {
+			answer = `takes the reporter's claim_payload, which stopped writing "channel"`
+			return answer
+		}
+		answer = ""
+		return answer
+	}
+	// delegation: follow every builder it calls
+	for _, c := range regexp.MustCompile(`\b([A-Za-z_]\w*)\(`).FindAllStringSubmatch(body, -1) {
+		if _, isHelper := helperBody(src, c[1]); !isHelper || c[1] == name {
+			continue
+		}
+		if why := helperWritesChannel(t, src, c[1], memo); why == "" {
+			answer = ""
+			return answer
+		}
+	}
+	answer = `never writes "channel"`
+	return answer
 }

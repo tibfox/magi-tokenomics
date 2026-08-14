@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -427,6 +428,22 @@ func TestDevnetMagiFull(t *testing.T) {
 	call(c3ID, "submitShares", fmt.Sprintf(
 		`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:70,hive:%s:30"}`,
 		holderA, holderB), "lp shares")
+	// The LP channel is pushed BY HAND, not through the reporter's Hive pipeline, so
+	// nothing computed a commitment for it — and finalizeEpoch refuses an epoch with
+	// no root. `reporter root` does that arithmetic over the same entries string,
+	// which is what an operator submitting a list by hand has to do.
+	lpEntries := fmt.Sprintf("hive:%s:70,hive:%s:30", holderA, holderB)
+	var lpRoot struct {
+		Root        string `json:"root"`
+		TotalShares string `json:"total_shares"`
+		Accounts    int    `json:"accounts"`
+	}
+	if err := json.Unmarshal(runReporter("root", "-entries", lpEntries, "-json"), &lpRoot); err != nil {
+		t.Fatalf("reporter root for the lp channel: %v", err)
+	}
+	call(c3ID, "submitRoot", fmt.Sprintf(
+		`{"channel":"lp","epoch":"0","root":"%s","totalShares":"%s","accounts":"%d"}`,
+		lpRoot.Root, lpRoot.TotalShares, lpRoot.Accounts), "lp root")
 	call(c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "lp finalize")
 
 	// ---------------- PHASE 7: claims, invariants, outsider ----------------
@@ -467,13 +484,37 @@ func TestDevnetMagiFull(t *testing.T) {
 	// that used to be here sent {"epoch":"0"} to everything, which meant the two
 	// distributor claims were the same call issued twice and the yield claim named an
 	// action C1 does not export (it has claimYield, not claim).
-	claimDist := func(node int, ch, what string) {
-		callN(node, c3ID, "claim", fmt.Sprintf(`{"channel":"%s","epoch":"0"}`, ch), what)
+	// Every claim now carries a proof. Content comes from `reporter proof`, which
+	// recomputes the epoch from Hive; LP comes from `reporter root -account`, because
+	// that list never went through the Hive pipeline.
+	claimParts := func(ch, acct string) (share, proof string) {
+		var pf struct {
+			Share string   `json:"share"`
+			Proof []string `json:"proof"`
+		}
+		var raw []byte
+		if ch == "content" {
+			raw = runReporter("proof", "-epoch", "0", "-account", "hive:"+acct, "-json")
+		} else {
+			raw = runReporter("root", "-entries", lpEntries, "-account", "hive:"+acct, "-json")
+		}
+		if err := json.Unmarshal(raw, &pf); err != nil {
+			t.Fatalf("proof for %s on %s: %v\n%s", acct, ch, err, raw)
+		}
+		return pf.Share, strings.Join(pf.Proof, ",")
 	}
-	claimDist(1, "content", "A claims content")
-	claimDist(2, "content", "B claims content")
-	claimDist(1, "lp", "A claims LP")
-	claimDist(2, "lp", "B claims LP")
+	claimPayloadEp := func(ch, acct, ep string) string {
+		share, proof := claimParts(ch, acct)
+		return fmt.Sprintf(`{"channel":"%s","epoch":"%s","share":"%s","proof":"%s"}`, ch, ep, share, proof)
+	}
+	claimPayload := func(ch, acct string) string { return claimPayloadEp(ch, acct, "0") }
+	claimDist := func(node int, ch, acct, what string) {
+		callN(node, c3ID, "claim", claimPayload(ch, acct), what)
+	}
+	claimDist(1, "content", holderA, "A claims content")
+	claimDist(2, "content", holderB, "B claims content")
+	claimDist(1, "lp", holderA, "A claims LP")
+	claimDist(2, "lp", holderB, "B claims LP")
 	callN(1, c1ID, "claimYield", `{"epoch":"0"}`, "A claims yield")
 	callN(2, c1ID, "claimYield", `{"epoch":"0"}`, "B claims yield")
 
@@ -591,13 +632,17 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	t.Logf("holder-attacker hive:%s holds %s tokens and %s stake", holderB, holderBefore, holderStake)
 
+	// The double-claim rows carry the holder's REAL proof, so the double-claim guard
+	// is what refuses them. Without it they would be refused for having no proof —
+	// which is a different guard, and would leave the one under test unexercised.
 	holderAttacks := []struct{ id, action, payload, what string }{
 		// they DID have a valid share and already claimed it — the second must fail
-		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "double-claim content (has a real share)"},
-		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "double-claim LP (has a real share)"},
+		{c3ID, "claim", claimPayload("content", holderB), "double-claim content (has a real share)"},
+		{c3ID, "claim", claimPayload("lp", holderB), "double-claim LP (has a real share)"},
 		{c1ID, "claimYield", `{"epoch":"0"}`, "double-claim yield (is really staked)"},
 		// canonicalisation: "00" must not alias epoch 0 into a second payout
-		{c3ID, "claim", `{"channel":"content","epoch":"00"}`, "re-claim content via a non-canonical epoch alias"},
+		{c3ID, "claim", claimPayloadEp("content", holderB, "00"),
+			"re-claim content via a non-canonical epoch alias"},
 		{c1ID, "claimYield", `{"epoch":"00"}`, "re-claim yield via a non-canonical epoch alias"},
 		// an epoch they have no share in
 		{c3ID, "claim", `{"channel":"content","epoch":"1"}`, "claim an epoch with no share"},
