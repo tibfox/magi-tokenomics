@@ -200,6 +200,38 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	genesis := head
 	t.Logf("chain head=%d; C2 genesis will auto-default to its init block (epochLen=5)", head)
 
+	// Fund the actors for RC before any contract call.
+	//
+	// RC is `ledger HBD + 10,000 free`, and this suite's setup alone — three inits
+	// plus addChannel — measures at 9,866 RC in the local harness (see
+	// TestRCBudget_TokenomicsSetupFitsTheFreeTier). That left 134 RC of headroom,
+	// and devnet adds per-transaction overhead the harness does not, so addChannel
+	// was the first call to fall off the end: the three inits landed and the fourth
+	// silently never applied. An attacker running dry has the same problem in
+	// reverse — a call that dies of RC exhaustion proves nothing about
+	// authorisation, so the attacker is funded too.
+	for _, node := range []int{1, 2} {
+		moved := 0
+		for round := 0; round < 3; round++ {
+			progressed := false
+			for _, amt := range []string{"100.000", "50.000", "20.000", "5.000"} {
+				if _, ferr := d.Deposit(ctx, node, amt, "hbd"); ferr == nil {
+					t.Logf("node %d deposited %s HBD for RC (round %d)", node, amt, round+1)
+					moved++
+					progressed = true
+					break
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+		if moved == 0 {
+			t.Fatalf("node %d could not deposit — it would run on the 10k free tier, which "+
+				"this suite's setup already very nearly exhausts", node)
+		}
+	}
+
 	// init token, C2, C3 (all from the owner account)
 	mustCall(1, tokenID, "init", `{"name":"MAGI","symbol":"MAGI","decimals":0,"maxSupply":"100000000"}`, "token.init")
 	waitKey(tokenID, "isInit", "token init")
