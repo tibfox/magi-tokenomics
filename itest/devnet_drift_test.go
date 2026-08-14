@@ -515,6 +515,12 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 	reAnyAction := regexp.MustCompile(`"(\w+)"\s*,`)
 	checkedCalls, checkedKeys := 0, 0
 
+	// Payload builders shared across suites live in their own file, so helpers are
+	// resolved against every devnet source rather than only the calling one.
+	allSrc := ""
+	for _, raw := range devnetSources(t) {
+		allSrc += stripLineComments(raw) + "\n"
+	}
 	for name, rawSrc := range devnetSources(t) {
 		// Comments describe bugs as often as they contain them: the note explaining
 		// why claimed|0|hive: was wrong itself contains the string claimed|0|hive:.
@@ -568,14 +574,14 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 			if payload == "" {
 				// payload built by a helper — judge the helper's body instead, so a
 				// suite that moved its payloads behind a function is still covered
-				if fm := regexp.MustCompile(`^\s*,\s*([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
-					body, ok := helperBody(src, fm[1])
+				if fm := regexp.MustCompile(`^\s*,\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
+					body, ok := helperBody(allSrc, fm[1])
 					if !ok {
 						bad = append(bad, act+" payload helper "+fm[1]+" is not defined in this suite")
 						continue
 					}
 					_ = body
-					if why := helperWritesChannel(t, src, fm[1], map[string]string{}); why != "" {
+					if why := helperWritesField(t, allSrc, fm[1], "channel", map[string]string{}); why != "" {
 						bad = append(bad, act+" payload comes from "+fm[1]+", which "+why)
 					}
 					continue
@@ -940,18 +946,28 @@ func enclosingArgs(src string, pos int) string {
 // helperBody returns the body of a func literal assigned to name — the shape the
 // devnet suites use for payload builders (name := func(...) string { ... }).
 func helperBody(src, name string) (string, bool) {
-	m := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*:?=\s*func\b[^{]*\{`).FindStringIndex(src)
-	if m == nil {
-		return "", false
+	// Three shapes, because the suites use all three: a func literal assigned to a
+	// name, a plain function declaration, and a METHOD on a helper type. Matching
+	// only the first is how this resolver came to skip every call site after the
+	// payload builders moved onto a shared type — the guard kept passing while
+	// checking nothing at all.
+	for _, pat := range []string{
+		`\b` + regexp.QuoteMeta(name) + `\s*:?=\s*func\b[^{]*\{`,
+		`func\s+` + regexp.QuoteMeta(name) + `\s*\([^{]*\{`,
+		`func\s+\([^)]*\)\s*` + regexp.QuoteMeta(name) + `\s*\([^{]*\{`,
+	} {
+		if m := regexp.MustCompile(pat).FindStringIndex(src); m != nil {
+			return enclosingArgs(src, m[1]), true
+		}
 	}
-	return enclosingArgs(src, m[1]), true
+	return "", false
 }
 
 // helperWritesChannel reports why a payload builder fails to scope its payload to a
 // channel, or "" if it does. Three ways it can: write the field itself, delegate to
 // another builder in the same suite, or take the payload the reporter emits — and the
 // last is checked against the reporter's own source, not waived.
-func helperWritesChannel(t *testing.T, src, name string, memo map[string]string) string {
+func helperWritesField(t *testing.T, src, name, field string, memo map[string]string) string {
 	t.Helper()
 	// Memoise the ANSWER, not the visit. Returning "" for an already-seen helper
 	// silently clears the whole chain the moment a builder calls the same helper
@@ -968,7 +984,12 @@ func helperWritesChannel(t *testing.T, src, name string, memo map[string]string)
 		answer = "is not defined in this suite"
 		return answer
 	}
-	if strings.Contains(body, `"channel"`) {
+	// Struct tags are NOT payload fields. A builder that unmarshals into
+	// `Proof []string ` + "`" + `json:"proof"` + "`" + ` carries the string "proof"
+	// in its body while writing no proof into the payload at all — which is how a
+	// helper that dropped the proof entirely still satisfied this check.
+	body = stripStructTags(body)
+	if strings.Contains(body, `"`+field+`"`) {
 		answer = ""
 		return answer
 	}
@@ -983,24 +1004,24 @@ func helperWritesChannel(t *testing.T, src, name string, memo map[string]string)
 			answer = "takes the reporter's claim_payload, which no longer exists"
 			return answer
 		}
-		if !strings.Contains(m[1], `"channel"`) {
-			answer = `takes the reporter's claim_payload, which stopped writing "channel"`
+		if !strings.Contains(m[1], `"`+field+`"`) {
+			answer = `takes the reporter's claim_payload, which stopped writing "` + field + `"`
 			return answer
 		}
 		answer = ""
 		return answer
 	}
 	// delegation: follow every builder it calls
-	for _, c := range regexp.MustCompile(`\b([A-Za-z_]\w*)\(`).FindAllStringSubmatch(body, -1) {
+	for _, c := range regexp.MustCompile(`\b(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindAllStringSubmatch(body, -1) {
 		if _, isHelper := helperBody(src, c[1]); !isHelper || c[1] == name {
 			continue
 		}
-		if why := helperWritesChannel(t, src, c[1], memo); why == "" {
+		if why := helperWritesField(t, src, c[1], field, memo); why == "" {
 			answer = ""
 			return answer
 		}
 	}
-	answer = `never writes "channel"`
+	answer = `never writes "` + field + `"`
 	return answer
 }
 
@@ -1084,4 +1105,84 @@ func TestDevnetDrift_EveryReporterSubcommandTheSuitesUseAcceptsConfig(t *testing
 				sub, trunc(string(out), 200))
 		}
 	}
+}
+
+// Under the merkle commitment a claim carries the claimant's share and a proof of
+// it. A payload with neither is refused on chain — "share must be positive" — so a
+// suite still sending the pre-merkle payload fails at its first claim, which is
+// after the whole chain has been stood up, funded and reported.
+//
+// This is the guard that was missing when three suites were called "migrated"
+// while still claiming with {"channel":..,"epoch":..} and nothing else.
+func TestDevnetDrift_EveryClaimCarriesAShareAndProof(t *testing.T) {
+	reClaim := regexp.MustCompile(`\b(c3ID|c5ID|distID)\s*,\s*"(claim)"`)
+	checked := 0
+	// Helpers are resolved against EVERY devnet source, not just the calling file:
+	// the shared payload builders live in their own file, and resolving per-file
+	// silently found nothing and reported success.
+	all := ""
+	for _, raw := range devnetSources(t) {
+		all += stripLineComments(raw) + "\n"
+	}
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		bad := []string{}
+		for _, m := range reClaim.FindAllStringSubmatchIndex(src, -1) {
+			checked++
+			tail := enclosingArgs(src, m[1])
+			// A claim that is SUPPOSED to be refused for having no share is a
+			// deliberate negative test, and must say so in its own description.
+			// Requiring the words rather than inferring them keeps an actually
+			// broken call from hiding among the attacks: silence is not a
+			// declaration of intent.
+			if lower := strings.ToLower(tail); strings.Contains(lower, "no share") ||
+				strings.Contains(lower, "no proof") {
+				continue
+			}
+			payload := ""
+			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
+				payload = bt[1]
+			}
+			for _, field := range []string{"share", "proof"} {
+				if payload != "" {
+					if !strings.Contains(payload, `"`+field+`"`) {
+						bad = append(bad, fmt.Sprintf("claim payload has no %q: %s", field, trunc(payload, 70)))
+					}
+					continue
+				}
+				if fm := regexp.MustCompile(`^\s*,\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
+					if why := helperWritesField(t, all, fm[1], field, map[string]string{}); why != "" {
+						bad = append(bad, fmt.Sprintf("claim payload comes from %s, which %s", fm[1], why))
+					}
+				}
+			}
+		}
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s claims without a merkle proof: %v\n"+
+				"  the contract aborts these — a claim needs the share the indexer holds\n"+
+				"  and a path proving it against the epoch's committed root",
+				name, uniqStrings(bad))
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no distributor claims in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d claim call sites", checked)
+}
+
+// stripStructTags removes Go struct tags from a body so field-presence checks read
+// what a helper WRITES, not what it merely unmarshals. A tag is a backtick literal
+// that declares an encoding key and contains no JSON object, which distinguishes it
+// from the payload literals those helpers also carry.
+func stripStructTags(body string) string {
+	return regexp.MustCompile("`[^`]*`").ReplaceAllStringFunc(body, func(lit string) string {
+		if strings.Contains(lit, "{") {
+			return lit // a payload literal — this is exactly what we want to read
+		}
+		if regexp.MustCompile(`\b(json|yaml|xml|db|graphql):"`).MatchString(lit) {
+			return ""
+		}
+		return lit
+	})
 }

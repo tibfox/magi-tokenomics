@@ -239,8 +239,11 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	waitValue(c1ID, "total_staked", "1400", "C1 total_staked after A unstakes")
 	call(c3ID, "pullFunding", `{"channel":"content","epoch":"0"}`, "C3 pull e0")
 	call(c1ID, "pullFunding", `{"epoch":"0"}`, "C7 pull e0")
-	call(c3ID, "submitShares", fmt.Sprintf(
-		`{"channel":"content","epoch":"0","page":"0","entries":"hive:%s:50,hive:%s:50"}`, owner, holderB), "C3 shares e0")
+	// The same book every epoch here — 50/50 between A and B — so one commitment
+	// serves all three. finalizeEpoch refuses an epoch with no root.
+	book := buildBook(t, map[string]string{"hive:" + owner: "50", "hive:" + holderB: "50"})
+	call(c3ID, "submitShares", book.SubmitPayload("content", "0"), "C3 shares e0")
+	call(c3ID, "submitRoot", book.RootPayload("content", "0"), "C3 root e0")
 	call(c3ID, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "C3 finalize e0")
 	waitValue(c3ID, "funded|content|0", contentSlice, "C3 funded e0")
 	waitValue(c1ID, "y_funded|0", yieldSlice, "C7 funded e0")
@@ -261,9 +264,8 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	for _, ep := range []string{"1", "2"} {
 		call(c3ID, "pullFunding", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 pull e"+ep)
 		call(c1ID, "pullFunding", fmt.Sprintf(`{"epoch":"%s"}`, ep), "C7 pull e"+ep)
-		call(c3ID, "submitShares", fmt.Sprintf(
-			`{"channel":"content","epoch":"%s","page":"0","entries":"hive:%s:50,hive:%s:50"}`, ep, owner, holderB),
-			"C3 shares e"+ep)
+		call(c3ID, "submitShares", book.SubmitPayload("content", ep), "C3 shares e"+ep)
+		call(c3ID, "submitRoot", book.RootPayload("content", ep), "C3 root e"+ep)
 		call(c3ID, "finalizeEpoch", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "C3 finalize e"+ep)
 	}
 	for _, ep := range []string{"1", "2"} {
@@ -340,8 +342,8 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	time.Sleep(20 * time.Second) // challenge windows
 	before := bal(owner)
 	for _, ep := range []string{"0", "1", "2"} {
-		callN(1, c3ID, "claim", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "A claims content e"+ep)
-		callN(2, c3ID, "claim", fmt.Sprintf(`{"channel":"content","epoch":"%s"}`, ep), "B claims content e"+ep)
+		callN(1, c3ID, "claim", book.ClaimPayload(t, "content", ep, "hive:"+owner), "A claims content e"+ep)
+		callN(2, c3ID, "claim", book.ClaimPayload(t, "content", ep, "hive:"+holderB), "B claims content e"+ep)
 	}
 	for _, ep := range []string{"0", "1", "2"} {
 		for _, a := range []string{owner, holderB} {
@@ -358,7 +360,9 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	t.Logf("PER-EPOCH ISOLATION OK: three independent claims paid 3 x 9000 = 27000")
 
 	// re-claiming a settled epoch must still fail
-	callN(1, c3ID, "claim", `{"channel":"content","epoch":"0"}`, "A re-claims epoch 0 (must abort)")
+	// carries the REAL proof, so the already-claimed guard is what refuses it
+	callN(1, c3ID, "claim", book.ClaimPayload(t, "content", "0", "hive:"+owner),
+		"A re-claims epoch 0 (must abort)")
 	time.Sleep(15 * time.Second)
 	if again := new(big.Int).Sub(bal(owner), before); again.String() != "27000" {
 		t.Fatalf("re-claiming epoch 0 paid again: %s", again)

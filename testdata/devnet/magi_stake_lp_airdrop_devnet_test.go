@@ -263,11 +263,15 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	t.Logf("C5 funded=%s  C7 funded=%s", c5Funded, c7Funded)
 
 	// C5: LP reporter pushes provider shares, finalizes; the holder claims
-	send(1, c5ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:100"}`, holder), "c5.submitShares")
+	lpBook := buildBook(t, map[string]string{"hive:" + holder: "100"})
+	send(1, c5ID, "submitShares", lpBook.SubmitPayload("lp", "0"), "c5.submitShares")
+	// totalShares now lands with the ROOT: applyEntries accumulates nothing, so
+	// waiting for it before the commitment would wait forever.
+	send(1, c5ID, "submitRoot", lpBook.RootPayload("lp", "0"), "c5.submitRoot")
 	waitKey(c5ID, "totalShares|lp|0", "c5 shares recorded")
 	send(1, c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "c5.finalizeEpoch")
 	waitVal(c5ID, "status|lp|0", "finalized", "c5 finalize")
-	send(2, c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "c5.claim (holder's LP share)")
+	send(2, c5ID, "claim", lpBook.ClaimPayload(t, "lp", "0", "hive:"+holder), "c5.claim (holder's LP share)")
 	waitKey(c5ID, "claimed|lp|0|hive:"+holder, "c5 claim recorded")
 
 	// C7: the holder claims pro-rata yield for the stake they held all epoch
@@ -284,7 +288,8 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 		{c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "attacker finalizes C5"},
 		{c5ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "attacker vetoes C5"},
 		{c5ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "attacker sweeps C5"},
-		{c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "attacker double-claims C5"},
+		// the holder's REAL proof, so the double-claim guard is what refuses it
+		{c5ID, "claim", lpBook.ClaimPayload(t, "lp", "0", "hive:"+holder), "attacker double-claims C5"},
 		{c1ID, "claimYield", `{"epoch":"0"}`, "attacker double-claims C7"},
 		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "attacker sweeps a C7 epoch that HAS stakers"},
 		{c1ID, "stakeFor", fmt.Sprintf(`{"acct":"hive:%s","amount":"500"}`, holder), "attacker stakeFor (not allowlisted)"},

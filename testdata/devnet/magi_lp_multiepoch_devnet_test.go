@@ -436,6 +436,16 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		t.Logf("epoch %d: reporter computed totalShares=%s across %d providers",
 			ep, got.TotalShares, got.Accounts)
 
+		hasRoot := false
+		for _, c := range plan.Calls {
+			if c.Action == "submitRoot" {
+				hasRoot = true
+			}
+		}
+		if !hasRoot {
+			t.Fatalf("epoch %d: the plan publishes shares and never commits a root — "+
+				"finalizeEpoch would refuse the epoch and no claim could verify: %s", ep, planJSON)
+		}
 		for i, c := range plan.Calls {
 			t.Logf("  plan[%d] %-16s %s", i, c.Action, c.Payload)
 			if _, err := d.CallContract(ctx, 1, c.ContractID, c.Action, c.Payload); err != nil {
@@ -487,8 +497,17 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 	} {
 		before := bal(cl.acct)
 		for ep := 0; ep < 3; ep++ {
-			if _, err := d.CallContract(ctx, cl.node, c5ID, "claim",
-				fmt.Sprintf(`{"channel":"lp","epoch":"%d"}`, ep)); err != nil {
+			// Each epoch has its own book, so each claim needs its own proof. The
+			// reporter recomputes the epoch from the indexer's LP history — the
+			// same path it used to build the root that was committed.
+			var pf struct {
+				ClaimPayload string `json:"claim_payload"`
+			}
+			pfOut := runReporter("proof", "-epoch", strconv.Itoa(ep), "-account", cl.acct, "-json")
+			if err := json.Unmarshal(pfOut, &pf); err != nil {
+				t.Fatalf("%s proof for epoch %d is not json: %v\n%s", cl.acct, ep, err, pfOut)
+			}
+			if _, err := d.CallContract(ctx, cl.node, c5ID, "claim", pf.ClaimPayload); err != nil {
 				t.Fatalf("%s claim epoch %d failed to broadcast: %v", cl.acct, ep, err)
 			}
 			if !waitStateKeyPresent(t, d, ctx, 1, c5ID,

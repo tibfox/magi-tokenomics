@@ -52,9 +52,9 @@ const (
 	scaleUsers      = 500
 	scalePosts      = 200
 	scaleVotesPost  = 50
-	scaleEpochLen   = 20     // blocks; 60s, so the run is minutes not a week
-	scaleEmission   = 10080  // one epoch funds a week at 1,440/day
-	scaleBlocksYear = 1000   // with baseAnnual below: 504000*20/1000 = 10080
+	scaleEpochLen   = 20    // blocks; 60s, so the run is minutes not a week
+	scaleEmission   = 10080 // one epoch funds a week at 1,440/day
+	scaleBlocksYear = 1000  // with baseAnnual below: 504000*20/1000 = 10080
 	scaleBaseAnnual = 504000
 )
 
@@ -282,8 +282,8 @@ func TestDevnetMagiScale(t *testing.T) {
 	}
 
 	w := func(n int) string { return d.cfg.WitnessPrefix + strconv.Itoa(n) }
-	owner := w(1)    // deployer, reporter, and an author
-	curator := w(2)  // curates every post
+	owner := w(1)   // deployer, reporter, and an author
+	curator := w(2) // curates every post
 	treasury := w(4)
 	guardian := w(5)
 
@@ -772,8 +772,8 @@ func TestScalePreflight(t *testing.T) {
 	workDir := t.TempDir()
 	cfgPath := filepath.Join(workDir, "reporter.json")
 	blob, _ := json.MarshalIndent(map[string]any{
-		"hive":      map[string]any{"api": []string{hive.URL}},
-		"vsc":       map[string]any{"api": vsc.URL, "net_id": "vsc-devnet"},
+		"hive": map[string]any{"api": []string{hive.URL}},
+		"vsc":  map[string]any{"api": vsc.URL, "net_id": "vsc-devnet"},
 		"contracts": map[string]any{"distributor": "vsc1BdaRpLsgEk49mxemZ19QLxN6WTrzLPuVQv",
 			"channel": "content", "funder": "", "stake": ""},
 		"epoch": map[string]any{"genesis": genesis, "len": epochLen},

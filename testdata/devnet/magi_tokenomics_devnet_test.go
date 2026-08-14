@@ -253,15 +253,23 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	t.Logf("C3 epoch-0 funded = %s", funded)
 
 	// reporter (owner acct) pushes shares to the attacker + a third party, then finalizes
-	mustCall(1, c3ID, "submitShares", fmt.Sprintf(
-		`{"channel":"author","epoch":"0","page":"0","entries":"hive:%s:75,hive:%s3:25"}`, attacker, d.cfg.WitnessPrefix), "c3.submitShares")
+	book := buildBook(t, map[string]string{
+		"hive:" + attacker:                  "75",
+		"hive:" + d.cfg.WitnessPrefix + "3": "25",
+	})
+	mustCall(1, c3ID, "submitShares", book.SubmitPayload("author", "0"), "c3.submitShares")
+	// The commitment. totalShares now lands with the ROOT, not with the pages —
+	// applyEntries writes no per-account state and accumulates nothing, so waiting
+	// for it before submitRoot would wait forever.
+	mustCall(1, c3ID, "submitRoot", book.RootPayload("author", "0"), "c3.submitRoot")
 	shares := waitKey(c3ID, "totalShares|author|0", "c3 shares recorded")
 	t.Logf("C3 epoch-0 totalShares = %s", shares)
 	mustCall(1, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "c3.finalizeEpoch")
 	waitKeyValue(c3ID, "status|author|0", "finalized", "c3 epoch-0 finalize")
 
 	// the attacker legitimately claims the share the reporter assigned them
-	mustCall(2, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "c3.claim (legit share)")
+	mustCall(2, c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker),
+		"c3.claim (legit share)")
 
 	// ---------------- PHASE 3: outsider attacks ----------------
 	// Each must FAIL on-chain. We broadcast and then assert state is unchanged;
@@ -277,7 +285,10 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		{c3ID, "finalizeEpoch", `{"channel":"author","epoch":"1"}`, "attacker finalizes"},
 		{c3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "attacker vetoes"},
 		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "attacker sweeps"},
-		{c3ID, "claim", `{"channel":"author","epoch":"0"}`, "attacker double-claims"},
+		// carries their REAL proof, so the double-claim guard is what refuses it
+		// rather than the missing-proof check — otherwise the guard under test
+		// never runs.
+		{c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker), "attacker double-claims"},
 		{c3ID, "pullFunding", `{"channel":"author","epoch":"00"}`, "attacker non-canonical epoch"},
 		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker queues token takeover"},
 		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker executes token takeover"},

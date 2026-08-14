@@ -429,6 +429,28 @@ func TestDevnetMagiReporter(t *testing.T) {
 	if pages < 2 {
 		t.Fatalf("wanted a multi-page report to exercise paging, got %d pages", pages)
 	}
+	// The commitment has to be IN the plan, after the pages and before finalize.
+	// Without it finalizeEpoch refuses the epoch and no claim can verify against
+	// anything — a plan missing it fails only at the very last call.
+	rootAt, finalizeAt, lastPageAt := -1, -1, -1
+	for i, c := range plan.Calls {
+		switch c.Action {
+		case "submitShares":
+			lastPageAt = i
+		case "submitRoot":
+			rootAt = i
+		case "finalizeEpoch":
+			finalizeAt = i
+		}
+	}
+	if rootAt < 0 {
+		t.Fatalf("the plan publishes %d pages of shares and never commits a root: %s", pages, planJSON)
+	}
+	if rootAt < lastPageAt || (finalizeAt >= 0 && rootAt > finalizeAt) {
+		t.Fatalf("submitRoot is at %d, pages end at %d, finalize at %d — the root must "+
+			"commit to leaves already published, and finalize refuses an epoch without it",
+			rootAt, lastPageAt, finalizeAt)
+	}
 	t.Logf("reporter planned epoch %s: %d calls (%d share pages)", plan.Epoch, len(plan.Calls), pages)
 
 	// Snapshot the report BEFORE broadcasting. Re-running it afterwards must give a
@@ -532,7 +554,16 @@ func TestDevnetMagiReporter(t *testing.T) {
 		// either way.
 		before := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
 
-		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", `{"channel":"author","epoch":"0"}`); err != nil {
+		// The proof comes from the reporter recomputing the epoch from Hive — the
+		// same path a real claimant uses when they do not want to trust an indexer.
+		var pf struct {
+			ClaimPayload string `json:"claim_payload"`
+		}
+		pfOut := runReporter("proof", "-epoch", plan.Epoch, "-account", "hive:"+cl.acct, "-json")
+		if err := json.Unmarshal(pfOut, &pf); err != nil {
+			t.Fatalf("reporter proof for %s is not json: %v\n%s", cl.acct, err, pfOut)
+		}
+		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", pf.ClaimPayload); err != nil {
 			t.Fatalf("claim for %s failed to broadcast: %v", cl.acct, err)
 		}
 		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|author|0|hive:"+cl.acct, 3*time.Minute) {
