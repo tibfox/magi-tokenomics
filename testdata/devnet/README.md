@@ -295,3 +295,36 @@ way; ignoring them wastes 10–25 minutes per run.
   do not exist yet. `pullFunding` refuses until it has run.
 - **`addChannel` per reward stream**, after `C2.init` — registering a channel verifies
   its bucket against the funder, so it cannot happen earlier.
+
+## The drift guards, and why they exist
+
+A devnet run costs 11–40 minutes and stands up a five-node chain, a Hive replica and
+an indexer before it can tell you that a test read the wrong state key. Every guard in
+`itest/devnet_drift_test.go` exists because a specific run was spent discovering
+something a few milliseconds of parsing could have found. They run with the ordinary
+`go test ./itest/`, need no docker, and each one names the run it came from.
+
+| Guard | The run it cost |
+|---|---|
+| `EveryReferencedActionExists` | an action renamed in the contract |
+| `ActionsExistOnTheContractTheyAreSentTo` | `claim` sent to C1, which does not export it |
+| `EveryReferencedStateKeyExists` | a renamed key read as `""` forever — extended after `magi_rogue_reporter` waited on `unallocated` while the contract writes `unalloc\|<ch>` |
+| `EveryLookupMatchesAKeyThatWasRead` | an assertion comparing `""` to `""` |
+| `OwnerOnlyActionsAreCalledFromTheOwnerNode` | an owner-only call sent from the wrong node |
+| `ChannelScopedCallsAndKeysCarryAChannel` | channel-less claims and keys after the merge |
+| `ReporterConfigKeysExist` / `ReporterBinaryIsNewerThanItsSources` | a stale binary reporting yesterday's behaviour |
+| `ArtifactsAreNewerThanSources` | a run against a `.wasm` older than its `main.go` |
+| `LedgerDomainsMatchTheContract` | `system:` counted on chain, dropped from the root |
+| `EveryReporterSubcommandTheSuitesUseAcceptsConfig` | `reporter root` rejecting `-config`, 17 minutes in |
+| `EveryClaimCarriesAShareAndProof` | six suites still claiming with the pre-merkle payload |
+| `ClaimedKeyIsNeverReadAsAShare` | two suites computing a payout from a presence flag |
+| `TotalSharesIsOnlyReadWhereARootIsSubmitted` | `magi_cosigned` asserting against a key nothing would write |
+
+**Mutate a guard before trusting it.** Four times now a guard here has passed against
+a file that contained the exact defect it claimed to catch — a fixed-width scan that
+read the next table row, a resolver blind to method calls, a cycle guard that memoised
+the visit instead of the answer, and a field check satisfied by a struct tag. A guard
+is only evidence once you have reverted the fix and watched it fail. The same applies
+to the suites themselves: `magi_cosigned`'s central assertion — that one authority of a
+2-of-2 pair applies nothing — held whether the threshold worked or was bypassed
+entirely, because it read a key that would never be written either way.
