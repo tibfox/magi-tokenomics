@@ -273,6 +273,33 @@ the earlier ones no time to thaw.
 | deployer (one-off) | ~18,000 RC | the whole sequence at once; ~10 HBD is ample |
 | migration (per 25-holder batch) | ~9,600 RC | the run, not the batch — back-to-back batches do not thaw in between |
 
+### The minimum deployment is 1.3% under the free tier
+
+A deployer holding **no HBD at all** has exactly 10,000 RC. The smallest useful
+deployment — token, emission, distributor, one channel — measures:
+
+| call | RC | running |
+|---|---|---|
+| `token.init` | 780 | 780 |
+| `C2.init` (emission) | 5,188 | 5,968 |
+| `C3.init` (distributor) | 2,608 | 8,576 |
+| `addChannel` | 1,290 | **9,866 / 10,000** |
+
+It fits, with 134 RC to spare. Two consequences worth stating plainly:
+
+- **It only just fits.** Every byte added to a contract raises its init cost, so
+  contract growth is what breaks this, silently and without touching any function
+  anyone measures. `TestRCBudget_TokenomicsSetupFitsTheFreeTier` fails the build
+  above 10,000 for exactly that reason.
+- **Running out of RC is not an error.** The transaction is not rejected; it is
+  simply never applied. There is no abort message and nothing in the logs — the
+  call just does not happen, and whatever waits on its state waits forever. A
+  devnet suite lost a full run to this: three inits landed, `addChannel` did not,
+  and it read as a contract bug.
+
+Deploy costs ~10 HBD of L1 balance per contract, so deposit for RC **after**
+deploying — depositing first starves the deploy fee.
+
 Three rules follow from the numbers:
 
 1. **Size for the burst, not the average.** Everything expensive here happens in
