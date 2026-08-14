@@ -622,7 +622,7 @@ func (a *app) buildPlan(epochFlag string) (*computed, submit.Plan, error) {
 	// The commitment the claims verify against. Built from the SAME share set the
 	// pages publish, so the leaves and the root cannot disagree.
 	tree := sharecore.BuildTree(c.Result.Shares)
-	pl := submit.BuildFullPlan(submit.PlanOpts{
+	opts := submit.PlanOpts{
 		Epoch:         eps,
 		Root:          tree.Root(),
 		TotalShares:   c.Result.Total.String(),
@@ -634,7 +634,14 @@ func (a *app) buildPlan(epochFlag string) (*computed, submit.Plan, error) {
 		Finalize:      a.cfg.Submit.Finalize,
 		Pages:         c.Pages,
 		RcLimit:       a.cfg.Submit.RcLimit,
-	})
+	}
+	// Refuse a plan that cannot succeed before spending a single RC on it. A run
+	// that publishes pages and then dies at finalize has already paid for the
+	// pages and pulled the funding.
+	if err := opts.Validate(); err != nil {
+		return nil, submit.Plan{}, err
+	}
+	pl := submit.BuildFullPlan(opts)
 	return c, pl, nil
 }
 

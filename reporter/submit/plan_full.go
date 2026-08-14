@@ -1,6 +1,10 @@
 package submit
 
-import "magi_token/reporter/sharecore"
+import (
+	"fmt"
+
+	"magi_token/reporter/sharecore"
+)
 
 // PlanOpts describes a complete epoch cycle, not just the share pages.
 //
@@ -51,6 +55,45 @@ type PlanOpts struct {
 	Root        string
 	TotalShares string
 	Accounts    int
+}
+
+// Validate refuses a plan that could not succeed on chain.
+//
+// The Root fields were documented as REQUIRED and enforced nowhere: an empty Root
+// silently dropped submitRoot from the plan, and the plan then went on to finalize
+// an epoch that no claim could ever verify against. On chain that is not a soft
+// failure — finalizeEpoch refuses an epoch with no root, so the run dies partway
+// with the pages already published and the funding pulled.
+//
+// Checked here rather than at the call site because the call site is exactly what
+// a future caller would forget.
+func (o PlanOpts) Validate() error {
+	if len(o.Pages) == 0 {
+		return nil // nothing to publish, nothing to commit
+	}
+	if o.Root == "" {
+		return fmt.Errorf("this epoch has %d pages of shares but no merkle root: "+
+			"publishing leaves with no commitment leaves every claim unverifiable, "+
+			"and finalizeEpoch would refuse the epoch outright", len(o.Pages))
+	}
+	if len(o.Root) != 64 {
+		return fmt.Errorf("merkle root %q is %d hex chars, want 64", o.Root, len(o.Root))
+	}
+	for i := 0; i < len(o.Root); i++ {
+		c := o.Root[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return fmt.Errorf("merkle root %q is not lowercase hex: the contract parses it "+
+				"byte by byte and aborts on anything else", o.Root)
+		}
+	}
+	if o.TotalShares == "" || o.TotalShares == "0" {
+		return fmt.Errorf("totalShares is %q: every payout divides by it, so a zero or "+
+			"missing denominator makes the epoch unclaimable", o.TotalShares)
+	}
+	if o.Accounts <= 0 {
+		return fmt.Errorf("accounts is %d but there are pages to publish", o.Accounts)
+	}
+	return nil
 }
 
 // BuildFullPlan returns the ordered calls for one epoch cycle.
