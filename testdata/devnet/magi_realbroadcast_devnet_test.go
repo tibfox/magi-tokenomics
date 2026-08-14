@@ -225,7 +225,11 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 	// self-signed transactions does.
 	for _, c := range []struct{ key, want, what string }{
 		{"funded|lp|0", strconv.Itoa(emission), "lp channel funded by the reporter's own poke+pull"},
-		{"totalShares|lp|0", "4000", "shares applied from the reporter's own submitShares"},
+		{"ssdone|lp|0|0", "1", "page applied from the reporter's own submitShares"},
+		// The commitment, broadcast by the reporter itself. totalShares is written
+		// by submitRoot — NOT by submitShares — so this pair proves the reporter
+		// signed and sent both halves, which is the whole point of -broadcast.
+		{"totalShares|lp|0", "4000", "root committed by the reporter's own submitRoot"},
 		{"status|lp|0", "finalized", "epoch finalized by the reporter's own tx"},
 	} {
 		deadline := time.Now().Add(4 * time.Minute)

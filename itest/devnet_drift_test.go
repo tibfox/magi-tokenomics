@@ -1264,3 +1264,36 @@ func exportedActions(t *testing.T) map[string]bool {
 	}
 	return out
 }
+
+// A suite that reads totalShares| must be able to reach it.
+//
+// submitShares stopped writing totalShares when applyEntries stopped accumulating:
+// it now lands only with submitRoot. A suite that publishes pages and reads
+// totalShares therefore waits on a key nothing will write. That is not a visible
+// failure — the 1-of-2 assertion in magi_cosigned ("nothing was applied") would
+// have held vacuously forever, and only its success case timed out.
+//
+// The key is reachable two ways: the suite submits a root itself, or it drives the
+// reporter, whose plan emits submitRoot after the pages.
+func TestDevnetDrift_TotalSharesIsOnlyReadWhereARootIsSubmitted(t *testing.T) {
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		if !strings.Contains(src, "totalShares|") {
+			continue
+		}
+		checked++
+		submitsRoot := strings.Contains(src, `"submitRoot"`) || strings.Contains(src, "RootPayload(")
+		drivesReporter := regexp.MustCompile(`runReporter\w*\(\s*"(run|plan)"|run\(\s*"run"`).MatchString(src)
+		if !submitsRoot && !drivesReporter {
+			t.Errorf("%s reads totalShares| but never submits a root, directly or via the "+
+				"reporter's plan: submitShares does not write that key any more, so the read "+
+				"returns \"\" forever — an 'applied nothing' assertion passes vacuously and an "+
+				"'applied' assertion times out", name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no suite reads totalShares| — this guard is now blind")
+	}
+	t.Logf("checked %d suites that read totalShares|", checked)
+}

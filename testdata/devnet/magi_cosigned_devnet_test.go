@@ -180,16 +180,25 @@ func TestDevnetMagiCosigned(t *testing.T) {
 
 	const shares = `{"channel":"author","epoch":"0","page":"0","entries":"hive:coa:60,hive:cob:40"}`
 
+	// "Did the page apply?" is ssdone|<ch>|<ep>|<page>, not totalShares.
+	// applyEntries writes no per-account state and accumulates nothing now, so
+	// totalShares only appears when a ROOT is submitted — which this suite never
+	// does, because it is testing the AUTHORISATION of submitShares and nothing
+	// else. Reading totalShares here would report "nothing applied" in both the
+	// 1-of-2 and the 2-of-2 case, so the bypass assertion would hold vacuously
+	// and the success assertion would time out.
+	const appliedKey = "ssdone|author|0|0"
+
 	// ONE authority must NOT reach a 2-of-2 threshold, even though that account IS a
 	// configured reporter. This is the assertion that separates Cosigned from Single.
 	if _, e := coCall(c3ID, "submitShares", shares, []string{rep1}); e != nil {
 		t.Logf("single-auth submitShares rejected at broadcast: %v", e)
 	}
 	time.Sleep(12 * time.Second)
-	if v := stateOf(c3ID, "totalShares|author|0"); v != "" && v != "0" {
-		t.Fatalf("COSIGNED BYPASSED: one authority applied shares to a 2-of-2 contract (totalShares=%s)", v)
+	if v := stateOf(c3ID, appliedKey); v != "" && v != "0" {
+		t.Fatalf("COSIGNED BYPASSED: one authority applied a page to a 2-of-2 contract (%s=%s)", appliedKey, v)
 	}
-	t.Logf("one-of-two correctly applied nothing (totalShares=%q)", stateOf(c3ID, "totalShares|author|0"))
+	t.Logf("one-of-two correctly applied nothing (%s=%q)", appliedKey, stateOf(c3ID, appliedKey))
 
 	// BOTH authorities in one transaction must apply it.
 	txid, e := coCall(c3ID, "submitShares", shares, []string{rep1, rep2})
@@ -200,14 +209,14 @@ func TestDevnetMagiCosigned(t *testing.T) {
 
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
-		if v := stateOf(c3ID, "totalShares|author|0"); v == "100" {
-			t.Logf("COSIGNED OK: two authorities in ONE transaction applied the page (totalShares=100)")
+		if v := stateOf(c3ID, appliedKey); v == "1" {
+			t.Logf("COSIGNED OK: two authorities in ONE transaction applied the page (%s=1)", appliedKey)
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("cosigned submitShares never applied — totalShares is %q. The tx was accepted "+
+			t.Fatalf("cosigned submitShares never applied — %s is %q. The tx was accepted "+
 				"(%s), so the contract did not count the second required auth toward the threshold",
-				stateOf(c3ID, "totalShares|author|0"), txid)
+				appliedKey, stateOf(c3ID, appliedKey), txid)
 		}
 		time.Sleep(6 * time.Second)
 	}
