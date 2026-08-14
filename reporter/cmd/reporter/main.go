@@ -90,6 +90,12 @@ func run(args []string) error {
 		entries := fsRoot.String("entries", "", `"hive:a:100,hive:b:50"`)
 		acct := fsRoot.String("account", "", "also emit this account's proof")
 		asJSONRoot := fsRoot.Bool("json", false, "machine-readable output")
+		// Accepted and unused. This subcommand is pure arithmetic over the list
+		// given, so a config has nothing to contribute — but every other
+		// subcommand takes one, and scripts and test harnesses pass it
+		// uniformly. Rejecting it here made a caller fail on a flag that could
+		// not have changed the answer.
+		fsRoot.String("config", "", "accepted for uniformity; unused — the entries are supplied directly")
 		if err := fsRoot.Parse(rest); err != nil {
 			return err
 		}

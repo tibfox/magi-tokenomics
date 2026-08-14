@@ -3,6 +3,7 @@ package itest_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1045,6 +1046,42 @@ func TestDevnetDrift_LedgerDomainsMatchTheContract(t *testing.T) {
 		if !onChain[d] {
 			t.Errorf("sharecore counts %q but the contract skips it: the root would carry a leaf "+
 				"the chain never funded, inflating the denominator against everyone else", d)
+		}
+	}
+}
+
+// Every reporter subcommand a devnet suite invokes must accept -config.
+//
+// The devnet harness passes -config to the binary uniformly, so a subcommand that
+// does not define the flag dies on it — and it dies where the suite calls it, which
+// for `root` was 17 minutes into a run, after the whole chain had been stood up,
+// funded and reported. The flag need not DO anything (`root` is pure arithmetic
+// over the list it is given); it only has to be accepted.
+func TestDevnetDrift_EveryReporterSubcommandTheSuitesUseAcceptsConfig(t *testing.T) {
+	bin := filepath.Join("..", "reporter", "bin", "reporter")
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("reporter binary not built: %v", err)
+	}
+	subs := map[string]bool{}
+	for name, raw := range devnetSources(t) {
+		_ = name
+		for _, m := range regexp.MustCompile(`runReporter\w*\(\s*"(\w+)"`).
+			FindAllStringSubmatch(stripLineComments(raw), -1) {
+			subs[m[1]] = true
+		}
+	}
+	if len(subs) == 0 {
+		t.Fatal("found no reporter subcommands in the devnet suites — this guard is now blind")
+	}
+	for sub := range subs {
+		out, _ := exec.Command(bin, sub, "-config", "/dev/null").CombinedOutput()
+		// Any other failure is fine and expected here — missing -entries, no
+		// network, an empty config. The ONLY thing under test is that the flag
+		// itself is not rejected.
+		if strings.Contains(string(out), "flag provided but not defined: -config") {
+			t.Errorf("`reporter %s` rejects -config, which the devnet harness always passes: "+
+				"every suite calling it dies at that call, after standing up the chain\n  %s",
+				sub, trunc(string(out), 200))
 		}
 	}
 }
