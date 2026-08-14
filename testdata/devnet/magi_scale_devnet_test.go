@@ -651,17 +651,15 @@ func TestDevnetMagiScale(t *testing.T) {
 
 	// ---------------- PHASE 6: claim, split 50/50 liquid and staked ----------------
 	time.Sleep(20 * time.Second) // challenge window
-	for _, acct := range []string{owner, curator} {
-		share := stateOf(c3ID, "claimed|content|0|hive:"+acct)
-		if share == "" || share == "0" {
-			t.Fatalf("%s earned nothing — the witness accounts must be in earning "+
-				"positions or the claim path cannot be tested", acct)
-		}
-		t.Logf("%s share=%s", acct, share)
-	}
 	// A claimant now proves their share. `reporter proof` recomputes the epoch from
 	// Hive and returns the share plus the sibling path — the same route a wallet
 	// takes, and the reason a claimant needs no indexer when one is unavailable.
+	//
+	// It is also the only way left to ask "what did this account earn?": the chain
+	// holds a root, not a share book. An earlier version of this check read
+	// `claimed|...` instead, which is written only AFTER a claim — so it reported
+	// "earned nothing" for everyone before anybody had claimed, and failed the run at
+	// the last step.
 	proofFor := func(acct string) string {
 		var pf struct {
 			ClaimPayload string `json:"claim_payload"`
@@ -674,6 +672,9 @@ func TestDevnetMagiScale(t *testing.T) {
 			t.Fatalf("reporter produced no claim payload for %s: %s", acct, out)
 		}
 		return pf.ClaimPayload
+	}
+	for _, acct := range []string{owner, curator} {
+		t.Logf("%s will claim with: %s", acct, truncPayload(proofFor(acct)))
 	}
 	callN(1, c3ID, "claim", proofFor(owner), "owner claims")
 	callN(2, c3ID, "claim", proofFor(curator), "curator claims")
@@ -872,4 +873,13 @@ func TestScalePreflight(t *testing.T) {
 			shares, len(plan.Calls), plan.Calls[len(plan.Calls)-1].Action)
 	}
 	t.Logf("PLAN: %d calls (%d share pages) for epoch %s", len(plan.Calls), shares, plan.Epoch)
+}
+
+// truncPayload keeps a proof payload readable in the log — a 9-sibling path is
+// ~600 characters of hex and swamps everything around it.
+func truncPayload(s string) string {
+	if len(s) <= 120 {
+		return s
+	}
+	return s[:117] + "..."
 }
