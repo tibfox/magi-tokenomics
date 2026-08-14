@@ -258,7 +258,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// funding must roll forward, not vanish and not be payable
 	waitValue(c3ID, "funded|content|0", "0", "C3 funded after cancel")
-	waitValue(c3ID, "unallocated", "5000", "C3 unallocated (rolled forward)")
+	waitValue(c3ID, "unalloc|content", "5000", "C3 unallocated (rolled forward)")
 
 	// and the rogue must get nothing, now or after the window
 	time.Sleep(time.Duration(window+5) * 3 * time.Second)
@@ -274,7 +274,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// the rolled-forward funding is recoverable by the guardian to the PINNED treasury
 	callN(5, c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "guardian sweeps the rolled-forward pool")
-	waitValue(c3ID, "unallocated", "0", "C3 unallocated after sweep")
+	waitValue(c3ID, "unalloc|content", "0", "C3 unallocated after sweep")
 	if got := bal(treasury); got.String() != "5000" {
 		t.Fatalf("treasury should hold the recovered 5000, has %s", got)
 	}
@@ -339,7 +339,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		"token.owner":    stateOf(tokenID, "owner"),
 		"c5.totalShares": stateOf(c3ID, "totalShares|lp|0"),
 		"c5.funded":      stateOf(c3ID, "funded|lp|0"),
-		"c3.unallocated": stateOf(c3ID, "unallocated"),
+		"c3.unallocated": stateOf(c3ID, "unalloc|content"),
 	}
 	for k, v := range before {
 		if v == "" {
@@ -373,7 +373,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		case "c5.funded":
 			got = stateOf(c3ID, "funded|lp|0")
 		case "c3.unallocated":
-			got = stateOf(c3ID, "unallocated")
+			got = stateOf(c3ID, "unalloc|content")
 		}
 		if got != want {
 			t.Fatalf("REPORTER CHANGED STATE %s: %q -> %q", k, want, got)

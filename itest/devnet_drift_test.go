@@ -40,6 +40,11 @@ var (
 	// exists in *some* contract let `claimed|` (written by the distributor) satisfy a
 	// read against C1, which writes `y_claimed|`. That cost a 20-minute devnet run.
 	reKeyedRead = regexp.MustCompile(`\b(c[1-7]ID|distID)\b[^\n]{0,120}?"([a-z][A-Za-z0-9_]*)\|`)
+	// Unscoped keys — no separator at all. These were invisible to reKeyedRead,
+	// which required a trailing "|", so a suite could read a key that simply does
+	// not exist and see "" forever. That is how magi_rogue_reporter waited on
+	// "unallocated" while the contract writes "unalloc|<channel>".
+	reFlatRead = regexp.MustCompile(`\b(c[1-7]ID|distID)\b\s*,\s*"([a-z][a-z0-9_]{3,})"`)
 )
 
 func devnetSources(t *testing.T) map[string]string {
@@ -143,6 +148,22 @@ func TestDevnetDrift_EveryReferencedStateKeyExists(t *testing.T) {
 				continue // an id this guard cannot attribute; not worth a false alarm
 			}
 			if strings.Contains(src, `"`+k+`|`) {
+				continue
+			}
+			missing[name] = append(missing[name], idVar+" -> "+k)
+		}
+		// unscoped reads: the token after a contract id that is not an action
+		for _, m := range reFlatRead.FindAllStringSubmatch(src, -1) {
+			idVar, k := m[1], m[2]
+			if ignore[k] || exportedActions(t)[k] {
+				continue // it is an action being called, not a key being read
+			}
+			csrc, ok := perContract[contractOfVar(idVar)]
+			if !ok {
+				continue
+			}
+			// accept it as a key if the contract builds it either flat or scoped
+			if strings.Contains(csrc, `"`+k+`"`) || strings.Contains(csrc, `"`+k+`|`) {
 				continue
 			}
 			missing[name] = append(missing[name], idVar+" -> "+k)
@@ -1228,4 +1249,18 @@ func TestDevnetDrift_ClaimedKeyIsNeverReadAsAShare(t *testing.T) {
 		t.Fatal("found no claimed| lookups in the devnet suites — this guard is now blind")
 	}
 	t.Logf("checked %d claimed| lookups", checked)
+}
+
+// exportedActions returns every //go:wasmexport name across the contracts, so the
+// unscoped-key scan can tell "this is an action being called" from "this is a state
+// key being read" — both appear as the first string after a contract id.
+func exportedActions(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, src := range contractSourcesByName(t) {
+		for _, m := range regexp.MustCompile(`//go:wasmexport (\w+)`).FindAllStringSubmatch(src, -1) {
+			out[m[1]] = true
+		}
+	}
+	return out
 }
