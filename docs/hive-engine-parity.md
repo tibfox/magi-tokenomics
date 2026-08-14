@@ -228,6 +228,17 @@ latches, so emission stops by running out rather than by decaying toward zero.
   implemented, and NFTs are not supported by the DEX yet, so a deployment must be
   impossible rather than broken later.
 
+## How the share book is stored — a difference worth knowing
+
+SCOT keeps every account's share in its own state. This framework commits a **merkle
+root** on chain and logs the leaves for the indexer, because per-account state writes
+were ~92% of an epoch's cost (a full page: 15,309 RC → 1,871).
+
+The consequence for anyone integrating: the chain cannot answer "what did this account
+earn?" — the indexer does, and the root proves its answer. A claimant passes their
+share and a proof, obtainable from `reporter proof -account X`, which recomputes the
+epoch from public Hive data and therefore needs no indexer at all.
+
 ## Settings we have that SCOT does not
 
 - **Attest (M-of-N) reporting** — several machines independently compute the same epoch
@@ -237,3 +248,7 @@ latches, so emission stops by running out rather than by decaying toward zero.
   it pays, and the funding recovered to a treasury pinned at init.
 - **Trustless staking yield** — reads the stake history directly and pays pro-rata, so
   there is no report to falsify and nothing to challenge.
+- **A dust threshold** (`shares.min_share_bps`) — drops earners below a share of the
+  epoch. This is our design, not SCOT parity; it is the one lever that scales an
+  epoch's cost down, since every earner costs the same to publish whatever they are
+  owed.

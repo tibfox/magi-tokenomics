@@ -421,6 +421,18 @@ contracts:
       # per-account share book is (submitted − whatever the skip table names for the
       # same channel/epoch/page). One log per page rather than per entry keeps a
       # 60-entry page at ~7,300 RC instead of ~14,100.
+      # ★ THIS TABLE IS NOW THE SHARE BOOK ITSELF, not a record of one.
+      #
+      # The distributor holds a 32-byte merkle root and NO per-account state, so
+      # `submitted` is the only place an account's share exists. A wallet answers
+      # "what did I earn?" from these rows, rebuilds the tree, and checks it against
+      # the root in magi_tokenomics_root_events below. If this table is wrong or
+      # incomplete, the root is what exposes it — but nothing else can answer the
+      # question at all.
+      #
+      # `new_total` is gone: nothing on chain accumulates the pages any more, so a
+      # running total would be a number the contract could not stand behind. The
+      # denominator comes from the root event.
       - log_type: "shares"
         table: "magi_tokenomics_shares_events"
         schema:
@@ -429,7 +441,6 @@ contracts:
           page: numeric
           entries: numeric
           page_total: numeric
-          new_total: numeric
           submitted: string
         parse: "json"
         fields:
@@ -438,8 +449,30 @@ contracts:
           page: "$.attributes.page"
           entries: "$.attributes.entries"
           page_total: "$.attributes.page_total"
-          new_total: "$.attributes.new_total"
           submitted: "$.attributes.submitted"
+
+      # THE COMMITMENT. One row per (channel, epoch): the root every claim verifies
+      # against, and the denominator every payout divides by.
+      #
+      # Pair it with the shares rows above to serve proofs: rebuild the tree from the
+      # leaves, confirm its root matches this, then hand a claimant their path. A
+      # mismatch means the indexer's copy is wrong and must not be served — that is
+      # the entire point of committing a root rather than trusting a database.
+      - log_type: "root"
+        table: "magi_tokenomics_root_events"
+        schema:
+          channel: string
+          epoch: numeric
+          root: string
+          total_shares: numeric
+          accounts: numeric
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          epoch: "$.attributes.epoch"
+          root: "$.attributes.root"
+          total_shares: "$.attributes.total_shares"
+          accounts: "$.attributes.accounts"
 
       # THE TABLE TO ALERT ON. A skipped entry is a no-op inside a transaction that
       # SUCCEEDED: the page applied, totalShares looks right, and that earner is

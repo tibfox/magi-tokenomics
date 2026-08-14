@@ -647,8 +647,24 @@ func TestDevnetMagiScale(t *testing.T) {
 		}
 		t.Logf("%s share=%s", acct, share)
 	}
-	callN(1, c3ID, "claim", `{"channel":"content","epoch":"0"}`, "owner claims")
-	callN(2, c3ID, "claim", `{"channel":"content","epoch":"0"}`, "curator claims")
+	// A claimant now proves their share. `reporter proof` recomputes the epoch from
+	// Hive and returns the share plus the sibling path — the same route a wallet
+	// takes, and the reason a claimant needs no indexer when one is unavailable.
+	proofFor := func(acct string) string {
+		var pf struct {
+			ClaimPayload string `json:"claim_payload"`
+		}
+		out := runReporter("proof", "-epoch", "0", "-account", "hive:"+acct, "-json")
+		if err := json.Unmarshal(out, &pf); err != nil {
+			t.Fatalf("reporter proof for %s: %v\n%s", acct, err, out)
+		}
+		if pf.ClaimPayload == "" {
+			t.Fatalf("reporter produced no claim payload for %s: %s", acct, out)
+		}
+		return pf.ClaimPayload
+	}
+	callN(1, c3ID, "claim", proofFor(owner), "owner claims")
+	callN(2, c3ID, "claim", proofFor(curator), "curator claims")
 
 	for _, acct := range []string{owner, curator} {
 		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|content|0|hive:"+acct, 4*time.Minute) {
@@ -827,9 +843,21 @@ func TestScalePreflight(t *testing.T) {
 	}
 	// The epoch has to be CLOSED by the plan, or the devnet run waits forever on a
 	// status key that nothing writes.
-	if len(plan.Calls) != shares+1 || plan.Calls[len(plan.Calls)-1].Action != "finalizeEpoch" {
-		t.Fatalf("the plan must end in finalizeEpoch, got %d calls ending in %q",
-			len(plan.Calls), plan.Calls[len(plan.Calls)-1].Action)
+	// pages, then the COMMITMENT, then finalize. The root is what every claim
+	// verifies against, and finalize refuses an epoch without one — so a plan that
+	// omitted it would produce an epoch nobody could ever claim from.
+	roots := 0
+	for _, c := range plan.Calls {
+		if c.Action == "submitRoot" {
+			roots++
+		}
+	}
+	if roots != 1 {
+		t.Fatalf("the plan must commit exactly one root, got %d", roots)
+	}
+	if len(plan.Calls) != shares+2 || plan.Calls[len(plan.Calls)-1].Action != "finalizeEpoch" {
+		t.Fatalf("the plan must be %d pages + submitRoot + finalizeEpoch, got %d calls ending in %q",
+			shares, len(plan.Calls), plan.Calls[len(plan.Calls)-1].Action)
 	}
 	t.Logf("PLAN: %d calls (%d share pages) for epoch %s", len(plan.Calls), shares, plan.Epoch)
 }

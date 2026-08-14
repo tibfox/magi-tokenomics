@@ -66,8 +66,9 @@ then check the per-day total against capacity ÷ 5.
 | distributor | `addChannel` | 832–1,097 | 661–911 |
 | distributor | `pullFunding` (cross-contract) | 1,103–1,225 | 821–923 |
 | distributor | `finalizeEpoch` | 554–630 | 343–347 |
-| distributor | `claim` (liquid) | 678–764 | 532–609 |
-| distributor | `claim` (part staked) | 2,967 | — |
+| distributor | `claim` (liquid, with proof) | 959 | 678–764 |
+| distributor | `claim` (part staked) | ~3,100 | 2,967 |
+| distributor | `submitRoot` | ~600 | — |
 
 Read-only queries (`stakeOf`, `scheduleInfo`, `owedOf`, `fundedOf`, `minStakeSum`) land
 at the **100 RC floor**; `stakeAtHeight` 101 and `shareOf` 126.
@@ -138,44 +139,37 @@ Roughly **~133 RC per entry over a ~425 fixed base**, up from ~91 over ~465. The
 default page size of 60 entries costs ~8,400 RC; the 4096-byte payload cap usually
 binds before RC does.
 
-> ### ★ THE TABLE ABOVE IS A FLOOR, AND A REAL EPOCH COSTS MORE
+> ### ★ THE SHARE BOOK IS A MERKLE ROOT NOW, AND THAT CHANGES THESE NUMBERS
 >
-> Those entries pair a maximum-length account name with a SMALL share value. In a
-> real epoch the share is the accumulated weight of every vote an account cast, which
-> runs to eighteen digits — and cost scales with entry BYTES. Measured against the
-> shape a live pool actually emits (`hive:u123:521226084116000`):
+> The table above is what a page cost when the contract wrote one state entry per
+> account. It no longer does: the distributor stores a 32-byte commitment and the
+> leaves are LOGGED for the indexer. Measured against the shape a live pool emits
+> (`hive:u123:521226084116000`):
 >
-> | entries | payload | RC | vs the table above |
+> | entries | payload | RC before | RC now |
 > |---:|---:|---:|---:|
-> | 10 | 259 B | 4,292 | +126% |
-> | 30 | 779 B | 9,070 | +97% |
-> | 60 | 1,559 B | **15,309** | **+83%** |
+> | 10 | 259 B | 4,292 | **566** |
+> | 30 | 779 B | 9,070 | **1,088** |
+> | 60 | 1,559 B | 15,309 | **1,871** |
 >
-> **~215 RC per entry over a ~1,900 base.** Reproduce with
-> `TestRC_RealisticSharePageCost`.
+> **8.2× cheaper at a full page**, because state writes were ~92% of the bill
+> (~311 RC per account against ~1 RC per byte of log). Reproduce with
+> `TestRC_RealisticSharePageCost` and `TestSplitProbe`-style measurement.
 >
-> This is not academic. It is what a 500-earner epoch costs and therefore what a
-> reporter must hold:
+> What an epoch costs now:
 >
->     502 earners x ~215 RC   ~= 108,000    (the floor: pagination barely moves it)
->     + per-page base x 9     ~=  17,000
+>     9 pages x 1,871         ~=  16,800
+>     + submitRoot            ~=     600     one call, whatever the earner count
 >     + poke and pull         ~=   2,500
 >                                --------
->                                ~127,500 RC  ~= 125 HBD on the reporter's ledger
+>                                ~20,000 RC  ~= 20 HBD on the reporter's ledger
 >
-> A devnet witness tops out near 100 HBD, which is why an epoch this size cannot be
-> proven on one devnet account and has to pool balances from idle ones. On mainnet it
-> is simply a deposit. **Size the reporter from the number of EARNERS, not the number
-> of posts** — a busy tribe with few voters is cheap and a quiet one with many is not.
-
-> **These figures moved for two reasons, and the second is easy to miss.** Event
-> emission is one. The other is that the fixture now uses account names of the maximum
-> length a Hive account can have (`hive:` + 16 characters) instead of the shorter
-> synthetic ids it used before. **Per-entry cost scales with entry BYTES**, not just
-> entry count — the call writes a state key per account and logs the submitted list
-> verbatim — so the old numbers understated a realistic page by about 5% at 30 entries.
-> A page of `did:` recipients, whose ids are longer again, costs more still; measure
-> rather than extrapolate if you paginate those.
+> Against ~127,500 before. **The claimant pays ~130 RC more** for proof
+> verification — 959 against 830 — which is the cost moving from the operator to
+> the person collecting, and it still fits the 10,000 free tier with room.
+>
+> **Size from the number of EARNERS still**, but the slope is far shallower: a
+> page is now dominated by its log bytes rather than by per-account writes.
 
 The base is the number to keep honest — it is what the reporter's coherence check is
 sized from, and a stale one under-covers small pages rather than large ones. That check

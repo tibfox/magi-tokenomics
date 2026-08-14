@@ -323,6 +323,7 @@ split is the exception, because only the distributor ever holds the tokens.
 | `shares.author_reward_bps` | reporter | author's cut; the rest goes to curators |
 | `shares.author_curve` / `curation_curve` | reporter | exact rationals. Curation `1/2` favours early voters, `1/1` is order-neutral |
 | `shares.muted` | reporter | accounts that earn nothing |
+| `shares.min_share_bps` | reporter | drop earners below this share of the epoch — **the main cost lever** |
 | `shares.app_tax` | reporter | skim from posts published outside a designated app |
 | `stakedBps` + `stakeContract` | **C3 init** | how much of each claim arrives as stake |
 | `baseAnnual` / `blocksPerYear` / `epochLen` | **C2 init** | emission rate; flat, no decay schedule |
@@ -346,6 +347,37 @@ motivated to avoid it.
 **A staked claim costs 3.6× a liquid one** (2,967 RC against 828), because it adds an
 `approve` and a cross-contract `stakeFor`. The claimant pays that, and a claimant may
 hold no HBD at all — see [docs/rc-costs.md](docs/rc-costs.md).
+
+### The share book is a merkle commitment
+
+The distributor stores a **32-byte root** for each epoch, not one state entry per
+earner. Writing a share book cost ~311 RC per account against ~1 RC per byte of log,
+so at 500 earners the per-account writes were ~92% of the bill; a full page went from
+**15,309 RC to 1,871**, and an epoch from ~127,500 to ~20,000.
+
+What that costs you, and it is not nothing:
+
+- **`share|<ch>|<ep>|<acct>` no longer exists.** Nothing reads what an account earned
+  from chain state alone. `shareOf` returns the commitment, the denominator, the
+  funding and the status — deliberately not a per-account figure, because returning
+  zero would make a wallet display "you earned nothing" and be believed.
+- **A claimant supplies their share and a proof.** `reporter proof -account X`
+  recomputes the epoch from Hive and returns both, so a claim needs no indexer when
+  one is unavailable — and can check the indexer's copy when one is.
+- **The indexer holds the book.** The leaves are still logged, so it can serve
+  proofs; the root is what proves its answer was not invented. If its copy does not
+  rebuild to the committed root, it must not be served.
+
+The leaf is `sha256(0x00 || "acct|share")` and binds account and amount together, and
+the contract builds it from `msg.caller` rather than a payload field — so a stolen
+proof is worthless and an inflated one does not verify.
+
+**One property this removed, and it needed replacing.** `totalShares` used to be
+computed by the contract from the pages it stored, so Σclaims ≤ funded held by
+construction. It is now declared by the reporter, and an under-declared total makes
+every payout too large — across epochs, since the token balance is shared. There is an
+explicit per-epoch `paid` guard that refuses at the cause rather than letting a later
+claimant's transfer fail for reasons unrelated to them.
 
 ### What the reporter can and cannot do
 
