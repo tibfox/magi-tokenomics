@@ -391,6 +391,30 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		return out
 	}
 
+	// shareInBook asks the reporter what an account is owed for an epoch, and whether
+	// it is in the book at all. The chain cannot answer this any more: applyEntries
+	// writes no per-account state, so the share book lives in the logs and in the
+	// reporter's recomputation of them. `proof` exits non-zero for an account that
+	// earned nothing, which is the exact signal the forfeiture assertions need.
+	shareInBook := func(ep uint64, acct string) (string, bool) {
+		out, err := exec.CommandContext(ctx, reporterBin, "proof",
+			"-epoch", strconv.FormatUint(ep, 10), "-account", acct,
+			"-json", "-config", cfgPath).CombinedOutput()
+		if err != nil {
+			if strings.Contains(string(out), "earned nothing") {
+				return "", false
+			}
+			t.Fatalf("reporter proof for %s epoch %d failed: %v\n%s", acct, ep, err, out)
+		}
+		var pf struct {
+			Share string `json:"share"`
+		}
+		if e := json.Unmarshal(out, &pf); e != nil {
+			t.Fatalf("reporter proof for %s is not json: %v\n%s", acct, e, out)
+		}
+		return pf.Share, pf.Share != ""
+	}
+
 	// ---------------- three epochs, each with a different correct answer ----------
 	type expect struct {
 		total  string
@@ -463,15 +487,29 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		// rather than present-with-zero: a zero share would still dilute nothing but
 		// would mean the rule was applied at the wrong place.
 		for who, share := range want[ep].shares {
-			waitValue(c5ID, "claimed|lp|"+strconv.FormatUint(ep, 10)+"|"+who, share,
-				fmt.Sprintf("epoch %d share for %s", ep, who))
+			got, in := shareInBook(ep, who)
+			if !in {
+				t.Fatalf("epoch %d: %s is missing from the share book entirely, want share %s",
+					ep, who, share)
+			}
+			if got != share {
+				t.Fatalf("epoch %d share for %s = %s, want %s", ep, who, got, share)
+			}
 		}
+		// Forfeiting providers must be ABSENT from the book, not present with zero.
+		//
+		// This used to read claimed|lp|<ep>|<who> — a key written only AFTER a
+		// successful claim, and read here before anyone had claimed. It was empty
+		// for everyone, so the assertion held whether the forfeiture rule worked or
+		// was missing altogether. `proof` failing with "earned nothing" is a real
+		// absence signal, because it comes from the book the root commits to.
 		for _, who := range []string{exiter, flash} {
 			if _, ok := want[ep].shares[who]; ok {
 				continue
 			}
-			if v := stateOf(c5ID, "claimed|lp|"+strconv.FormatUint(ep, 10)+"|"+who); v != "" && v != "0" {
-				t.Fatalf("epoch %d: %s must earn nothing, got %q", ep, who, v)
+			if got, in := shareInBook(ep, who); in {
+				t.Fatalf("epoch %d: %s must earn nothing but holds share %q in the book",
+					ep, who, got)
 			}
 		}
 	}

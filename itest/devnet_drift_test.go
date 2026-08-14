@@ -1221,6 +1221,11 @@ func stripStructTags(body string) string {
 func TestDevnetDrift_ClaimedKeyIsNeverReadAsAShare(t *testing.T) {
 	// numeric parses of a variable that was assigned from a claimed| lookup
 	reParse := regexp.MustCompile(`(?:SetString|ParseInt|ParseUint|Atoi)\(\s*(\w+)`)
+	// ...and the other half of the same mistake: comparing the value to something
+	// that is not the presence marker. waitValue(id, "claimed|...", share, ...)
+	// reads as a share assertion and is not a numeric parse at all, so the parse
+	// scan above missed it entirely — that cost devnet run 34.
+	reValueCmp := regexp.MustCompile(`(?s)"claimed\|[^"]*"(?:\s*\+[^,)]*)?\s*,\s*([^,)]+)`)
 	checked := 0
 	for name, rawSrc := range devnetSources(t) {
 		src := stripLineComments(rawSrc)
@@ -1231,6 +1236,27 @@ func TestDevnetDrift_ClaimedKeyIsNeverReadAsAShare(t *testing.T) {
 			from := m[0]
 			to := min(from+700, len(src))
 			window := src[from:to]
+			// a compared-against value that is not "1" (or a presence check) means
+			// the caller believes this key holds a quantity
+			if m2 := reValueCmp.FindStringSubmatch(src[from:min(from+220, len(src))]); m2 != nil {
+				want := strings.TrimSpace(m2[1])
+				// the argument after the key is a TIMEOUT in the presence helpers,
+				// not an expected value — judging those would condemn every correct
+				// waitStateKeyPresent call in the tree
+				if strings.Contains(want, "time.") || strings.Contains(want, "Duration") {
+					want = ""
+				}
+				isPresence := want == "" || want == `"1"` ||
+					strings.HasPrefix(want, `"`) && strings.Contains(want, "claim")
+				looksNumeric := regexp.MustCompile(`^"?\d`).MatchString(want)
+				if !isPresence && (looksNumeric || regexp.MustCompile(`^(share|amount|total|owed|expected)\b`).MatchString(want)) {
+					t.Errorf("%s compares a claimed| value against %s: that key holds \"1\" and is "+
+						"written only AFTER a claim, so this asserts a quantity against a presence "+
+						"flag\n  near: %s", name, want,
+						trunc(strings.TrimSpace(src[from:min(from+140, len(src))]), 140))
+					continue
+				}
+			}
 			if !reParse.MatchString(window) {
 				continue
 			}
