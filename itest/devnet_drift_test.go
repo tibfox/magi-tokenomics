@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"magi_token/reporter/sharecore"
 )
 
 // The devnet suites live under testdata/, which Go ignores by construction: they are
@@ -999,4 +1001,50 @@ func helperWritesChannel(t *testing.T, src, name string, memo map[string]string)
 	}
 	answer = `never writes "channel"`
 	return answer
+}
+
+// The contract's entry rules cannot be imported (tinygo wasm, no shared packages),
+// so sharecore.ParseEntries is a hand-written mirror of applyEntries. This compares
+// the two directly. It exists because the mirror had already drifted: the contract
+// accepts a system: payout destination and `reporter root` did not, so a system:
+// entry was counted on chain and left out of the root committed for it — nothing
+// reported that, and the account simply could never prove a claim.
+func TestDevnetDrift_LedgerDomainsMatchTheContract(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "c3-distributor", "contract", "main.go"))
+	if err != nil {
+		t.Fatalf("read distributor: %v", err)
+	}
+	src := stripLineComments(string(b))
+
+	fn := regexp.MustCompile(`func isLedgerAddr\(a string\) bool \{`).FindStringIndex(src)
+	if fn == nil {
+		t.Fatal("isLedgerAddr is gone from the distributor — this guard is now blind")
+	}
+	onChain := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"([a-z]+:)"`).FindAllStringSubmatch(
+		enclosingArgs(src, fn[1]), -1) {
+		onChain[m[1]] = true
+	}
+	if len(onChain) == 0 {
+		t.Fatal("parsed no domains out of isLedgerAddr — this guard is now blind")
+	}
+
+	offChain := map[string]bool{}
+	for _, d := range []string{"hive:", "contract:", "did:", "system:", "eth:", "sol:", "btc:"} {
+		if sharecore.IsLedgerAddr(d + "x") {
+			offChain[d] = true
+		}
+	}
+	for d := range onChain {
+		if !offChain[d] {
+			t.Errorf("the contract counts %q but sharecore skips it: such an entry is funded "+
+				"on chain and missing from the root, so that account can never prove a claim", d)
+		}
+	}
+	for d := range offChain {
+		if !onChain[d] {
+			t.Errorf("sharecore counts %q but the contract skips it: the root would carry a leaf "+
+				"the chain never funded, inflating the denominator against everyone else", d)
+		}
+	}
 }

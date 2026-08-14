@@ -74,3 +74,46 @@ shaped to keep it flat rather than per-item, both measured in
 - **`airdropBatch`** emits one summary per batch. The liquid path's per-recipient
   record already exists as the token contract's own indexed `transfer` log, and the
   `airdropStaked` path emits `stake` per recipient anyway.
+
+## Serving proofs (`proofsvc`)
+
+The chain no longer holds per-account shares — per-account state writes were ~92%
+of an epoch's cost, so the distributor commits a merkle root and logs the leaves.
+That makes this indexer the only thing that can answer "what did this account
+earn?", and `proofsvc` is what answers it.
+
+```
+go build ./indexer/proofsvc/cmd/proofsvc
+HASURA_ENDPOINT=https://…/v1/graphql ./proofsvc -addr :8099
+```
+
+- `GET /proof?channel=content&epoch=0&account=hive:alice` → the account's share,
+  its merkle path, and a ready-to-send `claim_payload`.
+- `GET /root?channel=content&epoch=0` → what this service rebuilt, plus every
+  entry the contract skipped. Compare it against the chain without asking for
+  anybody's proof.
+- `GET /health` → process liveness only. Deliberately not tied to whether an epoch
+  is servable: coupling them would take the service down exactly when the indexer
+  lags and operators most need it answering.
+
+**This service is not trusted, and does not ask to be.** It rebuilds each epoch
+from the `shares` logs, recomputes the root, and compares it against the
+`magi_tokenomics_root_events` row the contract committed. On any disagreement it
+refuses to serve rather than handing out proofs that would be rejected at the point
+of payment — the worst place to discover the database was wrong. Four disagreements
+are reported separately because they mean different things:
+
+| Symptom | What it means | What to do |
+|---|---|---|
+| `page N is missing` | the indexer is behind, or a `submitShares` log was dropped | let it catch up; if it persists, the log is gone |
+| `does not match what the contract counted` | that row's copy is corrupt | re-ingest the epoch |
+| `does not match the committed root` | the book is wrong somewhere | re-ingest; if it survives that, the reporter and the chain disagree |
+| `rebuilt total …` / `holds N accounts` | the denominator differs from the chain's | as above |
+
+A claimant never has to trust it either: `reporter proof -account X` recomputes the
+same epoch from public Hive data and needs no indexer at all. The two must agree,
+and if they do not, the chain's root decides.
+
+Entry rules (which addresses count, what gets skipped) come from
+`reporter/sharecore.ParseEntries` — the single mirror of the contract's
+`applyEntries`, pinned to it by `TestDevnetDrift_LedgerDomainsMatchTheContract`.

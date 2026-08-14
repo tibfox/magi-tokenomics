@@ -17,7 +17,6 @@ package main
 
 import (
 	"encoding/json"
-	"math/big"
 	"flag"
 	"fmt"
 	"os"
@@ -1093,39 +1092,20 @@ func (a *app) cmdRoot(entries, account string, asJSON bool) error {
 	if entries == "" {
 		return fmt.Errorf("-entries is required, in the form \"hive:a:100,hive:b:50\"")
 	}
-	shares := map[string]*big.Int{}
+	// The contract's own rules, from sharecore — not a second copy. The copy that
+	// used to live here had already drifted: it rejected the system: domain the
+	// contract accepts, so such an entry was counted on chain and left out of the
+	// root committed for it.
+	shares, dropped := sharecore.ParseEntries(entries)
 	skipped := []string{}
-	for _, e := range strings.Split(entries, ",") {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
-		}
-		cut := strings.LastIndex(e, ":")
-		if cut < 0 {
-			skipped = append(skipped, e+" (no amount)")
-			continue
-		}
-		acct, amt := e[:cut], e[cut+1:]
-		if !strings.HasPrefix(acct, "hive:") && !strings.HasPrefix(acct, "contract:") &&
-			!strings.HasPrefix(acct, "did:") {
-			skipped = append(skipped, e+" (no ledger domain)")
-			continue
-		}
-		v, ok := new(big.Int).SetString(amt, 10)
-		if !ok || v.Sign() <= 0 {
-			skipped = append(skipped, e+" (amount not a positive integer)")
-			continue
-		}
-		shares[acct] = v
+	for _, d := range dropped {
+		skipped = append(skipped, d.Raw+" ("+d.Reason+")")
 	}
 	if len(shares) == 0 {
 		return fmt.Errorf("no usable entries: %s", strings.Join(skipped, "; "))
 	}
 	tree := sharecore.BuildTree(shares)
-	total := new(big.Int)
-	for _, v := range shares {
-		total.Add(total, v)
-	}
+	total := sharecore.TotalOf(shares)
 
 	out := map[string]any{
 		"root": tree.Root(), "total_shares": total.String(),
