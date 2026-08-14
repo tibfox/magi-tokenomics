@@ -366,7 +366,10 @@ What that costs you, and it is not nothing:
   one is unavailable — and can check the indexer's copy when one is.
 - **The indexer holds the book.** The leaves are still logged, so it can serve
   proofs; the root is what proves its answer was not invented. If its copy does not
-  rebuild to the committed root, it must not be served.
+  rebuild to the committed root, it must not be served. That service is
+  [`indexer/proofsvc`](indexer/proofsvc) — it rebuilds each epoch from the `shares`
+  logs, checks the result against the committed root, and refuses rather than hand
+  out proofs the contract would reject at the point of payment.
 
 The leaf is `sha256(0x00 || "acct|share")` and binds account and amount together, and
 the contract builds it from `msg.caller` rather than a payload field — so a stolen
