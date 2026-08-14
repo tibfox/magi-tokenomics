@@ -117,29 +117,14 @@ func (b *book) claimForged(t *testing.T, ch, ep, acct, share string) string {
 func publishEntries(t *testing.T, ct *test_utils.ContractTest,
 	dist, ch, ep, entries, reporter string, height uint64) *book {
 	t.Helper()
+	// The contract's own rules, from sharecore. This used to be a hand-written copy
+	// and it had already drifted — it rejected the system: domain applyEntries
+	// accepts, so a book containing one committed a root over a different set than
+	// the chain published, and every claim against it would fail.
+	parsed, _ := sharecore.ParseEntries(entries)
 	shares := map[string]int64{}
-	for _, e := range strings.Split(entries, ",") {
-		if e = strings.TrimSpace(e); e == "" {
-			continue
-		}
-		cut := strings.LastIndex(e, ":")
-		if cut < 0 {
-			continue
-		}
-		acct := e[:cut]
-		// Mirror the CONTRACT's validation exactly. applyEntries skips an entry
-		// whose account carries no ledger domain, so a helper that kept it would
-		// commit a root over a different set than the chain published — and every
-		// claim would then fail against a root nobody could reproduce.
-		if !strings.HasPrefix(acct, "hive:") && !strings.HasPrefix(acct, "contract:") &&
-			!strings.HasPrefix(acct, "did:") {
-			continue
-		}
-		var v int64
-		fmt.Sscanf(e[cut+1:], "%d", &v)
-		if v > 0 {
-			shares[acct] = v
-		}
+	for a, v := range parsed {
+		shares[a] = v.Int64()
 	}
 	b := shareBook(shares)
 	call(t, ct, dist, "submitShares", fmt.Sprintf(
