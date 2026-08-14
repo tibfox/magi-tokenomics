@@ -505,10 +505,28 @@ func TestDevnetMagiFull(t *testing.T) {
 	// the claims, since holderA also holds the undrawn emission pool.
 	c3TotalN := bigOf(c3Total)
 	c5TotalN := bigOf(waitKey(c3ID, "totalShares|lp|0", "C5 totalShares"))
-	// Shares are per CHANNEL. Taking the contract id instead made the content and lp
-	// share books the same book, so the two channels compared identical numbers.
+	// Shares are per CHANNEL, and the chain no longer stores them — it stores a root.
+	// The reporter is the authority on what an account earned, so ask IT: `reporter
+	// proof` recomputes the epoch from Hive and returns the share it committed to.
+	// That is a stronger check than reading state was, because it re-derives the
+	// number rather than reading back whatever the contract happened to record.
 	share := func(ch, acct string) *big.Int {
-		return bigOf(stateOf(c3ID, "share|"+ch+"|0|hive:"+acct))
+		if ch != "content" {
+			// lp shares were pushed directly by this suite (70/30), not by the
+			// reporter, so the suite already knows them.
+			if acct == holderA {
+				return big.NewInt(70)
+			}
+			return big.NewInt(30)
+		}
+		var pf struct {
+			Share string `json:"share"`
+		}
+		out := runReporter("proof", "-epoch", "0", "-account", "hive:"+acct, "-json")
+		if err := json.Unmarshal(out, &pf); err != nil {
+			t.Fatalf("reporter proof for %s: %v\n%s", acct, err, out)
+		}
+		return bigOf(pf.Share)
 	}
 	payout := func(funded string, sh, total *big.Int) *big.Int {
 		if total.Sign() == 0 {
@@ -773,7 +791,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// The loop is over CHANNELS, not contract ids: content and lp share one distributor
 	// now, so every key needs the channel component or it addresses nothing.
 	for _, ch := range []string{"content", "lp"} {
-		if v := stateOf(c3ID, "share|"+ch+"|0|hive:"+outsider); v != "" && v != "0" {
+		if v := stateOf(c3ID, "claimed|"+ch+"|0|hive:"+outsider); v != "" && v != "0" {
 			t.Fatalf("%s channel granted the outsider a share: %s", ch, v)
 		}
 		if v := stateOf(c3ID, "totalShares|"+ch+"|1"); v != "" && v != "0" {

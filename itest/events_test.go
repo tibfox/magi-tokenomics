@@ -118,12 +118,18 @@ func TestEvents_FullSliceEmitsEveryLifecycleEvent(t *testing.T) {
 	record(collectLogs(t, &ct, c3EvID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1))
 	record(collectLogs(t, &ct, c3EvID, "submitShares",
 		`{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1))
+	// the commitment: its own event, and the thing every claim verifies against
+	evBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40})
+	record(collectLogs(t, &ct, c3EvID, "submitRoot", fmt.Sprintf(
+		`{"channel":"author","epoch":"0","root":"%s","totalShares":"100","accounts":"2"}`,
+		evBook.tree.Root()), "hive:reporter", 1))
 	record(collectLogs(t, &ct, c3EvID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1))
-	record(collectLogs(t, &ct, c3EvID, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 2))
+	record(collectLogs(t, &ct, c3EvID, "claim",
+		evBook.claimFor(t, "author", "0", "hive:alice"), "hive:alice", 2))
 
 	for _, want := range []string{
 		"c2_init", "c3_init", "channel", "emit", "poke", "alloc",
-		"bucket_claim", "pull", "shares", "epoch_status", "claim",
+		"bucket_claim", "pull", "shares", "root", "epoch_status", "claim",
 	} {
 		assert.NotEmpty(t, seen[want], "no %q event was emitted — the indexer cannot rebuild that step", want)
 	}
@@ -327,12 +333,16 @@ func TestEvents_SkippedShareEntryIsRecorded(t *testing.T) {
 
 	// The page still applied, with only the good entry counted. `submitted` carries
 	// what the reporter sent verbatim, so applied = submitted minus the skip logs —
-	// which is what makes the per-account share book reconstructible from one log
-	// per page instead of one per entry.
+	// and that is now the ONLY record of the share book, since the contract holds a
+	// root rather than per-account state. An indexer rebuilds the book from these
+	// logs and checks it against the committed root.
+	//
+	// `new_total` is gone with the accumulation it reported: nothing on chain sums
+	// the pages any more, so a running total would be a number the contract could
+	// not stand behind.
 	if assert.NotNil(t, shares, "a page summary must be emitted even when entries are skipped") {
 		assert.Equal(t, "1", shares["entries"])
 		assert.Equal(t, "40", shares["page_total"])
-		assert.Equal(t, "40", shares["new_total"])
 		assert.Equal(t, "alice:60,hive:bob:40,hive:carol:0", shares["submitted"])
 	}
 }

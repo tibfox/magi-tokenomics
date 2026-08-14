@@ -49,6 +49,7 @@ commands:
   compute   -config F      fetch + compute an epoch's shares (no chain writes)
   plan      -config F      print the ordered calls that would be broadcast
   run       -config F      execute the plan (dry-run unless -broadcast)
+  proof     -config F      print an account's share + merkle proof for an epoch
 
 common flags:
   -config F                path to the config file (required except init-config)
@@ -69,6 +70,7 @@ func run(args []string) error {
 	epochFlag := fs.String("epoch", "", "target epoch (default: oldest closed-but-unfinalized)")
 	doBroadcast := fs.Bool("broadcast", false, "actually sign and broadcast")
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	acctFlag := fs.String("account", "", "(proof only) the account to prove")
 
 	switch cmd {
 	case "init-config":
@@ -81,7 +83,7 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
-	case "epoch", "compute", "plan", "run":
+	case "epoch", "compute", "plan", "run", "proof":
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
@@ -111,6 +113,8 @@ func run(args []string) error {
 		return app.cmdPlan(*epochFlag, *asJSON)
 	case "run":
 		return app.cmdRun(*epochFlag, *doBroadcast)
+	case "proof":
+		return app.cmdProof(*epochFlag, *acctFlag, *asJSON)
 	}
 	return nil
 }
@@ -604,8 +608,14 @@ func (a *app) buildPlan(epochFlag string) (*computed, submit.Plan, error) {
 	if a.cfg.Submit.Keeper {
 		funder = a.cfg.Contracts.Funder
 	}
+	// The commitment the claims verify against. Built from the SAME share set the
+	// pages publish, so the leaves and the root cannot disagree.
+	tree := sharecore.BuildTree(c.Result.Shares)
 	pl := submit.BuildFullPlan(submit.PlanOpts{
 		Epoch:         eps,
+		Root:          tree.Root(),
+		TotalShares:   c.Result.Total.String(),
+		Accounts:      len(c.Result.Shares),
 		DistributorID: a.cfg.Contracts.Distributor,
 		Channel:       a.cfg.Contracts.Channel,
 		FunderID:      funder,
@@ -996,4 +1006,59 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 			"page size) and re-run",
 			pl.Epoch, len(missing), countSubmitShares(pl), missing)
 	}
+}
+
+// cmdProof prints what an account needs in order to claim: its share and the sibling
+// path proving that share is in the epoch's committed tree.
+//
+// THIS IS THE OTHER HALF OF THE MERKLE TRADE. The chain holds a 32-byte root and no
+// per-account state, so "what am I owed?" is no longer a question the chain can
+// answer — something has to recompute the epoch and hand the claimant a proof. That
+// is what this does, and it is why determinism matters so much: anyone can run it,
+// from public Hive data, and get a proof that verifies against a root they did not
+// have to trust.
+//
+// A wallet would normally read the share book from the indexer, which holds the leaf
+// logs. This path needs no indexer at all — it recomputes from Hive — which makes it
+// the fallback when the indexer is unavailable and the check that the indexer's copy
+// is honest.
+func (a *app) cmdProof(epochFlag, account string, asJSON bool) error {
+	if account == "" {
+		return fmt.Errorf("-account is required for proof")
+	}
+	if !strings.Contains(account, ":") {
+		account = "hive:" + account
+	}
+	c, err := a.compute(epochFlag)
+	if err != nil {
+		return err
+	}
+	tree := sharecore.BuildTree(c.Result.Shares)
+	proof, ok := tree.Proof(account)
+	if !ok {
+		return fmt.Errorf("%s earned nothing in epoch %d — there is no proof to give",
+			account, c.Epoch)
+	}
+	share := c.Result.Shares[account].String()
+	// Check our own output before handing it over: a proof that does not verify is
+	// worse than no proof, because the claimant burns RC discovering it.
+	if !sharecore.VerifyProof(account, share, proof, tree.Root()) {
+		return fmt.Errorf("internal: generated proof for %s does not verify against the root", account)
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"epoch": c.Epoch, "account": account, "share": share,
+			"root": tree.Root(), "proof": proof,
+			"claim_payload": fmt.Sprintf(`{"channel":"%s","epoch":"%d","share":"%s","proof":"%s"}`,
+				a.cfg.Contracts.Channel, c.Epoch, share, strings.Join(proof, ",")),
+		})
+	}
+	fmt.Printf("epoch %d  %s\n", c.Epoch, account)
+	fmt.Printf("  share  %s\n", share)
+	fmt.Printf("  root   %s\n", tree.Root())
+	fmt.Printf("  proof  %d siblings\n", len(proof))
+	fmt.Printf("\nclaim payload:\n%s\n", fmt.Sprintf(
+		`{"channel":"%s","epoch":"%d","share":"%s","proof":"%s"}`,
+		a.cfg.Contracts.Channel, c.Epoch, share, strings.Join(proof, ",")))
+	return nil
 }

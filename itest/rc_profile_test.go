@@ -178,15 +178,24 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 	}
 	record("distributor", "shareOf", "query", call(t, &ct, pC3, "shareOf",
 		`{"channel":"content","epoch":"0","account":"hive:rcsharemaxlen000"}`, "hive:any", 46, true))
+	// The commitment: one call for the whole epoch, whatever the earner count.
+	pBook := shareBook(map[string]int64{"hive:rcsharemaxlen000": 1})
+	record("distributor", "submitRoot", "commitment for the epoch",
+		call(t, &ct, pC3, "submitRoot", fmt.Sprintf(
+			`{"channel":"content","epoch":"0","root":"%s","totalShares":"1","accounts":"1"}`,
+			pBook.tree.Root()), owner, 46, true))
 	record("distributor", "finalizeEpoch", "", call(t, &ct, pC3, "finalizeEpoch",
 		`{"channel":"content","epoch":"0"}`, owner, 46, true))
-	record("distributor", "claim", "transfers the payout", call(t, &ct, pC3, "claim",
-		`{"channel":"content","epoch":"0"}`, "hive:rcsharemaxlen000", 60, true))
+	record("distributor", "claim", "with a merkle proof", call(t, &ct, pC3, "claim",
+		pBook.claimFor(t, "content", "0", "hive:rcsharemaxlen000"), "hive:rcsharemaxlen000", 60, true))
 
 	record("distributor", "submitShares", "lp channel, 2 entries", call(t, &ct, pC3, "submitShares",
 		fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"%s:70,%s:30"}`, alice, bob), owner, 46, true))
+	lpBook := shareBook(map[string]int64{alice: 70, bob: 30})
+	lpBook.submitRoot(t, &ct, pC3, "lp", "0", owner, 46)
 	record("distributor", "finalizeEpoch", "lp channel", call(t, &ct, pC3, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, owner, 46, true))
-	record("distributor", "claim", "lp channel", call(t, &ct, pC3, "claim", `{"channel":"lp","epoch":"0"}`, alice, 60, true))
+	record("distributor", "claim", "lp channel", call(t, &ct, pC3, "claim",
+		lpBook.claimFor(t, "lp", "0", alice), alice, 60, true))
 
 	record("C1 staking", "claimYield", "local stake history", call(t, &ct, pC1, "claimYield",
 		`{"epoch":"0"}`, alice, 60, true))

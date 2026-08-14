@@ -176,10 +176,10 @@ func TestCovNFT_FungibleEmissionAndClaimStillWorks(t *testing.T) {
 	// split 6000/4000 bps → author bucket (C3) = 60000.
 	call(t, ct, nftC2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
 	call(t, ct, nftC3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, ct, nftC3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:75,hive:bob:25"}`, "hive:reporter", 1, true)
+	bk1 := publishEntries(t, ct, nftC3ID, "author", "0", "hive:alice:75,hive:bob:25", "hive:reporter", 1)
 	call(t, ct, nftC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1, true)
-	call(t, ct, nftC3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 2, true)
-	call(t, ct, nftC3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 2, true)
+	call(t, ct, nftC3ID, "claim", bk1.claimFor(t, "author", "0", "hive:alice"), "hive:alice", 2, true)
+	call(t, ct, nftC3ID, "claim", bk1.claimFor(t, "author", "0", "hive:bob"), "hive:bob", 2, true)
 
 	a := call(t, ct, nftTokenID, "balanceOf", `{"account":"hive:alice"}`, "hive:x", 2, true)
 	b := call(t, ct, nftTokenID, "balanceOf", `{"account":"hive:bob"}`, "hive:x", 2, true)

@@ -640,7 +640,7 @@ func TestDevnetMagiScale(t *testing.T) {
 	// ---------------- PHASE 6: claim, split 50/50 liquid and staked ----------------
 	time.Sleep(20 * time.Second) // challenge window
 	for _, acct := range []string{owner, curator} {
-		share := stateOf(c3ID, "share|content|0|hive:"+acct)
+		share := stateOf(c3ID, "claimed|content|0|hive:"+acct)
 		if share == "" || share == "0" {
 			t.Fatalf("%s earned nothing — the witness accounts must be in earning "+
 				"positions or the claim path cannot be tested", acct)

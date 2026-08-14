@@ -487,13 +487,13 @@ func TestDevnetMagiReporter(t *testing.T) {
 		computeAfter.TotalShares, computeAfter.Accounts)
 
 	// the post-payout vote must never have reached the chain
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:toolate"}); st != nil {
-		if v, ok := st["share|author|0|hive:toolate"]; ok && v != nil && v != "" {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"claimed|author|0|hive:toolate"}); st != nil {
+		if v, ok := st["claimed|author|0|hive:toolate"]; ok && v != nil && v != "" {
 			t.Fatalf("a vote cast AFTER payout earned shares on-chain: %v", v)
 		}
 	}
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:flagger"}); st != nil {
-		if v, ok := st["share|author|0|hive:flagger"]; ok && v != nil && v != "" {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"claimed|author|0|hive:flagger"}); st != nil {
+		if v, ok := st["claimed|author|0|hive:flagger"]; ok && v != nil && v != "" {
 			t.Fatalf("a downvoter earned shares on-chain: %v", v)
 		}
 	}
@@ -511,7 +511,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 		node int
 		acct string
 	}{{1, owner}, {2, w2}} {
-		key := "share|author|0|hive:" + cl.acct
+		key := "claimed|author|0|hive:" + cl.acct
 		st, err := d.GetStateByKeys(ctx, 1, c3ID, []string{key})
 		if err != nil {
 			t.Fatalf("read %s: %v", key, err)

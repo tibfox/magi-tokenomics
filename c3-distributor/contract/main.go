@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"magi_token/adapter"
 	"magi_token/auth"
 	"magi_token/events"
@@ -176,6 +177,65 @@ func SubmitShares(payload *string) *string {
 	return str(`{"applied":` + boolStr(committed) + `}`)
 }
 
+// submitRoot — the commitment for one epoch's share book.
+//
+// {"channel","epoch","root":<64 hex>,"totalShares","accounts"}
+//
+// The root is what makes the logged share list authoritative: anyone can rebuild the
+// tree from the indexer's copy and check it against this. `totalShares` is the
+// payout denominator and is DECLARED by the reporter rather than summed on chain —
+// the contract no longer holds the leaves and cannot add them up. That is not a new
+// trust assumption: a reporter able to declare a wrong total was already able to
+// submit wrong shares, and the challenge window plus the guardian is the containment
+// for both.
+//
+// Once only, and before finalize. Immutable afterwards: a re-pointable root would
+// let a finalized epoch be re-aimed at a different share book.
+//
+//go:wasmexport submitRoot
+func SubmitRoot(payload *string) *string {
+	assertInit()
+	ch := mustChannel(payload)
+	ep := mustEpoch(payload)
+	if statusOf(ch, ep) != "" {
+		sdk.Abort("epoch not open")
+	}
+	rk := "root|" + ch + "|" + ep
+	if present(rk) {
+		sdk.Abort("root already submitted for this epoch")
+	}
+	root := f(payload, "root")
+	if _, ok := hexToBytes(root); !ok {
+		sdk.Abort("root must be 64 hex characters")
+	}
+	ts := parseBig(f(payload, "totalShares"))
+	if ts.Sign() <= 0 {
+		sdk.Abort("totalShares must be positive")
+	}
+	// Same authority and the same M-of-N semantics as a share page: the root IS the
+	// report now, so it needs at least the protection the pages had. The attested
+	// payload binds root and total together — attesting to a root while disagreeing
+	// about the denominator would be worthless.
+	actionKey := "sr:" + ch + ":" + ep
+	committed := auth.Authorize(reporterCfg(ch), "rep", actionKey,
+		root+":"+ts.String(), mustCaller(), reqAuths())
+	if committed {
+		set(rk, root)
+		setBig("totalShares|"+ch+"|"+ep, ts)
+		if a := f(payload, "accounts"); a != "" {
+			set("accounts|"+ch+"|"+ep, a)
+		}
+		events.New("root").
+			Str("channel", ch).
+			Str("epoch", ep).
+			Str("root", root).
+			Big("total_shares", ts).
+			Str("accounts", f(payload, "accounts")).
+			Emit()
+	}
+	return str(`{"applied":` + boolStr(committed) + `}`)
+}
+
 // emitSkip records an entry that submitShares silently dropped.
 //
 // This is the most valuable log this contract emits. A skipped entry is a no-op
@@ -195,8 +255,15 @@ func emitSkip(ch, ep, page, raw, reason string) {
 		Emit()
 }
 
+// applyEntries validates and PUBLISHES a page of the share book.
+//
+// It writes no per-account state. The entries go into a log, which the indexer
+// ingests and serves; `submitRoot` supplies the commitment that makes that list
+// authoritative. Validation is unchanged and still matters: a malformed entry is
+// skipped and NAMED in a skip log, so the published book and the tree agree about
+// exactly which entries count.
 func applyEntries(ch, ep, page, entries string) {
-	total := getBig("totalShares|" + ch + "|" + ep)
+	total := new(big.Int)
 	counted := 0
 	pageTotal := new(big.Int)
 	for _, e := range splitComma(entries) {
@@ -221,13 +288,14 @@ func applyEntries(ch, ep, page, entries string) {
 			emitSkip(ch, ep, page, e, "shares not positive")
 			continue
 		}
-		sk := "share|" + ch + "|" + ep + "|" + acct
-		setBig(sk, new(big.Int).Add(getBig(sk), s))
-		total.Add(total, s)
+		// NO per-account state write. The share book lives in the log, and the root
+		// submitted separately is what makes it authoritative — see the merkle
+		// section at the bottom of this file. This is the ~92% of an epoch's cost
+		// that the commitment removes.
 		counted++
 		pageTotal.Add(pageTotal, s)
 	}
-	setBig("totalShares|"+ch+"|"+ep, total)
+	_ = total
 	// ONE log per page carrying the submitted entries verbatim, rather than one log
 	// per entry.
 	//
@@ -247,7 +315,6 @@ func applyEntries(ch, ep, page, entries string) {
 		Str("page", page).
 		Int("entries", counted).
 		Big("page_total", pageTotal).
-		Big("new_total", total).
 		Str("submitted", entries).
 		Emit()
 }
@@ -269,6 +336,13 @@ func FinalizeEpoch(payload *string) *string {
 	}
 	// An empty report would freeze the epoch (every claim aborts "no shares"),
 	// so reject finalizing with nothing to distribute (MED-5).
+	//
+	// The commitment is the report now: without a root no claim can ever verify, so
+	// finalizing without one locks the epoch's funding away exactly as an empty
+	// share book used to.
+	if !present("root|" + ch + "|" + ep) {
+		sdk.Abort("no share-book root submitted for epoch")
+	}
 	if getBig("totalShares|"+ch+"|"+ep).Sign() <= 0 {
 		sdk.Abort("no shares submitted for epoch")
 	}
@@ -440,17 +514,50 @@ func Claim(payload *string) *string {
 	if ts.Sign() <= 0 {
 		sdk.Abort("no shares")
 	}
-	share := getBig("share|" + ch + "|" + ep + "|" + c)
+	// PROVE the share rather than read it. The chain holds a root, not a share book:
+	// the claimant supplies the amount and the sibling path, and the leaf binds the
+	// two together so a proof cannot be replayed under another name or inflated.
+	shareStr := f(payload, "share")
+	share := parseBig(shareStr)
 	if share.Sign() <= 0 {
-		sdk.Abort("no share for caller")
+		sdk.Abort("share must be positive — pass the amount the indexer holds for you")
+	}
+	root := getStr("root|" + ch + "|" + ep)
+	if root == "" {
+		sdk.Abort("no share-book root for this epoch")
+	}
+	// The leaf is built from the CALLER, never from a payload field, so a valid proof
+	// for someone else is useless: msg.caller is not something the claimant chooses.
+	if !verifyProof(c, shareStr, f(payload, "proof"), root) {
+		sdk.Abort("merkle proof does not verify against this epoch's root")
 	}
 	payout := new(big.Int).Mul(funded, share)
 	payout.Div(payout, ts)
 	if payout.Sign() <= 0 {
 		sdk.Abort("payout rounds to zero")
 	}
+	// Σclaims ≤ funded, enforced rather than assumed.
+	//
+	// This used to hold by construction: totalShares was ACCUMULATED by the contract
+	// from the pages it stored, so the shares it divided by were exactly the shares it
+	// had recorded. Under the merkle book totalShares is DECLARED by the reporter and
+	// the leaves live off chain, so a total declared lower than the leaves actually sum
+	// to makes every payout too large.
+	//
+	// Without this the overspend is not even contained to its own epoch: the token
+	// balance is shared across every epoch and channel this contract serves, so epoch
+	// 0 paying double drains funding that belongs to epoch 1 — and the first sign of it
+	// is a later claimant's transfer failing for reasons that have nothing to do with
+	// them. Refuse here, where the cause is still visible.
+	pk := "paid|" + ch + "|" + ep
+	paid := new(big.Int).Add(getBig(pk), payout)
+	if paid.Cmp(funded) > 0 {
+		sdk.Abort("payout would exceed this epoch's funding — the declared totalShares " +
+			"is smaller than the share book actually sums to")
+	}
 	// CEI: mark claimed before any external call
 	set(ck, "1")
+	setBig(pk, paid)
 	staked := stakedPart(payout)
 	liquid := new(big.Int).Sub(payout, staked)
 	if liquid.Sign() > 0 {
@@ -519,13 +626,23 @@ func creditStake(acct string, amt *big.Int) {
 // ---- queries -------------------------------------------------------------
 
 //go:wasmexport shareOf
+// epochOf reports what the CHAIN knows about an epoch: the commitment, the
+// denominator, the funding and the status.
+//
+// It deliberately does NOT report a per-account share, because the chain no longer
+// holds one. Returning zero for every account would be the worst possible answer — a
+// wallet would show "you earned nothing" and be believed — so the account-level
+// question is not answerable here at all. Ask the indexer for the share and the
+// proof, and check them against `root` below.
 func ShareOf(payload *string) *string {
 	assertInit()
 	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	return str(`{"share":"` + getBig("share|"+ch+"|"+ep+"|"+f(payload, "account")).String() +
+	return str(`{"root":"` + getStr("root|"+ch+"|"+ep) +
 		`","totalShares":"` + getBig("totalShares|"+ch+"|"+ep).String() +
 		`","funded":"` + getBig("funded|"+ch+"|"+ep).String() +
+		`","paid":"` + getBig("paid|"+ch+"|"+ep).String() +
+		`","accounts":"` + getStr("accounts|"+ch+"|"+ep) +
 		`","status":"` + statusOf(ch, ep) + `"}`)
 }
 
@@ -981,4 +1098,114 @@ func ChannelInfo(payload *string) *string {
 		`","role":"` + getStr("ch_role|"+ch) +
 		`","genesis":"` + getStr("cfg_genesis") +
 		`","epochLen":"` + getStr("cfg_epochLen") + `"}`)
+}
+
+// ---- merkle share book ---------------------------------------------------
+//
+// The chain holds a 32-byte commitment instead of one state entry per earner, and a
+// claimant supplies the proof. Writing a share book cost ~311 RC per account against
+// ~1 RC per byte of log, so at 500 earners the per-account writes were ~92% of an
+// epoch's cost; this removes them. The leaf list is still LOGGED, so the indexer
+// holds the whole share book and anyone can rebuild the tree and check it against
+// the root.
+//
+// The consequence, deliberately accepted: `share|<ch>|<ep>|<acct>` no longer exists.
+// Nothing can read what an account earned from chain state alone — that is what the
+// indexer is for, and the root is what proves its answer was not invented.
+//
+// The construction MUST match reporter/sharecore/merkle.go exactly:
+//
+//	leaf     = sha256( 0x00 || "acct|share" )
+//	internal = sha256( 0x01 || min(a,b) || max(a,b) )
+//
+// Tags keep leaf and node preimages disjoint (an internal node's preimage must never
+// be presentable as a leaf); pairs are sorted so a proof carries no direction bits;
+// an odd node is promoted rather than duplicated, or [A,B,C] and [A,B,C,C] would
+// share a root (CVE-2012-2459).
+
+// hexToBytes decodes a 64-character hex string into 32 bytes. Returns false on any
+// malformed input — a proof element that is not exactly 32 bytes is not a hash, and
+// accepting a short one would let a claimant walk a shorter path than the tree has.
+func hexToBytes(s string) ([32]byte, bool) {
+	var out [32]byte
+	if len(s) != 64 {
+		return out, false
+	}
+	for i := 0; i < 32; i++ {
+		hi, ok1 := hexNibble(s[i*2])
+		lo, ok2 := hexNibble(s[i*2+1])
+		if !ok1 || !ok2 {
+			return out, false
+		}
+		out[i] = hi<<4 | lo
+	}
+	return out, true
+}
+
+func hexNibble(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+func bytesToHex(b [32]byte) string {
+	const hexd = "0123456789abcdef"
+	out := make([]byte, 64)
+	for i, v := range b {
+		out[i*2] = hexd[v>>4]
+		out[i*2+1] = hexd[v&0x0f]
+	}
+	return string(out)
+}
+
+func leafHash(acct, share string) [32]byte {
+	b := make([]byte, 0, 1+len(acct)+1+len(share))
+	b = append(b, 0x00)
+	b = append(b, acct...)
+	b = append(b, '|')
+	b = append(b, share...)
+	return sha256.Sum256(b)
+}
+
+func nodeHashC(a, b [32]byte) [32]byte {
+	buf := make([]byte, 0, 65)
+	buf = append(buf, 0x01)
+	if lessHashC(a, b) {
+		buf = append(buf, a[:]...)
+		buf = append(buf, b[:]...)
+	} else {
+		buf = append(buf, b[:]...)
+		buf = append(buf, a[:]...)
+	}
+	return sha256.Sum256(buf)
+}
+
+func lessHashC(a, b [32]byte) bool {
+	for i := 0; i < 32; i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
+
+// verifyProof recomputes the root from a leaf and its sibling path.
+func verifyProof(acct, share, proofCSV, root string) bool {
+	h := leafHash(acct, share)
+	if proofCSV != "" {
+		for _, p := range splitComma(proofCSV) {
+			sib, ok := hexToBytes(p)
+			if !ok {
+				return false
+			}
+			h = nodeHashC(h, sib)
+		}
+	}
+	return bytesToHex(h) == root
 }

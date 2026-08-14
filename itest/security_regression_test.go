@@ -181,7 +181,8 @@ func TestSec_StaleRescueCannotDivertLiveEpoch(t *testing.T) {
 	// the old (buggy) 1000-blocks-after-pullFunding threshold
 	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 1050, false)
 	// the reporter can still do its job on the live epoch
-	call(t, &ct, rgC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:1"}`, "hive:reporter", 1050, true)
+	rgBook := publishEntries(t, &ct, rgC3, "author", "0", "hive:alice:1", "hive:reporter", 1050)
+	_ = rgBook
 	call(t, &ct, rgC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1050, true)
 }
 

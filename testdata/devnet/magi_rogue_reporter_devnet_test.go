@@ -297,7 +297,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	callN(3, c3ID, "submitShares", honest, "honest C attests -> threshold")
 	waitValue(c3ID, "totalShares|lp|0", "1000", "C5 totalShares (honest payload)")
 
-	if v := stateOf(c3ID, "share|lp|0|hive:"+rogue); v != "" && v != "0" {
+	if v := stateOf(c3ID, "claimed|lp|0|hive:"+rogue); v != "" && v != "0" {
 		t.Fatalf("the rogue's fraudulent payload took effect: share=%s", v)
 	}
 	t.Logf("  honest majority committed THEIR payload; the rogue's never applied")

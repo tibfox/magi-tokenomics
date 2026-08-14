@@ -62,22 +62,22 @@ func TestMergedDist_TwoChannelsOneContract(t *testing.T) {
 	assert.EqualValues(t, 40000, c17I64(t, fl.Ret, "funded"), "lp bucket: "+fl.Ret)
 
 	// separate reporters, separate share books
-	call(t, ct, mdDist, "submitShares",
-		`{"channel":"content","epoch":"0","page":"0","entries":"hive:alice:100"}`, "hive:creporter", 1, true)
-	call(t, ct, mdDist, "submitShares",
-		`{"channel":"lp","epoch":"0","page":"0","entries":"hive:bob:100"}`, "hive:lpreporter", 1, true)
+	cb := publishEntries(t, ct, mdDist, "content", "0", "hive:alice:100", "hive:creporter", 1)
+	lb := publishEntries(t, ct, mdDist, "lp", "0", "hive:bob:100", "hive:lpreporter", 1)
 	call(t, ct, mdDist, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "hive:creporter", 1, true)
 	call(t, ct, mdDist, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "hive:lpreporter", 1, true)
 
 	// alice earned in content only, bob in lp only — each gets that channel's pot
 	assert.EqualValues(t, 60000, c17I64(t,
-		call(t, ct, mdDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:alice", 5, true).Ret, "claimed"))
+		call(t, ct, mdDist, "claim", cb.claimFor(t, "content", "0", "hive:alice"), "hive:alice", 5, true).Ret, "claimed"))
 	assert.EqualValues(t, 40000, c17I64(t,
-		call(t, ct, mdDist, "claim", `{"channel":"lp","epoch":"0"}`, "hive:bob", 5, true).Ret, "claimed"))
+		call(t, ct, mdDist, "claim", lb.claimFor(t, "lp", "0", "hive:bob"), "hive:bob", 5, true).Ret, "claimed"))
 
 	// and neither can claim in the other's channel
-	call(t, ct, mdDist, "claim", `{"channel":"lp","epoch":"0"}`, "hive:alice", 5, false)
-	call(t, ct, mdDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:bob", 5, false)
+	// A proof is bound to ONE channel's root: alice's content proof is worthless
+	// against the lp book even though both roots exist on the same contract.
+	call(t, ct, mdDist, "claim", cb.claimFor(t, "lp", "0", "hive:alice"), "hive:alice", 5, false)
+	call(t, ct, mdDist, "claim", lb.claimFor(t, "content", "0", "hive:bob"), "hive:bob", 5, false)
 }
 
 // Reporter authority is per channel. The LP reporter must not be able to write the
@@ -93,9 +93,12 @@ func TestMergedDist_ReporterAuthorityIsPerChannel(t *testing.T) {
 	// ...and cannot finalize it either
 	call(t, ct, mdDist, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "hive:lpreporter", 1, false)
 
+	// Nothing was committed: no root, so no claim against this epoch could ever
+	// verify. Under the merkle book that is the observable, not a per-account share.
 	sh := call(t, ct, mdDist, "shareOf",
 		`{"channel":"content","epoch":"0","account":"hive:mallory"}`, "hive:probe", 1, true)
-	assert.Contains(t, sh.Ret, `"share":"0"`, "nothing should have been written: "+sh.Ret)
+	assert.Contains(t, sh.Ret, `"root":""`, "no commitment should exist: "+sh.Ret)
+	assert.Contains(t, sh.Ret, `"totalShares":"0"`, "nothing should have been written: "+sh.Ret)
 }
 
 // A channel must exist before it can be used. A typo'd name would otherwise open a

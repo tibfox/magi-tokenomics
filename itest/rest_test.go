@@ -33,10 +33,10 @@ func TestC5LPSlice(t *testing.T) {
 
 	call(t, &ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
 	call(t, &ct, c5ID, "pullFunding", `{"channel":"lp","epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, &ct, c5ID, "submitShares", `{"channel":"lp","epoch":"0","page":"0","entries":"hive:lp1:70,hive:lp2:30"}`, "hive:lpreporter", 1, true)
+	bk1 := publishEntries(t, &ct, c5ID, "lp", "0", "hive:lp1:70,hive:lp2:30", "hive:lpreporter", 1)
 	call(t, &ct, c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "hive:lpreporter", 1, true)
-	call(t, &ct, c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "hive:lp1", 2, true)
-	call(t, &ct, c5ID, "claim", `{"channel":"lp","epoch":"0"}`, "hive:lp2", 2, true)
+	call(t, &ct, c5ID, "claim", bk1.claimFor(t, "lp", "0", "hive:lp1"), "hive:lp1", 2, true)
+	call(t, &ct, c5ID, "claim", bk1.claimFor(t, "lp", "0", "hive:lp2"), "hive:lp2", 2, true)
 	a := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:lp1"}`, "hive:x", 2, true)
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:lp2"}`, "hive:x", 2, true)
 	assert.Contains(t, a.Ret, `"70000"`)

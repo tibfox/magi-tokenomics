@@ -108,11 +108,12 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	call(t, &ct, advC2, "distributeEpoch", ``, advKeeper, 10, true)
 	call(t, &ct, advC3, "pullFunding", `{"channel":"author","epoch":"0"}`, advKeeper, 10, true) // 60000
 	call(t, &ct, advC1, "pullFunding", `{"epoch":"0"}`, advKeeper, 10, true)                    // 40000
-	call(t, &ct, advC3, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"0","page":"0","entries":"%s:75,%s:25"}`, advAlice, advBob), advReporter, 10, true)
+	advBook := publishEntries(t, &ct, advC3, "author", "0",
+		fmt.Sprintf("%s:75,%s:25", advAlice, advBob), advReporter, 10)
 	call(t, &ct, advC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, advReporter, 10, true)
 
-	call(t, &ct, advC3, "claim", `{"channel":"author","epoch":"0"}`, advAlice, 11, true) // 45000
-	call(t, &ct, advC3, "claim", `{"channel":"author","epoch":"0"}`, advBob, 11, true)   // 15000
+	call(t, &ct, advC3, "claim", advBook.claimFor(t, "author", "0", advAlice), advAlice, 11, true) // 45000
+	call(t, &ct, advC3, "claim", advBook.claimFor(t, "author", "0", advBob), advBob, 11, true)     // 15000
 	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advAlice, 11, true)               // 24000
 	call(t, &ct, advC1, "claimYield", `{"epoch":"0"}`, advBob, 11, true)                 // 16000
 

@@ -39,6 +39,18 @@ type PlanOpts struct {
 
 	Pages   []sharecore.Page
 	RcLimit int
+
+	// Root is the merkle commitment for this epoch's share book, and TotalShares the
+	// denominator every claim divides by. Both are REQUIRED for a claimable epoch:
+	// the pages above only publish the leaves for the indexer, and without a root no
+	// claim can verify against anything.
+	//
+	// The plan puts submitRoot after the pages and before finalize. Order matters for
+	// the same reason it always did — finalizeEpoch now refuses an epoch with no root,
+	// because finalizing one would lock its funding away with nothing able to claim it.
+	Root        string
+	TotalShares string
+	Accounts    int
 }
 
 // BuildFullPlan returns the ordered calls for one epoch cycle.
@@ -77,6 +89,17 @@ func BuildFullPlan(o PlanOpts) Plan {
 		pages, finalize = pages[:n-1], pages[n-1:]
 	}
 	pl.Calls = append(pl.Calls, pages...)
+	if o.Root != "" {
+		pl.Calls = append(pl.Calls, Call{
+			ContractID: o.DistributorID,
+			Action:     "submitRoot",
+			Payload: `{"channel":"` + o.Channel + `","epoch":"` + o.Epoch +
+				`","root":"` + o.Root + `","totalShares":"` + o.TotalShares +
+				`","accounts":"` + itoaPlan(o.Accounts) + `"}`,
+			RcLimit: o.RcLimit,
+			Note:    "commit the share-book root — claims verify against this",
+		})
+	}
 
 	if o.PullFunding {
 		pl.Calls = append(pl.Calls, Call{
@@ -89,4 +112,19 @@ func BuildFullPlan(o PlanOpts) Plan {
 	}
 	pl.Calls = append(pl.Calls, finalize...)
 	return pl
+}
+
+// itoaPlan avoids pulling strconv in for one conversion.
+func itoaPlan(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }

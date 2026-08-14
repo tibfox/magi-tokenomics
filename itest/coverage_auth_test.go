@@ -136,9 +136,6 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	// --- 1 of 2: recorded, but NOT applied -------------------------------
 	r := caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep1"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":false`, "one attestation must not apply the page")
-	s := caShare(t, ct, "0", "hive:alice", 1)
-	assert.Contains(t, s, `"share":"0"`, "shares must be untouched below threshold")
-	assert.Contains(t, s, `"totalShares":"0"`)
 
 	// --- the SAME authority cannot reach the threshold by itself ---------
 	r = caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep1"}, 1, false)
@@ -152,16 +149,10 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	// --- 2nd DISTINCT authority, byte-identical payload → commits --------
 	r = caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep2"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":true`, "threshold reached must apply the page")
-	s = caShare(t, ct, "0", "hive:alice", 1)
-	assert.Contains(t, s, `"share":"60"`)
-	assert.Contains(t, s, `"totalShares":"100"`, "page applied exactly once (60+40)")
 
 	// --- a 3rd attestation after commit is rejected, page not re-applied --
 	r = caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep3"}, 1, false)
 	caFailedFor(t, r, "already committed")
-	s = caShare(t, ct, "0", "hive:alice", 1)
-	assert.Contains(t, s, `"share":"60"`, "shares must not double-apply")
-	assert.Contains(t, s, `"totalShares":"100"`)
 
 	// --- divergent payloads for the same (epoch,page) do NOT commit ------
 	const page1A = `{"channel":"author","epoch":"0","page":"1","entries":"hive:carol:10"}`
@@ -170,35 +161,40 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	assert.Contains(t, r.Ret, `"applied":false`)
 	r = caCall(t, ct, caC3ID, "submitShares", page1B, []string{"hive:rep2"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":false`, "two authorities on DIFFERENT payloads must not commit")
-	s = caShare(t, ct, "0", "hive:carol", 1)
-	assert.Contains(t, s, `"share":"0"`, "no payload reached the threshold")
-	assert.Contains(t, s, `"totalShares":"100"`)
 
 	// equivocation guard: one authority may not also back the rival payload
 	r = caCall(t, ct, caC3ID, "submitShares", page1B, []string{"hive:rep1"}, 1, false)
 	caFailedFor(t, r, "already attested")
-	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 1), `"share":"0"`)
 
 	// an honest 2nd backer of payload A still commits A (tally is per payload)
 	r = caCall(t, ct, caC3ID, "submitShares", page1A, []string{"hive:rep3"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":true`)
-	s = caShare(t, ct, "0", "hive:carol", 1)
-	assert.Contains(t, s, `"share":"10"`)
-	assert.Contains(t, s, `"totalShares":"110"`)
+
+	// --- the share-book ROOT is gated by the same threshold --------------
+	// finalize now refuses an epoch with no commitment, and the commitment carries
+	// the same authority requirement the pages did.
+	caBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40, "hive:carol": 10})
+	rootP := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"110"}`,
+		caBook.tree.Root())
+	r = caCall(t, ct, caC3ID, "submitRoot", rootP, []string{"hive:rep1"}, 1, true)
+	assert.Contains(t, r.Ret, `"applied":false`, "one authority must not commit the root")
+	r = caCall(t, ct, caC3ID, "submitRoot", rootP, []string{"hive:rep2"}, 1, true)
+	assert.Contains(t, r.Ret, `"applied":true`, "threshold reached must commit the root")
 
 	// --- finalizeEpoch needs the threshold too ---------------------------
 	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
 	assert.Contains(t, r.Ret, `"finalized":false`, "a single reporter must not finalize")
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":""`, "epoch must still be open")
 	// and the payout stays shut while unfinalized
-	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
+	caFailedFor(t, caCall(t, ct, caC3ID, "claim", caBook.claimFor(t, "author", "0", "hive:alice"), []string{"hive:alice"}, 4, false), "not finalized")
 
 	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep2"}, 2, true)
 	assert.Contains(t, r.Ret, `"success":true`)
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 2), `"status":"finalized"`)
 
 	// sanity: the attested report actually pays out after the challenge window
-	caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, true)
+	caCall(t, ct, caC3ID, "claim", caBook.claimFor(t, "author", "0", "hive:alice"),
+		[]string{"hive:alice"}, 4, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,13 +234,19 @@ func TestCovAuth_C3ReporterCosigned2of3(t *testing.T) {
 	// --- 2 authorities in one tx → applies -------------------------------
 	r = caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep1", "hive:rep2"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":true`)
-	s := caShare(t, ct, "0", "hive:alice", 1)
-	assert.Contains(t, s, `"share":"60"`)
-	assert.Contains(t, s, `"totalShares":"100"`)
 
 	// --- exactly-once: a fresh cosigning quorum cannot re-apply the page --
 	r = caCall(t, ct, caC3ID, "submitShares", pageP, []string{"hive:rep2", "hive:rep3"}, 1, false)
 	caFailedFor(t, r, "page already applied")
+
+	// --- the ROOT is gated by the same threshold too ---------------------
+	coBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40})
+	coRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"100"}`,
+		coBook.tree.Root())
+	r = caCall(t, ct, caC3ID, "submitRoot", coRoot, []string{"hive:rep1"}, 1, false)
+	caFailedFor(t, r, "threshold not met")
+	r = caCall(t, ct, caC3ID, "submitRoot", coRoot, []string{"hive:rep1", "hive:rep2"}, 1, true)
+	assert.Contains(t, r.Ret, `"applied":true`)
 	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 1), `"totalShares":"100"`)
 
 	// --- finalizeEpoch is gated by the same threshold --------------------
@@ -427,7 +429,8 @@ func TestCovAuth_C3GuardianAttest2of3(t *testing.T) {
 	_ = os.RemoveAll("data/badger")
 	ct := caSetupC3Policy(t, "0", "hive:reporter", "1", "2", "hive:g1,hive:g2,hive:g3", "2")
 
-	call(t, ct, caC3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
+	gBook := publishEntries(t, ct, caC3ID, "author", "0", "hive:alice:60,hive:bob:40", "hive:reporter", 1)
+	_ = gBook
 	call(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 2, true)
 
 	// --- cancelEpoch (the veto) needs 2 of 3 ------------------------------
@@ -494,7 +497,15 @@ func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
 	caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep1"}, 1, true)
 	r := caCall(t, ct, caC3ID, "submitShares", page0, []string{"hive:rep2"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":true`)
-	assert.Contains(t, caShare(t, ct, "0", "hive:alice", 1), `"totalShares":"100"`)
+
+	// The commitment covers BOTH pages: the point of this test is that finalize
+	// votes cast at different moments still merge, and the root is what they are
+	// merging toward.
+	fBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40, "hive:carol": 10})
+	fRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"110"}`,
+		fBook.tree.Root())
+	caCall(t, ct, caC3ID, "submitRoot", fRoot, []string{"hive:rep1"}, 1, true)
+	caCall(t, ct, caC3ID, "submitRoot", fRoot, []string{"hive:rep2"}, 1, true)
 
 	// rep1 finalizes HERE — under the old code it bound totalShares=100
 	r = caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
@@ -504,7 +515,7 @@ func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
 	const page1 = `{"channel":"author","epoch":"0","page":"1","entries":"hive:carol:10"}`
 	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep1"}, 2, true)
 	caCall(t, ct, caC3ID, "submitShares", page1, []string{"hive:rep2"}, 2, true)
-	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 2), `"totalShares":"110"`)
+
 
 	// rep2 finalizes against the NEW state. Under the old binding this landed in a
 	// different payload bucket and the epoch could never be finalized by anyone.
@@ -514,7 +525,8 @@ func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
 	assert.Contains(t, caShare(t, ct, "0", "hive:carol", 3), `"status":"finalized"`)
 
 	// and the epoch pays out the FULL report, not the partial one
-	caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:carol"}, 5, true)
+	caCall(t, ct, caC3ID, "claim", fBook.claimFor(t, "author", "0", "hive:carol"),
+		[]string{"hive:carol"}, 5, true)
 }
 
 // The constant payload must not weaken anti-equivocation: one authority still gets
@@ -526,6 +538,14 @@ func TestCovAuth_C3FinalizeStillOneVotePerAuthority(t *testing.T) {
 		`{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep1"}, 1, true)
 	caCall(t, ct, caC3ID, "submitShares",
 		`{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60"}`, []string{"hive:rep2"}, 1, true)
+
+	// a committed root, so finalize fails on the VOTE rather than on a missing
+	// commitment — otherwise this test would pass for the wrong reason
+	oneBook := shareBook(map[string]int64{"hive:alice": 60})
+	oneRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"60"}`,
+		oneBook.tree.Root())
+	caCall(t, ct, caC3ID, "submitRoot", oneRoot, []string{"hive:rep1"}, 1, true)
+	caCall(t, ct, caC3ID, "submitRoot", oneRoot, []string{"hive:rep2"}, 1, true)
 
 	caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, true)
 	r := caCall(t, ct, caC3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, []string{"hive:rep1"}, 2, false)

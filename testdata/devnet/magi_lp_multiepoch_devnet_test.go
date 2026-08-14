@@ -453,14 +453,14 @@ func TestDevnetMagiLPMultiEpoch(t *testing.T) {
 		// rather than present-with-zero: a zero share would still dilute nothing but
 		// would mean the rule was applied at the wrong place.
 		for who, share := range want[ep].shares {
-			waitValue(c5ID, "share|lp|"+strconv.FormatUint(ep, 10)+"|"+who, share,
+			waitValue(c5ID, "claimed|lp|"+strconv.FormatUint(ep, 10)+"|"+who, share,
 				fmt.Sprintf("epoch %d share for %s", ep, who))
 		}
 		for _, who := range []string{exiter, flash} {
 			if _, ok := want[ep].shares[who]; ok {
 				continue
 			}
-			if v := stateOf(c5ID, "share|lp|"+strconv.FormatUint(ep, 10)+"|"+who); v != "" && v != "0" {
+			if v := stateOf(c5ID, "claimed|lp|"+strconv.FormatUint(ep, 10)+"|"+who); v != "" && v != "0" {
 				t.Fatalf("epoch %d: %s must earn nothing, got %q", ep, who, v)
 			}
 		}

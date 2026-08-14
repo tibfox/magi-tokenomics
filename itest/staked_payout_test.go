@@ -76,15 +76,16 @@ func spSetup(t *testing.T, bps string) *test_utils.ContractTest {
 	return &ct
 }
 
-// spRunEpoch emits, funds, reports one earner with the whole share book, finalizes.
-func spRunEpoch(t *testing.T, ct *test_utils.ContractTest, earner string) {
+// spRunEpoch emits, funds, publishes a share book for one earner, finalizes, and
+// returns the book so the caller can build that earner's proof.
+func spRunEpoch(t *testing.T, ct *test_utils.ContractTest, earner string) *book {
 	t.Helper()
 	call(t, ct, c2ID, "distributeEpoch", ``, "hive:keeper", 1, true)
 	call(t, ct, spDist, "pullFunding", `{"channel":"content","epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, ct, spDist, "submitShares", fmt.Sprintf(
-		`{"channel":"content","epoch":"0","page":"0","entries":"%s:100"}`, earner),
-		"hive:creporter", 1, true)
+	b := publishEntries(t, ct, spDist, "content", "0",
+		fmt.Sprintf("%s:100", earner), "hive:creporter", 1)
 	call(t, ct, spDist, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "hive:creporter", 1, true)
+	return b
 }
 
 // THE CORE CASE. Half the payout arrives as stake, half as liquid tokens, and the
@@ -92,9 +93,9 @@ func spRunEpoch(t *testing.T, ct *test_utils.ContractTest, earner string) {
 // nothing is lost between the two contracts.
 func TestStakedPayout_SplitsBetweenLiquidAndStake(t *testing.T) {
 	ct := spSetup(t, "5000") // 50%
-	spRunEpoch(t, ct, "hive:earner")
+	bk := spRunEpoch(t, ct, "hive:earner")
 
-	r := call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:earner", 3, true)
+	r := call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"), "hive:earner", 3, true)
 	total := c17I64(t, r.Ret, "claimed")
 	liquid := c17I64(t, r.Ret, "liquid")
 	staked := c17I64(t, r.Ret, "staked")
@@ -118,9 +119,9 @@ func TestStakedPayout_SplitsBetweenLiquidAndStake(t *testing.T) {
 // behaviour changes for a pool that never asked for this.
 func TestStakedPayout_UnconfiguredPaysFullyLiquid(t *testing.T) {
 	ct := spSetup(t, "") // no stakeContract at all
-	spRunEpoch(t, ct, "hive:earner")
+	bk := spRunEpoch(t, ct, "hive:earner")
 
-	r := call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:earner", 3, true)
+	r := call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"), "hive:earner", 3, true)
 	assert.EqualValues(t, c17I64(t, r.Ret, "claimed"), c17I64(t, r.Ret, "liquid"),
 		"with no stake contract the whole payout is liquid")
 	assert.EqualValues(t, 0, c17I64(t, r.Ret, "staked"))
@@ -130,9 +131,9 @@ func TestStakedPayout_UnconfiguredPaysFullyLiquid(t *testing.T) {
 // unit goes to stake, none is lost to the liquid path.
 func TestStakedPayout_FullyStakedLeavesNothingLiquid(t *testing.T) {
 	ct := spSetup(t, "10000")
-	spRunEpoch(t, ct, "hive:earner")
+	bk := spRunEpoch(t, ct, "hive:earner")
 
-	r := call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:earner", 3, true)
+	r := call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"), "hive:earner", 3, true)
 	total := c17I64(t, r.Ret, "claimed")
 	assert.EqualValues(t, 0, c17I64(t, r.Ret, "liquid"))
 	assert.EqualValues(t, total, c17I64(t, r.Ret, "staked"))
@@ -146,8 +147,8 @@ func TestStakedPayout_FullyStakedLeavesNothingLiquid(t *testing.T) {
 // liquid tokens wearing a different name, and the setting would buy nothing.
 func TestStakedPayout_StakedHalfIsSubjectToCooldown(t *testing.T) {
 	ct := spSetup(t, "10000")
-	spRunEpoch(t, ct, "hive:earner")
-	call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`, "hive:earner", 3, true)
+	bk := spRunEpoch(t, ct, "hive:earner")
+	call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"), "hive:earner", 3, true)
 
 	// unstaking starts a cooldown rather than paying out immediately
 	call(t, ct, spC1, "unstake", `{"amount":"100"}`, "hive:earner", 4, true)
@@ -189,14 +190,14 @@ func TestStakedPayout_OnlyTheAllowlistedContractMayCreditStake(t *testing.T) {
 func TestRC_StakedClaimCost(t *testing.T) {
 	liquid := func() int64 {
 		ct := spSetup(t, "")
-		spRunEpoch(t, ct, "hive:earner")
-		return call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`,
+		bk := spRunEpoch(t, ct, "hive:earner")
+		return call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"),
 			"hive:earner", 3, true).RcUsed
 	}()
 	staked := func() int64 {
 		ct := spSetup(t, "5000")
-		spRunEpoch(t, ct, "hive:earner")
-		return call(t, ct, spDist, "claim", `{"channel":"content","epoch":"0"}`,
+		bk := spRunEpoch(t, ct, "hive:earner")
+		return call(t, ct, spDist, "claim", bk.claimFor(t, "content", "0", "hive:earner"),
 			"hive:earner", 3, true).RcUsed
 	}()
 	t.Logf("claim RC: liquid=%d staked=%d (+%d)", liquid, staked, staked-liquid)

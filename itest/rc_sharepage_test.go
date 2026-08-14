@@ -30,5 +30,8 @@ func TestRC_RealisticSharePageCost(t *testing.T) {
 			`{"channel":"content","epoch":"0","page":"%d","entries":"%s"}`, n, b.String()),
 			"hive:creporter", 1, true)
 		t.Logf("%2d entries (%4d payload bytes): %6d RC", n, b.Len(), r.RcUsed)
+		if n == 60 {
+			t.Logf("  (was 15,309 RC when each account was written to state)")
+		}
 	}
 }
