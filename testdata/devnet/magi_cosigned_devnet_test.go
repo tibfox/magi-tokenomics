@@ -153,10 +153,15 @@ func TestDevnetMagiCosigned(t *testing.T) {
 	call(tokenID, "approve", fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2")
 	call(c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
-			`"blocksPerYear":"1000","dustBucket":"c","timelock":"5",`+
+			// The bucket name must match the one addChannel asks for below: the
+			// distributor cross-calls the funder's bucketTarget and aborts when the
+			// funder has no bucket by that name. It was "c" here against a channel
+			// asking for "author", so addChannel aborted and ch_bucket|author was
+			// never written — the suite then waited on it until it timed out.
+			`"blocksPerYear":"1000","dustBucket":"author","timelock":"5",`+
 			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
 			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
-			`"buckets":"c:contract:%s:10000"}`,
+			`"buckets":"author:contract:%s:10000"}`,
 		tokenID, epochLen, guardian, treasury, c3ID), "C2 init")
 	waitKey(c2ID, "cfg_genesis", "genesis")
 

@@ -1323,3 +1323,56 @@ func TestDevnetDrift_TotalSharesIsOnlyReadWhereARootIsSubmitted(t *testing.T) {
 	}
 	t.Logf("checked %d suites that read totalShares|", checked)
 }
+
+// Every channel's bucket must be one the funder actually declares.
+//
+// addChannel cross-calls the funder's bucketTarget and aborts when the funder has
+// no bucket by that name. The abort is invisible from the outside — the channel
+// key is simply never written, and the suite waits on it until it times out with
+// no indication of why. magi_cosigned declared its C2 bucket as "c" and then asked
+// for a channel funded by "author"; it had been failing that way since the
+// per-channel bucket refactor, and cost a devnet run to find.
+func TestDevnetDrift_ChannelBucketsAreDeclaredByTheFunder(t *testing.T) {
+	reBuckets := regexp.MustCompile(`"buckets":"([^"]*)"`)
+	reChanBucket := regexp.MustCompile(`"channel":"(\w+)","bucket":"(\w+)"`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		declared := map[string]bool{}
+		for _, m := range reBuckets.FindAllStringSubmatch(src, -1) {
+			// "name:target:bps,name:target:bps" — the name is up to the first colon
+			for _, entry := range strings.Split(m[1], ",") {
+				if cut := strings.Index(entry, ":"); cut > 0 {
+					declared[entry[:cut]] = true
+				}
+			}
+		}
+		if len(declared) == 0 {
+			continue // this suite does not stand up a funder of its own
+		}
+		for _, m := range reChanBucket.FindAllStringSubmatch(src, -1) {
+			checked++
+			ch, bucket := m[1], m[2]
+			// %s-substituted names cannot be resolved statically; skip rather than
+			// guess, so the guard never invents a failure it cannot justify
+			if strings.Contains(bucket, "%") {
+				continue
+			}
+			if !declared[bucket] {
+				keys := make([]string, 0, len(declared))
+				for k := range declared {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				t.Errorf("%s: channel %q asks for bucket %q, but the funder declares %v\n"+
+					"  addChannel aborts on this, the channel key is never written, and the "+
+					"suite waits on it until it times out with no reason given",
+					name, ch, bucket, keys)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no channel/bucket pairs in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d channel/bucket pairs", checked)
+}
