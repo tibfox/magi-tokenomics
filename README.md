@@ -441,10 +441,10 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **119 contract tests, 120
-reporter tests, and ten devnet suites** — the full-system run, the adversarial
-suites, multi-epoch operation, batched refills, LP rewards, and the guardian token-op
-passthrough.
+All three contracts + reporter are complete, audited, and green: **149 contract tests, 158
+reporter and indexer tests, and twelve devnet suites** — the full-system run, the
+adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
+token-op passthrough, full-scale distribution, and the in-place upgrade path.
 
 Every state transition is emitted as a contract log in the format
 `magi-mongo-indexer` ingests, so a deployment is queryable over GraphQL without
