@@ -1376,3 +1376,69 @@ func TestDevnetDrift_ChannelBucketsAreDeclaredByTheFunder(t *testing.T) {
 	}
 	t.Logf("checked %d channel/bucket pairs", checked)
 }
+
+// Bucket-keyed state uses the bucket's NAME, never its target.
+//
+// C2 declares buckets as "name:target:bps", and keys owed| and bkt| by the name.
+// A suite that builds owed|<target>|<ep> reads "" forever: the emission it is
+// waiting for was recorded all along, under a key it never looks at. magi_refill
+// did exactly that — "content:hive:<treasury>:10000" declared, owed|hive:<treasury>
+// read — and it cost a devnet run to see, because a key that is merely absent
+// produces a timeout rather than an error.
+//
+// EveryReferencedStateKeyExists cannot catch this: the PREFIX owed| does exist in
+// the contract. It is the component after it that is wrong.
+func TestDevnetDrift_BucketKeyedStateUsesTheBucketName(t *testing.T) {
+	reBuckets := regexp.MustCompile(`"buckets":"([^"]*)"`)
+	reBucketKey := regexp.MustCompile(`"(owed|bkt)\|([^"|%]*)`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		names, targets := map[string]bool{}, map[string]bool{}
+		for _, m := range reBuckets.FindAllStringSubmatch(src, -1) {
+			for _, entry := range strings.Split(m[1], ",") {
+				parts := strings.SplitN(entry, ":", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				names[parts[0]] = true
+				// the target is everything up to the trailing :bps
+				if cut := strings.LastIndex(parts[1], ":"); cut > 0 {
+					targets[parts[1][:cut]] = true
+				}
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		for _, m := range reBucketKey.FindAllStringSubmatch(src, -1) {
+			prefix, comp := m[1], strings.TrimSuffix(m[2], "|")
+			if comp == "" {
+				continue // built by substitution; not resolvable here
+			}
+			checked++
+			if names[comp] {
+				continue
+			}
+			// naming the TARGET is the specific mistake worth reporting loudly
+			for tgt := range targets {
+				if comp == tgt || strings.HasPrefix(tgt, comp) {
+					keys := make([]string, 0, len(names))
+					for k := range names {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					t.Errorf("%s reads %s|%s — that is what the bucket PAYS, not its name. "+
+						"The contract keys this by name (%v), so the read returns \"\" forever "+
+						"and the suite times out waiting for state that was written all along",
+						name, prefix, comp, keys)
+					break
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no bucket-keyed reads in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d bucket-keyed reads", checked)
+}
