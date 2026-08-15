@@ -270,16 +270,23 @@ directory's README for how to run them. They are `package devnet` (they use
 go-vsc-node's devnet harness internals), so they must be copied into a go-vsc-node
 checkout to run; `testdata/` keeps them versioned here without breaking the build.
 
-| test | covers | ~time |
+| test | covers | measured |
 |---|---|---|
 | `magi_tokenomics_devnet_test.go` | C0+C2+C3 + 13 outsider attacks | 10 min |
-| `magi_stake_lp_airdrop_devnet_test.go` | staking+yield+airdrop and an LP channel + outsider attacks | 18 min |
-| `magi_reporter_devnet_test.go` | the real reporter binary driving C3 | 12 min |
-| `magi_full_devnet_test.go` | **the token + all three contracts + reporter**, then 14 staked-holder + 32 outsider attacks | 30 min |
-| `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious | 22 min |
-| `magi_multiepoch_devnet_test.go` | **operation over time**: catch-up, flat emission, stake history, unstake maturity | 30 min |
+| `magi_cosigned_devnet_test.go` | **Cosigned 2-of-2**: one authority applies nothing, two in ONE tx apply the page | 12 min |
+| `magi_realbroadcast_devnet_test.go` | the reporter **signing and broadcasting its own** epoch, root included | 12 min |
+| `magi_reporter_devnet_test.go` | the real reporter binary driving C3, claims proved from `reporter proof` | 12 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained, refilled, backlog paid in full | 17 min |
-| `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode | 24 min |
+| `magi_stake_lp_airdrop_devnet_test.go` | staking+yield+airdrop and an LP channel + outsider attacks | 17 min |
+| `magi_scale_devnet_test.go` | **the Hive-Engine parity config at size**: 200 posts, 10k votes, 502 earners, 9 pages | 17 min |
+| `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode, forfeiture proved from the book | 20 min |
+| `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter turning malicious; fraud contained, attest quorum held | 23 min |
+| `magi_multiepoch_devnet_test.go` | **operation over time**: catch-up, flat emission, stake history, unstake maturity | 34 min |
+| `magi_full_devnet_test.go` | **the token + all three contracts + reporter**, then 14 staked-holder + 32 outsider attacks | 39 min |
+
+All eleven pass against the merkle share book. Times are measured, not estimated —
+the whole set is roughly 3.5 hours and they cannot run concurrently (each stands up
+its own five-node chain and they contend for disk).
 
 They need `reporter/bin/reporter` built first, and take `MAGI_FRAMEWORK_DIR` /
 `MAGI_TOKEN_WASM` to locate the artifacts. Each run builds a ~766MB docker image that
@@ -448,16 +455,22 @@ succeeded, which is the only loss the chain cannot otherwise show you.
 **Not done, stated plainly:**
 
 - **No real deployment yet.** Everything here is devnet-verified only.
-- **Scale is verified in-process, not on devnet.** A 500-earner epoch across 9 pages
-  is covered by `TestCovDist_FiveHundredEarnersAcrossNinePages`: totalShares
-  accumulates exactly, all 500 claims pay, and 99,748 of 100,000 is distributed with
-  the remainder under one unit per earner — truncation dust, not a leak. What is still
-  untested is that shape over a real multi-node chain, where per-transaction RC and
-  block inclusion apply; `docs/rc-costs.md` has the measured per-entry curve.
+- ~~**Scale is verified in-process, not on devnet.**~~ **Now verified on devnet.**
+  `TestDevnetMagiScale` runs the Hive-Engine parity configuration at full size over a
+  real five-node chain: 200 posts, 10,000 votes, **502 earners across 9 pages**, the
+  root committed and every claim proved against it. The chain's `totalShares` equals
+  the reporter's exactly (208,552,153,997,506,000), and the staked half of each payout
+  lands as real stake through `stakeFor` while the other half goes out liquid. The
+  in-process `TestCovDist_FiveHundredEarnersAcrossNinePages` still covers the
+  distribution arithmetic — 99,748 of 100,000 distributed, the remainder under one unit
+  per earner, truncation dust rather than a leak. `docs/rc-costs.md` has the measured
+  per-entry curve.
 - **`vsc.update_contract` (the in-place upgrade path) is untested.** C2 aborts loudly
   if upgraded from a pre-allowance deployment rather than silently starving, but that
   abort has itself never been exercised against a real code swap.
-- **Cosigned mode 1 is proven at the contract layer, not the key layer.** The devnet's
+- **Cosigned mode 1 is proven at the contract layer, not the key layer.** Verified on
+  devnet by `TestDevnetMagiCosigned` — one authority applies nothing, two in a single
+  transaction apply the page — but the devnet's
   accounts share an active authority, so ONE signature satisfies a two-account
   `required_auths` list. That proves the CONTRACT's threshold logic — which is what
   mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
