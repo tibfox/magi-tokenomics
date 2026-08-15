@@ -452,6 +452,58 @@ func CancelEpoch(payload *string) *string {
 	return ok()
 }
 
+// releaseStaleAttest — free the working state of an attestation round that stalled.
+//
+// {"role":"rep"|"grd","channel":<for rep>,"action":<the action key>}
+//
+// Attest mode stores each attested payload — up to 4,096 bytes, a whole share page
+// for submitShares — until the round commits. A coalition that never reaches its
+// threshold leaves those blobs with nothing able to remove them: two of three
+// attest, the third never arrives, the epoch is re-run under a different page
+// number, and the abandoned round's payloads sit in state for the life of the
+// deployment.
+//
+// PERMISSIONLESS, and deliberately so. There is nothing to gain by calling it: a
+// committed action is refused, and a round in progress is protected until
+// staleAttestBlocks have passed. Restricting it to the authorities would be worse,
+// because an authority losing a vote could then clear the tally and re-run it.
+//
+//go:wasmexport releaseStaleAttest
+func ReleaseStaleAttest(payload *string) *string {
+	assertInit()
+	action := f(payload, "action")
+	if action == "" {
+		sdk.Abort("action required — the action key whose round should be released")
+	}
+	var cfg auth.Config
+	role := f(payload, "role")
+	switch role {
+	case "rep":
+		ch := mustChannel(payload)
+		cfg = reporterCfg(ch)
+	case "grd":
+		cfg = guardianCfg()
+	default:
+		sdk.Abort("role must be \"rep\" or \"grd\"")
+	}
+	if cfg.Mode != auth.ModeAttest {
+		sdk.Abort("that role is not in attest mode — no round state exists to release")
+	}
+	n := auth.SweepStale(cfg, role, action, staleAttestBlocks)
+	events.New("attest_released").
+		Str("role", role).
+		Str("action", action).
+		Int("payloads", n).
+		Emit()
+	return str(`{"released":"` + strconv.Itoa(n) + `"}`)
+}
+
+// staleAttestBlocks is how long an unresolved round is protected before anyone may
+// release it. Long enough that no honest coalition is ever cut short — an epoch's
+// pages are minutes apart, not days — and short enough that abandoned state does
+// not outlive the epoch that produced it by much.
+const staleAttestBlocks = 28800 // ~24h at 3s blocks
+
 // sweepUnallocated — guardian moves the rolled-forward (cancelled-epoch) pool to
 // a target. {"to","nonce"} — nonce (numeric) makes it repeatable in Attest mode.
 //

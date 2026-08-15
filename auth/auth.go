@@ -142,6 +142,30 @@ func attest(cfg Config, statePrefix, actionKey, payload, caller string) bool {
 		}
 	} else {
 		sdk.StateSetObject(canonKey, payload)
+		// Remember this hash so the action's working state can be cleaned up in
+		// full. Authorities may attest DIFFERENT payloads — that is exactly what a
+		// rogue reporter does — and each distinct payload gets its own canon blob
+		// and tally. Without a record of which hashes exist, only the winning one
+		// can ever be found again, and the losers stay in state forever.
+		hashesKey := statePrefix + "|ahashes|" + actionKey
+		seenHashes := ""
+		if v := sdk.StateGetObject(hashesKey); v != nil {
+			seenHashes = *v
+		}
+		if !inList(seenHashes, payloadHash) {
+			if seenHashes == "" {
+				seenHashes = payloadHash
+			} else {
+				seenHashes = seenHashes + "," + payloadHash
+			}
+			sdk.StateSetObject(hashesKey, seenHashes)
+		}
+	}
+	// Stamp the round's start so a coalition that never reaches threshold can be
+	// swept later. Written once, by the first attestation.
+	startKey := statePrefix + "|astart|" + actionKey
+	if !present(startKey) {
+		sdk.StateSetObject(startKey, strconv.FormatUint(sdk.GetEnv().BlockHeight, 10))
 	}
 	// One vote per authority PER ACTION (not per payload) — otherwise an
 	// equivocator could back every candidate payload and turn M-of-N into a
@@ -164,9 +188,94 @@ func attest(cfg Config, statePrefix, actionKey, payload, caller string) bool {
 	if tally >= cfg.Threshold {
 		sdk.StateSetObject(doneKey, "1")
 		// GC the working state — the commit flag is the lasting record (MED-2).
-		sdk.StateDeleteObject(canonKey)
-		sdk.StateDeleteObject(tallyKey)
+		//
+		// EVERY hash, not just the winning one. Deleting only canonKey left a
+		// losing payload's blob — up to 4,096 bytes, a whole share page — in state
+		// permanently whenever authorities disagreed. That is not a rare case: it
+		// is precisely what happens when a rogue reporter attests a fraudulent page
+		// and the honest majority commits a different one.
+		clearRound(cfg, statePrefix, actionKey)
 		return true
+	}
+	return false
+}
+
+// clearRound deletes all working state for one action: every attested payload and
+// its tally, every authority's vote, the hash list and the start stamp. It never
+// touches the done flag, which is the lasting record that the action committed.
+func clearRound(cfg Config, statePrefix, actionKey string) {
+	hashesKey := statePrefix + "|ahashes|" + actionKey
+	if v := sdk.StateGetObject(hashesKey); v != nil && *v != "" {
+		for _, h := range splitList(*v) {
+			sdk.StateDeleteObject(statePrefix + "|acanon|" + actionKey + "|" + h)
+			sdk.StateDeleteObject(statePrefix + "|atally|" + actionKey + "|" + h)
+		}
+	}
+	for _, a := range cfg.Authorities {
+		sdk.StateDeleteObject(statePrefix + "|aseen|" + actionKey + "|" + a)
+	}
+	sdk.StateDeleteObject(hashesKey)
+	sdk.StateDeleteObject(statePrefix + "|astart|" + actionKey)
+}
+
+// SweepStale releases the working state of an attestation round that never reached
+// its threshold.
+//
+// A stalled coalition — two of three attest, the third never arrives, the epoch is
+// re-run under a different page number — otherwise strands its payloads in state
+// with nothing able to remove them. Anyone may sweep, because there is nothing to
+// gain by it: a committed action is refused outright, and an in-progress round is
+// protected until minAge blocks have passed, which is set far longer than any
+// honest round takes. Making it permissionless avoids the alternative, where an
+// authority losing a vote could clear the tally and start again.
+//
+// Returns the number of distinct payloads released.
+func SweepStale(cfg Config, statePrefix, actionKey string, minAge uint64) int {
+	if present(statePrefix + "|adone|" + actionKey) {
+		sdk.Abort("auth: action already committed — its working state is already released")
+	}
+	startKey := statePrefix + "|astart|" + actionKey
+	v := sdk.StateGetObject(startKey)
+	if v == nil || *v == "" {
+		sdk.Abort("auth: no attestation round in progress for that action")
+	}
+	start, err := strconv.ParseUint(*v, 10, 64)
+	if err != nil {
+		sdk.Abort("auth: corrupt attestation start height")
+	}
+	h := sdk.GetEnv().BlockHeight
+	if h < start+minAge {
+		sdk.Abort("auth: round is not stale yet — a round in progress must not be clearable " +
+			"by anyone who dislikes how it is going")
+	}
+	n := 0
+	if hv := sdk.StateGetObject(statePrefix + "|ahashes|" + actionKey); hv != nil && *hv != "" {
+		n = len(splitList(*hv))
+	}
+	clearRound(cfg, statePrefix, actionKey)
+	return n
+}
+
+// splitList splits a comma-separated list, skipping empties.
+func splitList(s string) []string {
+	out := []string{}
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				out = append(out, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return out
+}
+
+func inList(list, x string) bool {
+	for _, v := range splitList(list) {
+		if v == x {
+			return true
+		}
 	}
 	return false
 }

@@ -474,12 +474,17 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   accounts share an active authority, so ONE signature satisfies a two-account
   `required_auths` list. That proves the CONTRACT's threshold logic — which is what
   mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
-- **Attest mode keeps the payload of a vote that never reaches its threshold.**
-  `auth.attest` stores the attested bytes under `<prefix>|acanon|<action>|<hash>` — up
-  to 4,096 bytes, a whole share page for `submitShares` — and deletes it only on the
-  transaction that commits. A coalition that stalls (two of three reporters attest, the
-  third never arrives, the epoch is re-run under a different page number) leaves that
-  blob in state permanently.
+- ~~**Attest mode keeps the payload of a vote that never reaches its threshold.**~~
+  **Fixed.** There were two leaks, not one. A committing round deleted only the
+  WINNING payload, so any rival page stayed forever — which is what happens every
+  time a rogue reporter attests a fraudulent page and the honest majority commits a
+  different one. And a round that never committed had nothing able to remove it at
+  all. `auth` now tracks the hashes an action has seen and releases them together on
+  commit, and `c3.releaseStaleAttest` frees an abandoned round after
+  `staleAttestBlocks` (~24h). That call is permissionless on purpose: a committed
+  action is refused and a live round is protected, so there is nothing to gain by
+  it — whereas restricting it to the authorities would let one losing a vote clear
+  the tally and re-run it.
 
   It is storage growth, not a vulnerability: bounded by authorities × distinct actions,
   paid for in the attester's own RC, and it blocks nothing. Note that transaction
