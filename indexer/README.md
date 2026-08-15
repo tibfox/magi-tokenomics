@@ -117,3 +117,22 @@ and if they do not, the chain's root decides.
 Entry rules (which addresses count, what gets skipped) come from
 `reporter/sharecore.ParseEntries` — the single mirror of the contract's
 `applyEntries`, pinned to it by `TestDevnetDrift_LedgerDomainsMatchTheContract`.
+
+### What is and is not verified
+
+`TestProofsvc_ServesOverHTTPAgainstHasuraProtocol` runs the real service over real
+HTTP against a server speaking Hasura's protocol, filled with rows taken from logs
+the contract actually emitted — then pays a claim out with the `claim_payload` that
+came back over the wire. It also checks that a rejected credential surfaces as an
+error: Hasura answers a bad secret with **200 and an `errors` array**, and an
+unchecked errors array becomes an empty result set, which reads exactly like "the
+indexer is behind".
+
+`TestIndexerMappingPathsResolveAgainstRealEvents` resolves every `$.attributes.*`
+path in the mappings above against real emitted events. A path naming a field the
+contract does not emit yields a NULL column, and downstream a NULL is
+indistinguishable from "not reported yet".
+
+**Not verified here:** magi-mongo-indexer itself is not run. These prove the mapping
+describes what the chain emits, and that the service works against the protocol —
+not that mongo ingests them. That step needs a deployment.

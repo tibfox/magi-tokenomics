@@ -465,15 +465,24 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   distribution arithmetic — 99,748 of 100,000 distributed, the remainder under one unit
   per earner, truncation dust rather than a leak. `docs/rc-costs.md` has the measured
   per-entry curve.
-- **`vsc.update_contract` (the in-place upgrade path) is untested.** C2 aborts loudly
-  if upgraded from a pre-allowance deployment rather than silently starving, but that
-  abort has itself never been exercised against a real code swap.
+- ~~**`vsc.update_contract` (the in-place upgrade path) is untested.**~~ **Now
+  exercised.** `TestDevnetMagiUpgrade` deploys a stand-in that initialises the way a
+  pre-allowance C2 did — a live schedule, no `cfg_source` — swaps the current C2 over
+  it with a real `vsc.update_contract`, and asserts the upgraded instance records NO
+  epoch. That is the observable form of the abort: had it pulled from the empty
+  address and reported success, `cfg_lastEpoch` would be set. The fixture
+  (`testdata/fixtures/c2-preallowance`) reproduces the state shape only; it is not a
+  copy of the old contract, and the code installed over it is the real one.
 - **Cosigned mode 1 is proven at the contract layer, not the key layer.** Verified on
   devnet by `TestDevnetMagiCosigned` — one authority applies nothing, two in a single
   transaction apply the page — but the devnet's
   accounts share an active authority, so ONE signature satisfies a two-account
   `required_auths` list. That proves the CONTRACT's threshold logic — which is what
-  mode 1 implements — but not Hive's aggregation of genuinely distinct keys.
+  mode 1 implements — but not Hive's aggregation of genuinely distinct keys. Deferred to testnet
+  deliberately: hivego's transaction type and broadcast are unexported and the
+  devnet harness signs with a single WIF, so a two-key transaction cannot be
+  assembled without patching an external repo. Testnet has real accounts with
+  real distinct keys, which is where this belongs anyway.
 - ~~**Attest mode keeps the payload of a vote that never reaches its threshold.**~~
   **Fixed.** There were two leaks, not one. A committing round deleted only the
   WINNING payload, so any rival page stayed forever — which is what happens every
