@@ -63,8 +63,8 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 119 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 120 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 151 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 158 reporter + indexer tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -441,7 +441,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **149 contract tests, 158
+All three contracts + reporter are complete, audited, and green: **151 contract tests, 158
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.
@@ -506,7 +506,19 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   not collision-resistant, so the code pins the first attestation's exact bytes and
   rejects any mismatch. A collision-resistant digest would make the byte-compare
   unnecessary and take the record from 4,096 bytes to 32 — which is the real fix, and
-  it means pulling a proper hash into a tinygo wasm contract. Not judged worth it yet.
+  it means pulling a proper hash into a tinygo wasm contract.
+
+  **It is also an RC argument, and that turns out to be the stronger one.** The host
+  prices contract state by the byte (`WRITE_IO_GAS_RC_COST = 19`), so holding the
+  payload is the dominant cost of attest mode, not the voting: a 60-entry page costs
+  **30,846 RC to attest against ~1,871 RC in single mode**, a 16× penalty, and 3× the
+  10,000 free tier — so an unfunded attester cannot hold a full page at all. A 32-byte
+  record would cut that to ~1,700. The saving is smaller in steady state (~23%),
+  because the release added above returns the space below the contract's high-water
+  mark, where bytes are charged 19× less; see
+  [`docs/rc-costs.md`](docs/rc-costs.md#attest-mode--the-payload-record-dominates-and-it-is-priced-by-the-byte)
+  for the measured curve. Still not done, but the reason to do it is now measured
+  rather than assumed.
 - Per-tenant config values and the governance DAO are out of scope here.
 
 ### Two suites worth knowing about

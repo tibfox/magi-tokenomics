@@ -263,6 +263,65 @@ the earlier ones no time to thaw.
 
 ---
 
+### Attest mode — the payload record dominates, and it is priced by the byte
+
+Attest mode (`reporter_mode = 2`) is far more expensive than single or cosigned, and
+the reason is not the voting: it is that `auth` pins the attested payload **byte for
+byte** until the round commits. The host prices contract state per byte —
+`WRITE_IO_GAS_RC_COST = 19`, `READ_IO_GAS_RC_COST = 1`
+(`modules/common/params/params.go`) — so holding a page is the single largest cost in
+the mode.
+
+Measured by `TestRC_AttestPayloadCostScalesWithBytes`, at the entry shape a live pool
+emits:
+
+| entries | payload | hold (1st attest) | apply + release (2nd) |
+|---:|---:|---:|---:|
+| 1 | 81 B | 1,699 | 1,358 |
+| 10 | 315 B | 6,145 | 2,044 |
+| 30 | 835 B | 16,025 | 3,607 |
+| 60 | 1,615 B | **30,846** | 5,950 |
+
+The marginal cost is **19.0 RC per payload byte**, exactly the host's write rate — the
+test asserts this stays true, so if the pricing model ever changes, the suite says so
+rather than this page going quietly stale.
+
+**Two consequences worth planning around:**
+
+**A full page costs ~30,800 RC to attest, 3× the free tier.** The same page in single
+mode costs ~1,871 RC. That is a **16× penalty for the mode**, paid by whichever
+authority attests first. An attester running on the free tier alone cannot hold a
+60-entry page. Either fund the attesters or use smaller pages — 10 entries costs 6,145
+and does fit.
+
+**But it is a high-water-mark cost, not a per-round one.** The host charges the write
+rate only for bytes that push a contract above its all-time peak size
+(`ContractSession.IncSize`: `newWriteGas = max(0, CurrentSize-MaxSize)`); bytes reusing
+space under the peak are charged at the read rate, 19× less. Since the leak fix
+releases the record on commit, later rounds rewrite into freed space. Measured by
+`TestRC_AttestHighWaterMarkMakesLaterRoundsCheap` over four consecutive pages:
+
+    page 1   30,823 RC     <- sets the high-water mark
+    page 2    6,870 RC
+    page 3    6,888 RC
+    page 4    6,888 RC     <- flat, so the space IS being reclaimed
+
+**What this means for replacing `auth.Hash`.** The 4,096-byte record exists only
+because `auth.Hash` is a 128-bit double-FNV that is not collision-resistant, so the
+code pins the exact bytes and rejects any mismatch. A real digest would take the record
+to 32 bytes. On RC that is worth:
+
+- **~29,100 RC on the first attest** (30,846 → ~1,700), an 18× cut, and it takes the
+  mode back inside the free tier
+- **~1,580 RC per round after that** (6,888 → ~5,300), about 23%
+
+So the RC case is real but it is mostly a case about the *first* attest and about page
+size, not about steady-state throughput. It is still the strongest argument for the
+change, since it is what makes attest mode usable by an unfunded attester at full page
+size. The cost is getting a collision-resistant digest into a tinygo wasm contract.
+
+---
+
 ## Practical guidance
 
 | role | typical per-epoch cost | capacity to hold |
