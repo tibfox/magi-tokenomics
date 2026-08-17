@@ -137,6 +137,15 @@ func PullFunding(payload *string) *string {
 	setBig(k, new(big.Int).Add(getBig(k), got))
 	if !present("fundedAt|" + ch + "|" + ep) {
 		set("fundedAt|"+ch+"|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
+		// Pin the reporter policy in force to THIS epoch, once, at the moment it is
+		// funded. Snapshotting rather than reading ch_policy live is what lets
+		// governance change policy without rewriting an epoch already being reported:
+		// an epoch is forever scored, verified and re-derivable against the digest it
+		// was funded under. Written under the same not-present guard as fundedAt so a
+		// second pullFunding cannot move it.
+		if p := getStr("ch_policy|" + ch); p != "" {
+			set("policy|"+ch+"|"+ep, p)
+		}
 	}
 	events.New("pull").
 		Str("channel", ch).
@@ -211,6 +220,21 @@ func SubmitRoot(payload *string) *string {
 	ts := parseBig(f(payload, "totalShares"))
 	if ts.Sign() <= 0 {
 		sdk.Abort("totalShares must be positive")
+	}
+	// Defence in depth on the policy digest. The reporter checks its own config
+	// against policy|<ch>|<ep> before it computes anything, and that check is what
+	// actually prevents the divergence — it refuses before spending any RC and names
+	// the offending field. This catches the reporter that skipped the check, and it
+	// does so at the root, which is the single point that authorises money: pages are
+	// only logged now, so a wrong root is the thing that could pay the wrong people.
+	//
+	// Enforced only when the epoch HAS a pinned policy, which keeps single-reporter
+	// channels that never declared one working exactly as before.
+	if want := getStr("policy|" + ch + "|" + ep); want != "" {
+		if f(payload, "policy") != want {
+			sdk.Abort("policy digest does not match the one pinned for this epoch — this " +
+				"reporter is scoring different rules than the epoch was funded under")
+		}
 	}
 	// Same authority and the same M-of-N semantics as a share page: the root IS the
 	// report now, so it needs at least the protection the pages had. The attested
@@ -1110,6 +1134,28 @@ func AddChannel(payload *string) *string {
 		}
 		set("ch_role|"+ch, role)
 	}
+	// The reporter policy digest — what the reporters must agree they are scoring.
+	//
+	// sharecore guarantees the same input yields the same bytes, but nothing forced
+	// two reporters to feed the same input: tags, the dust cutoff, the reward curves
+	// and the vote-mana budget were local config compared against nothing. Two HONEST
+	// reporters differing in one of them produce different books forever, and in
+	// Attest mode that is a DEADLOCK rather than a wrong payout — the tally is per
+	// payload hash and each authority gets one vote per action, so both burn their
+	// vote in a different bucket and the page can never reach threshold.
+	//
+	// REQUIRED for Attest mode, because that is the mode with something to deadlock.
+	// Optional elsewhere: a single reporter has nobody to disagree with, and cosigned
+	// reporters sign one transaction so a disagreement never reaches the chain.
+	if p := f(payload, "policy"); p != "" {
+		if _, ok := hexToBytes(p); !ok {
+			sdk.Abort("policy must be 64 hex characters")
+		}
+		set("ch_policy|"+ch, p)
+	} else if f(payload, "reporterMode") == "2" {
+		sdk.Abort("policy required for attest mode — without it two honest reporters can " +
+			"deadlock an epoch and nothing on chain can tell them apart")
+	}
 	set("ch_window|"+ch, w)
 	set("ch_forbucket|"+bucket, ch)
 	set("ch_bucket|"+ch, bucket) // written LAST: it is what mustChannel tests
@@ -1121,6 +1167,46 @@ func AddChannel(payload *string) *string {
 		Str("reporter_mode", f(payload, "reporterMode")).
 		Str("reporter_auth", f(payload, "reporterAuth")).
 		Str("reporter_threshold", f(payload, "reporterThreshold")).
+		Str("policy", getStr("ch_policy|"+ch)).
+		Emit()
+	return ok()
+}
+
+// setPolicy — governance changes what the reporters are scoring.
+//
+// {"channel","policy":<64 hex>} — owner-only.
+//
+// Policy legitimately changes: a community lowers its dust cutoff or adds a tag.
+// This is the ONLY channel field that may change after addChannel, and it is safe
+// where the others are not because it does not rewrite a live epoch: pullFunding
+// snapshots the digest in force into policy|<ch>|<ep> when the epoch is funded, and
+// that snapshot is what the epoch is scored and verified against for the rest of its
+// life. Changing it here affects epochs funded FROM NOW ON.
+//
+// Which also means a change landing between two reporters' restarts splits the
+// quorum until they all reload — so change it while no epoch is mid-report, and
+// expect the laggards to REFUSE rather than to disagree quietly. Refusing is the
+// designed outcome: a reporter that cannot prove it is scoring the declared policy
+// must not submit.
+//
+//go:wasmexport setPolicy
+func SetPolicy(payload *string) *string {
+	assertInit()
+	ownerK := sdk.GetEnvKey("contract.owner")
+	if ownerK == nil || mustCaller() != *ownerK {
+		sdk.Abort("only owner can set policy")
+	}
+	ch := mustChannel(payload)
+	p := f(payload, "policy")
+	if _, ok := hexToBytes(p); !ok {
+		sdk.Abort("policy must be 64 hex characters")
+	}
+	prev := getStr("ch_policy|" + ch)
+	set("ch_policy|"+ch, p)
+	events.New("policy").
+		Str("channel", ch).
+		Str("policy", p).
+		Str("previous", prev).
 		Emit()
 	return ok()
 }

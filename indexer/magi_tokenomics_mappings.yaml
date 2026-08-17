@@ -391,6 +391,7 @@ contracts:
           reporter_mode: string
           reporter_auth: string
           reporter_threshold: numeric
+          policy: string
         parse: "json"
         fields:
           channel: "$.attributes.channel"
@@ -400,6 +401,24 @@ contracts:
           reporter_mode: "$.attributes.reporter_mode"
           reporter_auth: "$.attributes.reporter_auth"
           reporter_threshold: "$.attributes.reporter_threshold"
+          policy: "$.attributes.policy"
+
+      # Reporter policy changes. The digest itself is opaque here — it is a hash of
+      # the settings that decide a share book — but the HISTORY is what lets anyone
+      # re-derive an old epoch: cross-referenced with the epoch's own pin, it shows
+      # which rules each epoch was scored under. Empty `previous` means the channel
+      # had no declared policy before.
+      - log_type: "policy"
+        table: "magi_tokenomics_policy_events"
+        schema:
+          channel: string
+          policy: string
+          previous: string
+        parse: "json"
+        fields:
+          channel: "$.attributes.channel"
+          policy: "$.attributes.policy"
+          previous: "$.attributes.previous"
 
       - log_type: "pull"
         table: "magi_tokenomics_pull_events"

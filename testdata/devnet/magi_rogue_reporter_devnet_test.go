@@ -216,10 +216,17 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// lp: ATTEST mode, 2-of-3 — the configuration that exists precisely so no single
 	// reporter machine has to be trusted.
+	//
+	// Attest channels must declare a reporter policy digest. Its value is arbitrary
+	// to the contract, which only compares it for equality; what it buys is that two
+	// reporters cannot silently score the epoch by different rules, which in this
+	// mode deadlocks the epoch rather than paying anyone wrongly. This suite drives
+	// the contract directly rather than through `reporter`, so a stand-in digest is
+	// the honest thing to use — the real one is `reporter policy-digest`.
 	callN(1, c3ID, "addChannel", fmt.Sprintf(
-		`{"channel":"lp","bucket":"lp","window":"%d","reporterMode":"2",`+
+		`{"channel":"lp","bucket":"lp","window":"%d","reporterMode":"2","policy":"%s",`+
 			`"reporterAuth":"hive:%s,hive:%s,hive:%s","reporterThreshold":"2","role":"lp"}`,
-		window, rogue, honestB, honestC), "addChannel lp (attest 2-of-3)")
+		window, devnetTestPolicy, rogue, honestB, honestC), "addChannel lp (attest 2-of-3)")
 	waitKey(c3ID, "ch_bucket|lp", "lp channel registered")
 
 	// ---------------- PHASE 3: fund epoch 0 ----------------

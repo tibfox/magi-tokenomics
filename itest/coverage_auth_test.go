@@ -92,11 +92,21 @@ func caC3InitPayload(rMode, rAuth, rThr, gMode, gAuth, gThr string) string {
 // several channels with different reporters.
 const caCh = "author"
 
+// caTestPolicy is a stand-in reporter policy digest. Its VALUE is arbitrary — the
+// contract only ever compares it for equality — but attest channels must carry one,
+// because two honest reporters scoring by different rules deadlock an epoch and
+// nothing on chain could tell them apart. addChannel refuses mode 2 without it.
+const caTestPolicy = "1111111111111111111111111111111111111111111111111111111111111111"
+
 func caAddChannel(t *testing.T, ct *test_utils.ContractTest, rMode, rAuth, rThr string, ok bool) {
 	t.Helper()
+	pol := ""
+	if rMode == "2" {
+		pol = `,"policy":"` + caTestPolicy + `"`
+	}
 	call(t, ct, caC3ID, "addChannel", fmt.Sprintf(
 		`{"channel":"%s","bucket":"%s","window":"1","reporterMode":"%s","reporterAuth":"%s",`+
-			`"reporterThreshold":"%s"}`, caCh, caCh, rMode, rAuth, rThr), caOwner, 0, ok)
+			`"reporterThreshold":"%s"%s}`, caCh, caCh, rMode, rAuth, rThr, pol), caOwner, 0, ok)
 }
 
 // caSetupC3 registers token/C2/C3, inits them with the given C3 reporter policy,
@@ -174,7 +184,7 @@ func TestCovAuth_C3ReporterAttest2of3(t *testing.T) {
 	// finalize now refuses an epoch with no commitment, and the commitment carries
 	// the same authority requirement the pages did.
 	caBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40, "hive:carol": 10})
-	rootP := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"110"}`,
+	rootP := fmt.Sprintf(`{"channel":"author","epoch":"0","policy":"1111111111111111111111111111111111111111111111111111111111111111","root":"%s","totalShares":"110"}`,
 		caBook.tree.Root())
 	r = caCall(t, ct, caC3ID, "submitRoot", rootP, []string{"hive:rep1"}, 1, true)
 	assert.Contains(t, r.Ret, `"applied":false`, "one authority must not commit the root")
@@ -241,7 +251,7 @@ func TestCovAuth_C3ReporterCosigned2of3(t *testing.T) {
 
 	// --- the ROOT is gated by the same threshold too ---------------------
 	coBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40})
-	coRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"100"}`,
+	coRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","policy":"1111111111111111111111111111111111111111111111111111111111111111","root":"%s","totalShares":"100"}`,
 		coBook.tree.Root())
 	r = caCall(t, ct, caC3ID, "submitRoot", coRoot, []string{"hive:rep1"}, 1, false)
 	caFailedFor(t, r, "threshold not met")
@@ -502,7 +512,7 @@ func TestCovAuth_C3FinalizeAttestSurvivesChangingShares(t *testing.T) {
 	// votes cast at different moments still merge, and the root is what they are
 	// merging toward.
 	fBook := shareBook(map[string]int64{"hive:alice": 60, "hive:bob": 40, "hive:carol": 10})
-	fRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"110"}`,
+	fRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","policy":"1111111111111111111111111111111111111111111111111111111111111111","root":"%s","totalShares":"110"}`,
 		fBook.tree.Root())
 	caCall(t, ct, caC3ID, "submitRoot", fRoot, []string{"hive:rep1"}, 1, true)
 	caCall(t, ct, caC3ID, "submitRoot", fRoot, []string{"hive:rep2"}, 1, true)
@@ -542,7 +552,7 @@ func TestCovAuth_C3FinalizeStillOneVotePerAuthority(t *testing.T) {
 	// a committed root, so finalize fails on the VOTE rather than on a missing
 	// commitment — otherwise this test would pass for the wrong reason
 	oneBook := shareBook(map[string]int64{"hive:alice": 60})
-	oneRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","root":"%s","totalShares":"60"}`,
+	oneRoot := fmt.Sprintf(`{"channel":"author","epoch":"0","policy":"1111111111111111111111111111111111111111111111111111111111111111","root":"%s","totalShares":"60"}`,
 		oneBook.tree.Root())
 	caCall(t, ct, caC3ID, "submitRoot", oneRoot, []string{"hive:rep1"}, 1, true)
 	caCall(t, ct, caC3ID, "submitRoot", oneRoot, []string{"hive:rep2"}, 1, true)

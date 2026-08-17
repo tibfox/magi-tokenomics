@@ -63,8 +63,8 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 151 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 158 reporter + indexer tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 157 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 164 reporter + indexer tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -100,7 +100,10 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
    the deploy order puts C1 first (constraint 3) while C2's `genesis` and buckets do
    not exist yet. Owner-only and once. `pullFunding` refuses until it has run.
 5. **Register a channel per reward stream** with `C3.addChannel`, after `C2.init` —
-   verifying a channel's bucket means calling the funder. Channels are append-only.
+   verifying a channel's bucket means calling the funder. Channels are append-only,
+   with one exception: `setPolicy`. An **attest-mode channel must declare a
+   `policy`** digest (`reporter policy-digest`), because that is the mode where two
+   reporters can disagree — see [Reporter policy](#reporter-policy-two-honest-reporters-must-never-disagree).
 
 ## Recommended sequence
 
@@ -118,8 +121,9 @@ C1.airdropBatch                         # seed holders (optionally straight into
 C2.init  {"source": "<source>"}         # <- sets `genesis`; the clock starts here
 C1.adoptSchedule {"funder":"<C2>","bucket":"yield"}   # accumulator + yield funding
 C3.init                                 # adopts C2's schedule automatically
-C3.addChannel {"channel":"content", ...}              # one per reward stream
-C3.addChannel {"channel":"lp", ...}
+C3.addChannel {"channel":"content","policy":"<reporter policy-digest>", ...}
+C3.addChannel {"channel":"lp","policy":"<reporter policy-digest>", ...}
+  # policy is REQUIRED for reporterMode 2 (attest), optional elsewhere
 
 # token ownership is now OPTIONAL: C2 does not need it. Hand it over only if you
 # want C2's timelocked guardian pause/changeOwner passthrough; otherwise renounce
@@ -418,6 +422,53 @@ pro-rata, so there is nothing to report and nothing to challenge.
 
 Staked funds sit in C1 and no role — owner, guardian or reporter — can touch them.
 
+### Reporter policy: two honest reporters must never disagree
+
+If two reporters score the same epoch differently, that is a bug, not an operational
+condition to monitor. The framework treats it that way.
+
+**The arithmetic was already safe.** `sharecore` proves the same input yields
+byte-identical output (`TestDeterminism_ShuffledInputSameBytes`, `TestDeterminism_RepeatedRuns`),
+reward curves use integer-only `big.Int` arithmetic so no float rounding can make two
+machines differ in the last digit, and `hivesrc` sorts canonically *before*
+truncating, so listing the same tags in a different order cannot change the result.
+
+**What was not safe was the input.** `verifyChainConfig` compared three things
+against the chain — genesis, epochLen, role. Twenty-odd other settings that decide
+the numbers were local config compared against nothing: tags and exclusions, muted
+accounts, `min_share_bps`, the author and curation curves, `cashout_days`, downvote
+and declined-payout handling, the four vote-mana settings, the app tax, pagination.
+Two honest reporters differing in one of them produced different books forever and
+neither could tell. In attest mode that is not a wrong payout, it is a **deadlock**:
+the tally is per payload hash and anti-equivocation gives each authority one vote per
+action, so both burn their vote in a different bucket and the page never reaches
+threshold.
+
+**Now:** those settings hash to one digest (`reporter policy-digest`), the channel
+declares it on chain, and every reporter compares its own before computing anything.
+A divergent reporter **refuses to run and names the offending field** rather than
+submitting. The contract enforces the same digest at `submitRoot` — the one call that
+authorises money, since pages are only logged — as a backstop for a reporter that
+skipped its own check.
+
+That leaves exactly one way for two reporters to disagree: one deliberately running
+patched code. Which is the case attest mode exists to contain, and does.
+
+**The digest is pinned per epoch, not per channel.** `pullFunding` snapshots the
+policy in force into `policy|<ch>|<ep>` when the epoch is funded, so governance can
+`setPolicy` without rewriting an epoch already being reported, and any old epoch
+stays re-derivable against the exact rules it was scored under. A backlog epoch
+therefore needs the config it was funded under — the reporter says so by name rather
+than failing at `submitRoot` after computing the whole book.
+
+**One residual gap, stated plainly.** The digest covers config, not data sources.
+Endpoints are deliberately excluded so two honest mirrors are not rejected — but the
+*indexer* URL is not as safe as the others: magi-mongo-indexer can legitimately
+assign the same event different heights across two instances (it falls back between a
+transaction's L1 anchored height and its state-output height when the transaction_pool
+lookup misses), which lands the event in a different epoch. **LP quorums must share an
+indexer.** No digest computed in the reporter can fix that; the fix belongs upstream.
+
 ### Reading the adversarial suites
 
 Two failure modes make an attack suite look green while proving nothing, and both are
@@ -441,7 +492,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **151 contract tests, 158
+All three contracts + reporter are complete, audited, and green: **157 contract tests, 164
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.

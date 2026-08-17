@@ -51,6 +51,9 @@ commands:
   run       -config F      execute the plan (dry-run unless -broadcast)
   proof     -config F      print an account's share + merkle proof for an epoch
   root      -entries "..."  commit-root for a share list you push by hand
+  policy-digest -config F  digest of the settings that decide the share book —
+                           pass to addChannel/setPolicy, and compare across the
+                           reporters of an Attest quorum (differing = refused)
 
 common flags:
   -config F                path to the config file (required except init-config)
@@ -100,7 +103,7 @@ func run(args []string) error {
 			return err
 		}
 		return (&app{cfg: &Config{}}).cmdRoot(*entries, *acct, *asJSONRoot)
-	case "epoch", "compute", "plan", "run", "proof":
+	case "epoch", "compute", "plan", "run", "proof", "policy-digest":
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
@@ -114,6 +117,14 @@ func run(args []string) error {
 	cfg, err := LoadConfig(*cfgPath)
 	if err != nil {
 		return err
+	}
+
+	// Before newApp: this is the command an operator runs to get the value for
+	// addChannel/setPolicy, and to diff two reporters against each other. Needing a
+	// reachable chain to compute a hash of a local file would be a nuisance exactly
+	// when the chain is what you are trying to configure.
+	if cmd == "policy-digest" {
+		return cmdPolicyDigest(cfg, *asJSON)
 	}
 
 	app, err := newApp(cfg)
@@ -342,7 +353,88 @@ func (a *app) verifyChainConfig() []string {
 				a.cfg.Contracts.Funder, f))
 		}
 	}
+	problems = append(problems, a.verifyPolicy()...)
 	return problems
+}
+
+// verifyPolicy compares this reporter's book-affecting settings against the digest
+// the channel declared on chain.
+//
+// The three checks above cover genesis, epochLen and role. Everything else that
+// changes the numbers — tags, exclusions, the dust cutoff, the reward curves, the
+// vote-mana budget, the app tax, pagination — was compared against nothing, so two
+// HONEST reporters differing in one setting produced different books forever and
+// neither could tell. In Attest mode that is a deadlock, not a wrong payout: each
+// authority has one vote per action and they burn it in different buckets.
+//
+// This is the check that makes that impossible rather than merely detectable. It
+// runs before anything is computed, so a divergent reporter spends no RC and
+// submits nothing; the contract's own check at submitRoot is the backstop for a
+// reporter that skipped this one.
+func (a *app) verifyPolicy() []string {
+	mine, err := a.cfg.PolicyDigest()
+	if err != nil {
+		return []string{fmt.Sprintf("could not compute the policy digest of this config: %v", err)}
+	}
+	got, err := a.reader().StateGet(a.cfg.Contracts.Distributor,
+		[]string{"ch_policy|" + a.cfg.Contracts.Channel})
+	if err != nil {
+		return []string{fmt.Sprintf("could not read the channel policy: %v", err)}
+	}
+	want := strings.TrimSpace(got["ch_policy|"+a.cfg.Contracts.Channel])
+	if want == "" {
+		// No declared policy. Legitimate for a single reporter — there is nobody to
+		// disagree with — and impossible for Attest, which addChannel refuses without
+		// one. Silence here rather than a warning on every run.
+		return nil
+	}
+	if want != mine {
+		return []string{fmt.Sprintf(
+			"POLICY MISMATCH: channel %q declares policy %s but this config hashes to %s.\n"+
+				"    Some setting that decides the share book differs from what the channel\n"+
+				"    was configured with — tags, excluded tags, excluded or muted accounts,\n"+
+				"    min_share_bps, the author/curation curves, author_reward_bps, cashout_days,\n"+
+				"    downvote or declined-payout handling, the vote-mana settings, the app tax,\n"+
+				"    or page limits. Refusing to report: submitting now would score this epoch\n"+
+				"    by different rules than the other reporters, which in Attest mode deadlocks\n"+
+				"    the epoch rather than paying anyone wrongly.\n"+
+				"    Run `reporter policy-digest` on each reporter and diff the configs.",
+			a.cfg.Contracts.Channel, want, mine)}
+	}
+	return nil
+}
+
+// verifyEpochPolicy checks this config against the digest pinned to ONE epoch.
+//
+// pullFunding snapshots the channel policy into policy|<ch>|<ep> the first time an
+// epoch is funded, so an epoch is permanently scored against the rules in force
+// when it was funded rather than whatever governance has changed to since. An
+// unreported backlog epoch therefore needs the config it was funded under, not the
+// current one — and this is where an operator finds that out, rather than at
+// submitRoot after the whole book has been computed.
+func (a *app) verifyEpochPolicy(ep uint64) error {
+	key := "policy|" + a.cfg.Contracts.Channel + "|" + strconv.FormatUint(ep, 10)
+	got, err := a.reader().StateGet(a.cfg.Contracts.Distributor, []string{key})
+	if err != nil {
+		return fmt.Errorf("could not read the pinned policy for epoch %d: %w", ep, err)
+	}
+	want := strings.TrimSpace(got[key])
+	if want == "" {
+		return nil // not funded yet, or a channel that declared no policy
+	}
+	mine, err := a.cfg.PolicyDigest()
+	if err != nil {
+		return fmt.Errorf("could not compute the policy digest of this config: %w", err)
+	}
+	if want != mine {
+		return fmt.Errorf(
+			"refusing to compute: epoch %d was funded under policy %s but this config hashes "+
+				"to %s.\n    An epoch is scored against the policy pinned when it was funded, so "+
+				"that it stays\n    reproducible after governance changes anything. If policy "+
+				"changed while this epoch\n    was outstanding, report it with the configuration "+
+				"it was funded under.", ep, want, mine)
+	}
+	return nil
 }
 
 func (a *app) cmdEpoch(asJSON bool) error {
@@ -465,6 +557,13 @@ func (a *app) compute(epochFlag string) (*computed, error) {
 	}
 	if problems := a.verifyChainConfig(); len(problems) > 0 {
 		return nil, fmt.Errorf("refusing to compute: %s", strings.Join(problems, "; "))
+	}
+	// The epoch may have been funded under an OLDER policy than the channel now
+	// declares — governance is allowed to change it, and pullFunding pins whatever
+	// was in force to the epoch. That pin is what this epoch must be scored against
+	// for the rest of its life, so it outranks the channel-level check above.
+	if err := a.verifyEpochPolicy(ep); err != nil {
+		return nil, err
 	}
 	if a.cfg.Kind() == SourceLP {
 		return a.computeLP(ep)
@@ -628,9 +727,17 @@ func (a *app) buildPlan(epochFlag string) (*computed, submit.Plan, error) {
 	// The commitment the claims verify against. Built from the SAME share set the
 	// pages publish, so the leaves and the root cannot disagree.
 	tree := sharecore.BuildTree(c.Result.Shares)
+	// Declared with the root so the contract can refuse a root scored under
+	// different rules. compute() has already checked this against the epoch's pin,
+	// so a mismatch here means the chain changed underneath the run.
+	pol, err := a.cfg.PolicyDigest()
+	if err != nil {
+		return nil, submit.Plan{}, fmt.Errorf("could not compute the policy digest: %w", err)
+	}
 	opts := submit.PlanOpts{
 		Epoch:         eps,
 		Root:          tree.Root(),
+		Policy:        pol,
 		TotalShares:   c.Result.Total.String(),
 		Accounts:      len(c.Result.Shares),
 		DistributorID: a.cfg.Contracts.Distributor,

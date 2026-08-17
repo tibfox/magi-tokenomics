@@ -55,6 +55,16 @@ type PlanOpts struct {
 	Root        string
 	TotalShares string
 	Accounts    int
+
+	// Policy is the digest of the settings this book was scored under. The contract
+	// compares it against the digest pinned to the epoch when it was funded and
+	// refuses a root that does not match, so a reporter running different rules
+	// cannot commit a root at all.
+	//
+	// Empty is legitimate: a channel that never declared a policy (single-reporter
+	// deployments, which have nobody to disagree with) pins nothing and enforces
+	// nothing. Attest channels must declare one — addChannel refuses mode 2 without it.
+	Policy string
 }
 
 // Validate refuses a plan that could not succeed on chain.
@@ -138,7 +148,8 @@ func BuildFullPlan(o PlanOpts) Plan {
 			Action:     "submitRoot",
 			Payload: `{"channel":"` + o.Channel + `","epoch":"` + o.Epoch +
 				`","root":"` + o.Root + `","totalShares":"` + o.TotalShares +
-				`","accounts":"` + itoaPlan(o.Accounts) + `"}`,
+				`","accounts":"` + itoaPlan(o.Accounts) +
+				`","policy":"` + o.Policy + `"}`,
 			RcLimit: o.RcLimit,
 			Note:    "commit the share-book root — claims verify against this",
 		})

@@ -74,12 +74,24 @@ func (b *merkleBook) SubmitPayload(channel, epoch string) string {
 		channel, epoch, b.entries)
 }
 
+// devnetTestPolicy is a stand-in reporter policy digest for suites that drive the
+// contract directly instead of through `reporter`. The contract only ever compares
+// it for equality, so any 64 hex characters serve — what matters is that an attest
+// channel HAS one, because two reporters scoring by different rules deadlock an
+// epoch and nothing on chain could tell them apart. The real value for a live
+// deployment comes from `reporter policy-digest`.
+const devnetTestPolicy = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+
 // RootPayload is the submitRoot payload committing the book. finalizeEpoch refuses
 // an epoch without one, because finalizing it would lock the funding away with
 // nothing able to claim it.
+//
+// It carries the policy digest unconditionally: the contract enforces it only for
+// an epoch that HAS a pin, and ignores it otherwise, so one payload shape works for
+// both the channels that declared a policy and the ones that did not.
 func (b *merkleBook) RootPayload(channel, epoch string) string {
-	return fmt.Sprintf(`{"channel":"%s","epoch":"%s","root":"%s","totalShares":"%s","accounts":"%d"}`,
-		channel, epoch, b.Root, b.TotalShares, b.Accounts)
+	return fmt.Sprintf(`{"channel":"%s","epoch":"%s","policy":"%s","root":"%s","totalShares":"%s","accounts":"%d"}`,
+		channel, epoch, devnetTestPolicy, b.Root, b.TotalShares, b.Accounts)
 }
 
 // ClaimPayload is what an account sends to claim: its share and the path proving

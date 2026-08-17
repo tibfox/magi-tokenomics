@@ -406,7 +406,37 @@ would let a posting key satisfy the reporter role.
 When the distributor's reporter authority is configured in Attest mode, run this
 service on N machines with the **same config** but each machine's own account and
 key. Determinism guarantees the pages are byte-identical, so the contract's
-threshold is reached without the machines coordinating. Nothing else changes.
+threshold is reached without the machines coordinating.
+
+**"Same config" is enforced, not assumed.** The settings that decide a share book
+hash to a policy digest, the channel declares it on chain, and a reporter whose
+config hashes differently **refuses to run** instead of attesting a different book.
+That matters more here than anywhere else: the tally is per payload hash and each
+authority gets one vote per action, so two honest reporters who disagree each burn
+their vote in a different bucket and the page can never reach threshold. A config
+typo would deadlock the epoch, not merely pay someone the wrong amount.
+
+```bash
+reporter policy-digest -config reporter.json     # run on EVERY machine; must match
+```
+
+Pass that value as `policy` to `addChannel` (required for attest channels) and to
+`setPolicy` when governance changes the rules. Covered: tags, excluded tags,
+excluded and muted accounts, `min_share_bps`, the author and curation curves,
+`author_reward_bps`, `cashout_days`, downvote and declined-payout handling, the
+vote-mana settings, the app tax, `staked_bps`, page limits, and the epoch schedule.
+Not covered: endpoints, `submit.*`, and the progress file — all per-operator.
+
+The digest is pinned to each epoch when it is **funded**, so `setPolicy` never
+rewrites an epoch already being reported, and an old epoch stays reproducible against
+the rules it was actually scored under. A backlog epoch left over from before a policy
+change must be reported with the config it was funded under; the reporter says so by
+name rather than failing at `submitRoot`.
+
+> **LP quorums must share one indexer.** The digest covers config, not data. Two
+> magi-mongo-indexer instances can assign the same event different heights and land it
+> in different epochs, which no digest computed here can detect. Content quorums are
+> unaffected — they read Hive directly.
 
 ## End-to-end verification
 
