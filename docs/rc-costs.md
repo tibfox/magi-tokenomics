@@ -148,9 +148,16 @@ binds before RC does.
 >
 > | entries | payload | RC before | RC now |
 > |---:|---:|---:|---:|
-> | 10 | 259 B | 4,292 | **566** |
-> | 30 | 779 B | 9,070 | **1,088** |
-> | 60 | 1,559 B | 15,309 | **1,871** |
+> | 10 | 259 B | 4,292 | **904** |
+> | 30 | 779 B | 9,070 | **1,190** |
+> | 60 | 1,559 B | 15,309 | **1,956** |
+>
+> Those figures include the `pagesum|<ch>|<ep>` accumulator that `finalizeEpoch`
+> holds the declared `totalShares` to. It costs **~85 RC on a full page** (1,871 →
+> 1,956, under 5%) and about 340 RC once on an epoch's first page, which sets the
+> key's high-water mark. That buys back the invariant the merkle book gave up: a
+> declared denominator higher than the pages published used to strand the difference
+> where no call could reach it — half an epoch, from one wrong number.
 >
 > **8.2× cheaper at a full page**, because state writes were ~92% of the bill
 > (~311 RC per account against ~1 RC per byte of log). Reproduce with
@@ -158,11 +165,11 @@ binds before RC does.
 >
 > What an epoch costs now:
 >
->     9 pages x 1,871         ~=  16,800
+>     9 pages x 1,956         ~=  17,600
 >     + submitRoot            ~=     600     one call, whatever the earner count
 >     + poke and pull         ~=   2,500
 >                                --------
->                                ~20,000 RC  ~= 20 HBD on the reporter's ledger
+>                                ~20,700 RC  ~= 21 HBD on the reporter's ledger
 >
 > Against ~127,500 before. **The claimant pays ~130 RC more** for proof
 > verification — 959 against 830 — which is the cost moving from the operator to

@@ -167,23 +167,35 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 	// so the shorter synthetic ids this fixture used before understated a real page by
 	// about 5% at 30 entries — and these figures are what the reporter's rc_limit check
 	// is sized from, where understating is the direction that breaks things.
+	// Accumulated as the pages go out, because finalizeEpoch now requires the declared
+	// totalShares to equal what the pages actually published — an over-declared
+	// denominator used to strand the difference where no call could reach it. The same
+	// account appears on several pages here, and duplicate entries SUM, exactly as
+	// sharecore treats them.
+	published := map[string]int64{}
 	for _, n := range []int{1, 10, 30, 60} {
 		parts := make([]string, n)
 		for i := 0; i < n; i++ {
-			parts[i] = fmt.Sprintf("hive:rcsharemaxlen%03d:%d", i, 100+i)
+			acct := fmt.Sprintf("hive:rcsharemaxlen%03d", i)
+			parts[i] = fmt.Sprintf("%s:%d", acct, 100+i)
+			published[acct] += int64(100 + i)
 		}
 		record("distributor", "submitShares", fmt.Sprintf("%d entries (1 page)", n),
 			call(t, &ct, pC3, "submitShares", fmt.Sprintf(
 				`{"channel":"content","epoch":"0","page":"%d","entries":"%s"}`, n, strings.Join(parts, ",")), owner, 46, true))
 	}
+	publishedTotal := int64(0)
+	for _, v := range published {
+		publishedTotal += v
+	}
 	record("distributor", "shareOf", "query", call(t, &ct, pC3, "shareOf",
 		`{"channel":"content","epoch":"0","account":"hive:rcsharemaxlen000"}`, "hive:any", 46, true))
 	// The commitment: one call for the whole epoch, whatever the earner count.
-	pBook := shareBook(map[string]int64{"hive:rcsharemaxlen000": 1})
+	pBook := shareBook(published)
 	record("distributor", "submitRoot", "commitment for the epoch",
 		call(t, &ct, pC3, "submitRoot", fmt.Sprintf(
-			`{"channel":"content","epoch":"0","root":"%s","totalShares":"1","accounts":"1"}`,
-			pBook.tree.Root()), owner, 46, true))
+			`{"channel":"content","epoch":"0","root":"%s","totalShares":"%d","accounts":"%d"}`,
+			pBook.tree.Root(), publishedTotal, len(published)), owner, 46, true))
 	record("distributor", "finalizeEpoch", "", call(t, &ct, pC3, "finalizeEpoch",
 		`{"channel":"content","epoch":"0"}`, owner, 46, true))
 	record("distributor", "claim", "with a merkle proof", call(t, &ct, pC3, "claim",

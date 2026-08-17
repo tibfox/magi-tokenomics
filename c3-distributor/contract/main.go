@@ -287,7 +287,6 @@ func emitSkip(ch, ep, page, raw, reason string) {
 // skipped and NAMED in a skip log, so the published book and the tree agree about
 // exactly which entries count.
 func applyEntries(ch, ep, page, entries string) {
-	total := new(big.Int)
 	counted := 0
 	pageTotal := new(big.Int)
 	for _, e := range splitComma(entries) {
@@ -319,7 +318,27 @@ func applyEntries(ch, ep, page, entries string) {
 		counted++
 		pageTotal.Add(pageTotal, s)
 	}
-	_ = total
+	// Accumulate what the chain ACTUALLY saw, so finalizeEpoch can hold the reporter's
+	// declared totalShares to it.
+	//
+	// The merkle migration moved the share book off chain and made totalShares a
+	// DECLARED number rather than one the contract added up. claim already refuses the
+	// under-declared direction (paid| accumulates and a payout past `funded` aborts),
+	// but over-declaring shrinks every payout and leaves the difference in
+	// funded|<ch>|<ep>, where nothing can reach it: cancelEpoch refuses a finalized
+	// epoch past its window, sweepUnallocated only moves unalloc|, and no one can
+	// claim twice. Half an epoch could be lost to one wrong number.
+	//
+	// This is the cheap half of the invariant the migration gave up. The per-entry
+	// sum was already being computed for the page log and thrown away; keeping a
+	// running total costs one small write per page against ~1,871 RC for the page.
+	//
+	// It sums only the entries that COUNTED. That is deliberate: a skipped entry is
+	// one the reporter put in its tree and the chain refused, so the two books
+	// disagree, and the mismatch surfacing at finalize is the point rather than a
+	// side effect — that divergence used to dilute everyone else silently.
+	sk := "pagesum|" + ch + "|" + ep
+	setBig(sk, new(big.Int).Add(getBig(sk), pageTotal))
 	// ONE log per page carrying the submitted entries verbatim, rather than one log
 	// per entry.
 	//
@@ -387,6 +406,41 @@ func FinalizeEpoch(payload *string) *string {
 	// cancelEpoch already attests over a constant for the same reason.
 	if !auth.Authorize(reporterCfg(ch), "rep", "fin:"+ch+":"+ep, "fin:"+ch+":"+ep, mustCaller(), reqAuths()) {
 		return str(`{"finalized":false}`) // pending more attestations
+	}
+	// The declared denominator must equal what the pages actually published.
+	//
+	// AFTER the auth gate, deliberately. Attest votes are cast at different moments
+	// and pages keep landing between them — that is the whole point of the constant
+	// payload above — so checking before the gate would refuse a below-threshold vote
+	// merely because the last page had not arrived yet, and reintroduce the
+	// unfinalizable epoch that binding to totalShares used to cause. Here it fires
+	// only on the call that would actually commit.
+	//
+	// Aborting here reverts the committing attestation along with everything else,
+	// which is the right outcome and self-healing: no vote is recorded, so once the
+	// pages are complete the same authority can vote again and it goes through.
+	//
+	// Catches three things that all ended the same way, with funding no call could
+	// reach:
+	//
+	//   - totalShares declared HIGHER than the book sums to. Every payout shrinks and
+	//     the difference is stranded. Nothing else refuses it: claim's paid|<=funded
+	//     check only bounds the other direction.
+	//   - a root committed with pages MISSING (or none at all). The leaves were never
+	//     logged, so nobody could build a proof against the root, and finalizing would
+	//     lock the whole epoch away.
+	//   - an entry the chain SKIPPED — a malformed address, a non-positive share.
+	//     The reporter's tree counted it and the chain did not, so every other earner
+	//     was being diluted by a slice that could never be claimed.
+	//
+	// An epoch stopped here is not stuck: status stays open, so the guardian's stale
+	// rescue can still cancel it and roll the funding back to unalloc|, which is
+	// recoverable. That is strictly better than finalizing into a residue that
+	// nothing can move.
+	if ps, ts := getBig("pagesum|"+ch+"|"+ep), getBig("totalShares|"+ch+"|"+ep); ps.Cmp(ts) != 0 {
+		sdk.Abort("declared totalShares does not equal the shares the pages published (" +
+			ts.String() + " declared, " + ps.String() + " published) — finalizing would " +
+			"strand the difference where no call can reach it")
 	}
 	set("status|"+ch+"|"+ep, "finalized")
 	chal := blockHeight() + getU("ch_window|"+ch)

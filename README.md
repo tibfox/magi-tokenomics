@@ -63,7 +63,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 157 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 163 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 164 reporter + indexer tests, no network
 ```
 
@@ -386,12 +386,28 @@ The leaf is `sha256(0x00 || "acct|share")` and binds account and amount together
 the contract builds it from `msg.caller` rather than a payload field — so a stolen
 proof is worthless and an inflated one does not verify.
 
-**One property this removed, and it needed replacing.** `totalShares` used to be
-computed by the contract from the pages it stored, so Σclaims ≤ funded held by
-construction. It is now declared by the reporter, and an under-declared total makes
-every payout too large — across epochs, since the token balance is shared. There is an
-explicit per-epoch `paid` guard that refuses at the cause rather than letting a later
-claimant's transfer fail for reasons unrelated to them.
+**One property this removed, and it needed replacing — in both directions.**
+`totalShares` used to be computed by the contract from the pages it stored, so
+Σclaims ≤ funded held by construction. It is now declared by the reporter.
+
+*Under*-declaring makes every payout too large — across epochs, since the token
+balance is shared. An explicit per-epoch `paid` guard refuses at the cause rather than
+letting a later claimant's transfer fail for reasons unrelated to them.
+
+*Over*-declaring is the quieter one and overpays nobody: it shrinks every payout and
+leaves the difference in `funded|<ch>|<ep>`, which nothing could reach. `cancelEpoch`
+refuses a finalized epoch past its window — exactly when a residue becomes visible,
+since you only learn what went unclaimed after claims have run — `sweepUnallocated`
+only moves `unalloc|`, and nobody can claim twice. **Half an epoch could be lost to one
+wrong number.** So `submitShares` accumulates `pagesum|<ch>|<ep>` and `finalizeEpoch`
+refuses unless the declared total equals what the pages actually published. That also
+catches a root committed with pages missing (leaves never logged, so no proof could
+ever be built) and an entry the chain *skipped*, which used to dilute every other
+earner by a slice nobody could claim. Cost: ~85 RC on a full page, under 5%.
+
+An epoch stopped there is not stuck — status stays open, so the guardian's stale
+rescue still recovers the funding, which beats finalizing into a residue nothing can
+move.
 
 ### What the reporter can and cannot do
 
@@ -492,7 +508,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **157 contract tests, 164
+All three contracts + reporter are complete, audited, and green: **163 contract tests, 164
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.
