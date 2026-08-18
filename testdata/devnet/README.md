@@ -9,6 +9,21 @@ internals (`d.cfg`, `d.witnessAccount`, …), so they must sit *inside* that pac
 `testdata/` is ignored by the Go tool, so keeping them here preserves them under
 version control without breaking `go build ./...`.
 
+## Before you run them: two things that are not in this directory
+
+**`waitStateKeyPresent` was missing until 2026-08-18.** Eleven suites call it and it
+was never versioned here — it existed only inside one go-vsc-node checkout, so a
+clean copy of this directory failed `go vet` with "undefined: waitStateKeyPresent".
+That is why these went unrun long enough for seven of them to rot. It now lives in
+`magi_merkle_helper_test.go`. If you add a helper, add it *here*, not to your
+checkout.
+
+**`magi_upgrade_devnet_test.go` needs a go-vsc-node with contract-update support**
+in its devnet harness — `Devnet.UpdateContract`, `ContractUpdateOpts` and
+`Devnet.PendingUpdates`, which are on the `feat/contract-update-timelock` branch, not
+on main. Against a checkout without them the whole `devnet` package fails to compile,
+so move that one file aside if you are running the others.
+
 ## Running them
 
 ```sh

@@ -1,12 +1,14 @@
 package devnet
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Shared merkle helpers for the devnet suites.
@@ -115,4 +117,34 @@ func (b *merkleBook) ClaimPayload(t *testing.T, channel, epoch, account string) 
 	}
 	return fmt.Sprintf(`{"channel":"%s","epoch":"%s","share":"%s","proof":"%s"}`,
 		channel, epoch, pf.Share, strings.Join(pf.Proof, ","))
+}
+
+// waitStateKeyPresent polls contract state until `key` holds a non-empty value.
+//
+// The devnet harness ships waitStateKey, which waits for a key to equal a value the
+// caller already knows. Most of what these suites wait on is not known in advance —
+// a root, a policy digest, a funded amount, an assigned height — so what is needed is
+// "has this been written yet".
+//
+// This lived only in a copy inside a go-vsc-node checkout and was never versioned
+// alongside the suites that call it, so `go vet ./tests/devnet/` failed with
+// "undefined: waitStateKeyPresent" on a clean copy of this directory. Eleven suites
+// referenced it. That is why they had gone unrun: as committed, they did not compile.
+func waitStateKeyPresent(t *testing.T, d *Devnet, ctx context.Context, node int, cid, key string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		st, err := d.GetStateByKeys(ctx, node, cid, []string{key})
+		if err == nil {
+			if v, ok := st[key]; ok {
+				if s := strings.Trim(fmt.Sprintf("%v", v), `"`); s != "" {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
