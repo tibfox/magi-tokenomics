@@ -38,13 +38,13 @@ func newFixture(t *testing.T, pageEntries ...string) *fixture {
 		}
 		f.pages = append(f.pages, SharesRow{
 			Channel: "content", Epoch: 0, Page: int64(i),
-			Entries: int64(len(shares)), PageTotal: sharecore.TotalOf(shares).String(),
+			Entries: int64(len(shares)), PageTotal: Numeric(sharecore.TotalOf(shares).String()),
 			Submitted: e,
 		})
 	}
 	f.root = RootRow{
 		Channel: "content", Epoch: 0, Root: sharecore.BuildTree(all).Root(),
-		TotalShares: sharecore.TotalOf(all).String(), Accounts: int64(len(all)),
+		TotalShares: Numeric(sharecore.TotalOf(all).String()), Accounts: int64(len(all)),
 	}
 	return f
 }

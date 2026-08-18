@@ -12,30 +12,67 @@
 package proofsvc
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 
 	"magi_token/reporter/sharecore"
 )
 
+// Numeric is a Postgres NUMERIC as it arrives over the wire.
+//
+// The mapping declares total_shares and page_total `numeric`, magi-mongo-indexer
+// creates them as NUMERIC, and Hasura serialises NUMERIC as an UNQUOTED JSON number.
+// These were declared `string`, so json.Unmarshal failed on every response and both
+// /proof and /root returned 503 — with an error that reads like indexer lag, so an
+// operator waits for a backlog that never clears.
+//
+// Kept as TEXT rather than decoded to a number: a share total is a big.Int on chain
+// (the 502-earner scale run commits 208,552,153,997,506,000) and routing it through
+// float64 would corrupt it silently. Accepts quoted as well as unquoted, because the
+// reconciliations downstream are ok-guarded on parsing this text — if a view or a
+// cast ever quoted it, a silent "" would switch those checks off instead of failing.
+type Numeric string
+
+func (n Numeric) String() string { return string(n) }
+
+func (n *Numeric) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" || s == "" {
+		*n = ""
+		return nil
+	}
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		var q string
+		if err := json.Unmarshal(b, &q); err != nil {
+			return err
+		}
+		*n = Numeric(q)
+		return nil
+	}
+	*n = Numeric(s)
+	return nil
+}
+
 // SharesRow is one `shares` log the distributor emitted — a page of the book.
 type SharesRow struct {
-	Channel   string `json:"channel"`
-	Epoch     int64  `json:"epoch"`
-	Page      int64  `json:"page"`
-	Entries   int64  `json:"entries"`
-	PageTotal string `json:"page_total"`
-	Submitted string `json:"submitted"`
+	Channel   string  `json:"channel"`
+	Epoch     int64   `json:"epoch"`
+	Page      int64   `json:"page"`
+	Entries   int64   `json:"entries"`
+	PageTotal Numeric `json:"page_total"`
+	Submitted string  `json:"submitted"`
 }
 
 // RootRow is the commitment: one row per (channel, epoch).
 type RootRow struct {
-	Channel     string `json:"channel"`
-	Epoch       int64  `json:"epoch"`
-	Root        string `json:"root"`
-	TotalShares string `json:"total_shares"`
-	Accounts    int64  `json:"accounts"`
+	Channel     string  `json:"channel"`
+	Epoch       int64   `json:"epoch"`
+	Root        string  `json:"root"`
+	TotalShares Numeric `json:"total_shares"`
+	Accounts    int64   `json:"accounts"`
 }
 
 // Book is a rebuilt, root-checked share book for one epoch.
@@ -81,7 +118,7 @@ func BuildBook(root RootRow, pages []SharesRow) (*Book, error) {
 		pageShares, pageSkipped := sharecore.ParseEntries(p.Submitted)
 		skipped = append(skipped, pageSkipped...)
 		pageTotal := sharecore.TotalOf(pageShares)
-		if want, ok := new(big.Int).SetString(p.PageTotal, 10); ok && pageTotal.Cmp(want) != 0 {
+		if want, ok := new(big.Int).SetString(p.PageTotal.String(), 10); ok && pageTotal.Cmp(want) != 0 {
 			return nil, fmt.Errorf("page %d of %s epoch %d sums to %s but its log says %s: "+
 				"the indexer's copy of that row does not match what the contract counted",
 				p.Page, root.Channel, root.Epoch, pageTotal, want)
@@ -102,7 +139,7 @@ func BuildBook(root RootRow, pages []SharesRow) (*Book, error) {
 			got, root.Root, root.Channel, root.Epoch)
 	}
 	total := sharecore.TotalOf(shares)
-	if want, ok := new(big.Int).SetString(root.TotalShares, 10); ok && total.Cmp(want) != 0 {
+	if want, ok := new(big.Int).SetString(root.TotalShares.String(), 10); ok && total.Cmp(want) != 0 {
 		return nil, fmt.Errorf("rebuilt total %s does not match the committed total %s: the "+
 			"denominator every payout divides by is not the one the chain will use", total, want)
 	}
