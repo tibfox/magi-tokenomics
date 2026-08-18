@@ -150,16 +150,8 @@ func PullFunding(payload *string) *string {
 	setBig(k, new(big.Int).Add(getBig(k), got))
 	if !present("fundedAt|" + ch + "|" + ep) {
 		set("fundedAt|"+ch+"|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
-		// Pin the reporter policy in force to THIS epoch, once, at the moment it is
-		// funded. Snapshotting rather than reading ch_policy live is what lets
-		// governance change policy without rewriting an epoch already being reported:
-		// an epoch is forever scored, verified and re-derivable against the digest it
-		// was funded under. Written under the same not-present guard as fundedAt so a
-		// second pullFunding cannot move it.
-		if p := getStr("ch_policy|" + ch); p != "" {
-			set("policy|"+ch+"|"+ep, p)
-		}
 	}
+	pinPolicy(ch, ep)
 	events.New("pull").
 		Str("channel", ch).
 		Str("epoch", ep).
@@ -241,6 +233,15 @@ func SubmitRoot(payload *string) *string {
 	// does so at the root, which is the single point that authorises money: pages are
 	// only logged now, so a wrong root is the thing that could pay the wrong people.
 	//
+	// Pin FIRST, so the check below cannot be skipped by arriving before pullFunding.
+	//
+	// The pin used to be written only by pullFunding, and the reporter's own plan
+	// emits submitRoot BEFORE pullFunding — so on the shipped call order the pin was
+	// always empty here and this whole check was dead code. The itest fixture pulled
+	// funding during setup, which is the opposite order from production, so nothing
+	// noticed. Whichever call touches the epoch first now establishes the pin, and
+	// there is no order in which the digest goes unchecked.
+	pinPolicy(ch, ep)
 	// Enforced only when the epoch HAS a pinned policy, which keeps single-reporter
 	// channels that never declared one working exactly as before.
 	if want := getStr("policy|" + ch + "|" + ep); want != "" {
@@ -1478,4 +1479,26 @@ func assertActionInChannel(action, ch string) {
 			"this channel's authorities would clear the wrong votes and strand the round")
 	}
 	sdk.Abort("unrecognised reporter action key — expected ss:/sr:/fin: for a channel")
+}
+
+// pinPolicy binds an epoch to the channel policy in force, once, at the first call
+// that touches it.
+//
+// Snapshotting rather than reading ch_policy live is what lets governance change
+// policy without rewriting an epoch already being reported: an epoch is forever
+// scored, verified and re-derivable against the digest it was pinned under.
+//
+// Called by BOTH pullFunding and submitRoot because either may arrive first — the
+// reporter's plan emits submitRoot before pullFunding, and when only pullFunding
+// pinned, submitRoot's own check read an empty pin and never fired. Not-present
+// guarded, so the second caller finds the pin already set and is held to it rather
+// than moving it.
+func pinPolicy(ch, ep string) {
+	k := "policy|" + ch + "|" + ep
+	if present(k) {
+		return
+	}
+	if p := getStr("ch_policy|" + ch); p != "" {
+		set(k, p)
+	}
 }
