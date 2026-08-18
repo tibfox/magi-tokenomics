@@ -48,6 +48,19 @@ func Init(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only contract owner can init")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and init pins the emission schedule, the bucket table and both authority sets, once.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
 	tok := f(payload, "token")
 	validateAddr(tok)
 	set("cfg_token", tok)

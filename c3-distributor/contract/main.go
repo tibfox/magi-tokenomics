@@ -35,6 +35,19 @@ func Init(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only owner can init")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and init pins the funder, the treasury, the guardian set and the stake target, once.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
 	validateAddr(f(payload, "token"))
 	validateAddr(f(payload, "funder"))
 	set("cfg_token", f(payload, "token"))
@@ -1115,6 +1128,19 @@ func AddChannel(payload *string) *string {
 	if ownerK == nil || mustCaller() != *ownerK {
 		sdk.Abort("only owner can add a channel")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and addChannel fixes a channel's reporter authority permanently — channels are append-only — so it decides who may publish share books.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(mustCaller(), reqAuths())
 	ch := f(payload, "channel")
 	if ch == "" {
 		sdk.Abort("channel required")
@@ -1250,6 +1276,19 @@ func SetPolicy(payload *string) *string {
 	if ownerK == nil || mustCaller() != *ownerK {
 		sdk.Abort("only owner can set policy")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and setPolicy changes what every reporter on the channel is scored against.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(mustCaller(), reqAuths())
 	ch := mustChannel(payload)
 	p := f(payload, "policy")
 	if _, ok := hexToBytes(p); !ok {
