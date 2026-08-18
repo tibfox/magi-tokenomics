@@ -512,7 +512,23 @@ func AdoptSchedule(payload *string) *string {
 	// caller has no key at all and can never appear in required_auths, and exempting
 	// it cannot reintroduce the posting-key risk it is guarding against.
 	auth.RequireActiveUnlessContract(*caller, reqAuths())
-	if present(kGenesis) {
+	// The genesis anchor is immutable — but that is ALL this guard may protect.
+	//
+	// It used to refuse the whole call whenever cfg_genesis was set, and init's
+	// `funder` shortcut sets it. adoptSchedule is the only writer of cfg_bucket, so
+	// the shortcut permanently refused the one call that arms the yield bucket:
+	// pullFunding then aborted on "no yield bucket adopted" forever while C2 kept
+	// accruing owed|yield|<ep> that only this contract may claim. Measured at five
+	// epochs: C2 holding 500,000, C1 holding 0, unrecoverable without redeploying
+	// BOTH contracts, since C2's bucket table is immutable and pinned to the dead C1.
+	//
+	// The abort text always said the danger was RE-ANCHORING, which is about the
+	// genesis and the drawdowns recorded against it — not about naming a bucket. So
+	// an already-anchored instance may still adopt its bucket, provided it re-states
+	// the SAME funder and that funder still reports the SAME genesis. Nothing about
+	// the anchor moves; the bucket stays one-shot on its own guard below.
+	anchored := present(kGenesis)
+	if anchored && present(kBucket) {
 		sdk.Abort("schedule already adopted (immutable: re-anchoring would invalidate every drawdown already recorded)")
 	}
 	fu := field(payload, "funder")
@@ -532,6 +548,23 @@ func AdoptSchedule(payload *string) *string {
 	}
 	if _, err := strconv.ParseUint(sg, 10, 64); err != nil {
 		sdk.Abort("funder genesis is not a uint")
+	}
+	// An instance already anchored by init's shortcut may only fill in its bucket. It
+	// must name the SAME funder reporting the SAME genesis, so nothing that a drawdown
+	// was recorded against can move underneath it. A different funder, or one whose
+	// genesis has changed, is the re-anchoring the guard above exists to refuse.
+	if anchored {
+		if fu != getStr(kFunder) {
+			sdk.Abort("schedule already anchored to a different funder — re-anchoring would " +
+				"invalidate every drawdown already recorded")
+		}
+		if sg != getStr(kGenesis) {
+			sdk.Abort("that funder now reports a different genesis than this contract is " +
+				"anchored to — re-anchoring would invalidate every drawdown already recorded")
+		}
+		if field(payload, "bucket") == "" {
+			sdk.Abort("schedule already adopted — supply the bucket this call is here to adopt")
+		}
 	}
 	sdk.StateSetObject(kGenesis, sg)
 	sdk.StateSetObject(kFunder, fu)
