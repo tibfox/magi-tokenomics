@@ -571,6 +571,19 @@ func ReleaseStaleAttest(payload *string) *string {
 	switch role {
 	case "rep":
 		ch := mustChannel(payload)
+		// The action must BELONG to the channel whose authorities will be used.
+		//
+		// The authority set comes from the caller's channel while `action` is a
+		// separate free-form string, so naming a different channel used to clear the
+		// round with the wrong authority list: clearRound deletes
+		// rep|aseen|<action>|<auth> per authority, so the real voters kept their
+		// markers while the round's astart and ahashes were deleted underneath them.
+		//
+		// That is terminal and it is permissionless. The real voters then get "caller
+		// already attested this action" forever, and a corrective release gets "no
+		// attestation round in progress" because the start stamp is gone. For an
+		// `sr:` action the epoch never receives a root and can never be finalized.
+		assertActionInChannel(action, ch)
 		cfg = reporterCfg(ch)
 	case "grd":
 		cfg = guardianCfg()
@@ -1439,4 +1452,30 @@ func verifyProof(acct, share, proofCSV, root string) bool {
 		}
 	}
 	return bytesToHex(h) == root
+}
+
+// assertActionInChannel refuses an attest action key that does not belong to `ch`.
+//
+// Every reporter-role action key this contract builds embeds its channel as the
+// component after the prefix: submitShares uses "ss:<ch>:<ep>:<page>", submitRoot
+// "sr:<ch>:<ep>", finalizeEpoch "fin:<ch>:<ep>". Channel names are validated at
+// addChannel to contain none of | : or , so the component is unambiguous.
+//
+// Anything else is refused rather than guessed at. An action key nobody here builds
+// has no authority set that could be the right one, so there is no safe default.
+func assertActionInChannel(action, ch string) {
+	for _, prefix := range []string{"ss:", "sr:", "fin:"} {
+		if len(action) < len(prefix) || action[:len(prefix)] != prefix {
+			continue
+		}
+		rest := action[len(prefix):]
+		// rest must begin with ch followed by ':' — the channel is never the last
+		// component of a reporter action key.
+		if len(rest) > len(ch) && rest[:len(ch)] == ch && rest[len(ch)] == ':' {
+			return
+		}
+		sdk.Abort("action does not belong to channel \"" + ch + "\" — releasing it with " +
+			"this channel's authorities would clear the wrong votes and strand the round")
+	}
+	sdk.Abort("unrecognised reporter action key — expected ss:/sr:/fin: for a channel")
 }
