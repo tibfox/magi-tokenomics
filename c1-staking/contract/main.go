@@ -60,7 +60,22 @@ const (
 	// kYieldOutstanding is yield pulled from C2 but not yet claimed or swept. Tracked
 	// incrementally because deriving it would mean summing every epoch ever funded.
 	kYieldOutstanding = "yield_outstanding"
-	maxClaim          = 20 // bound RC per claimUnstaked call
+	// kUnstakeOutstanding is principal that has left total_staked but not yet left the
+	// contract: unstaked, queued, serving its cooldown.
+	//
+	// `unstake` has to drop total_staked immediately or an account on its way out keeps
+	// earning weight, but it moves no tokens — they sit in custody until claimUnstaked.
+	// Without this term the envelope counts that money as free float for the whole
+	// cooldown, which init requires to exceed a full epoch, and both spenders of float
+	// (airdropBatch, sweepUnobligated) will send a staker's principal elsewhere. That
+	// is not hypothetical: sweepUnobligated returned {"swept":"1000"} against a queued
+	// withdrawal and the staker's own claimUnstaked then failed on "Insufficient
+	// balance". See itest/unstake_envelope_test.go.
+	//
+	// Tracked incrementally for the same reason as yield above: deriving it would mean
+	// walking every account's us| queue.
+	kUnstakeOutstanding = "unstake_outstanding"
+	maxClaim            = 20 // bound RC per claimUnstaked call
 )
 
 func assertInit() {
@@ -217,6 +232,7 @@ func Init(payload *string) *string {
 
 	setBig(kTotal, new(big.Int))
 	setBig(kYieldOutstanding, new(big.Int))
+	setBig(kUnstakeOutstanding, new(big.Int))
 	sdk.StateSetObject(kCkptN, "0")
 	sdk.StateSetObject(kInit, "1")
 	// Discovery anchor for the indexer — see the note on c2_init. Emitted last so it
@@ -310,7 +326,9 @@ func Unstake(payload *string) *string {
 	noteDrawdown(c, cur, newStake, h) // BEFORE appendHist — see the function doc
 	appendHist(c, h, newStake)
 	appendCkpt(h, total)
-	// queue withdrawal
+	// queue withdrawal. The amount leaves total_staked above but NOT the contract, so
+	// it moves from one obligation to another rather than becoming free float.
+	setBig(kUnstakeOutstanding, new(big.Int).Add(getBig(kUnstakeOutstanding), amt))
 	tail := idx("us_tail|" + c)
 	ready := h + cooldown()
 	sdk.StateSetObject("us|"+c+"|"+strconv.FormatUint(tail, 10),
@@ -382,6 +400,11 @@ func ClaimUnstaked(_ *string) *string {
 	// CEI is unaffected, and in fact strengthened: every delete and the head advance
 	// now complete before anything external is touched, rather than interleaving.
 	if paid.Sign() > 0 {
+		// Release the obligation BEFORE the transfer, with the deletes and the head
+		// advance above — the money is about to stop being owed because it is about to
+		// be handed over. Leaving it counted would ratchet the reserve up forever and
+		// make genuinely free float permanently unsweepable.
+		setBig(kUnstakeOutstanding, new(big.Int).Sub(getBig(kUnstakeOutstanding), paid))
 		adapter.Transfer(asset(), c, paid)
 		events.New("unstake_claim").
 			Str("acct", c).
@@ -1016,10 +1039,16 @@ func indexOf(s, sub string) int {
 // which is the single worst thing this file could do, so the check is explicit and
 // not inferred from balances.
 
-// obligations = principal + yield that has been funded but not yet claimed.
+// obligations = principal + yield funded but not yet claimed + principal that is
+// unstaked, queued and still serving its cooldown.
+//
+// That third term is easy to forget precisely because unstake already decremented
+// total_staked: the money looks accounted for and is not. It stays owed to the staker
+// until claimUnstaked hands it over.
 func obligations() *big.Int {
 	o := new(big.Int).Set(getBig(kTotal))
-	return o.Add(o, getBig(kYieldOutstanding))
+	o.Add(o, getBig(kYieldOutstanding))
+	return o.Add(o, getBig(kUnstakeOutstanding))
 }
 
 // pullFunding — pull this epoch's yield slice from C2 (permissionless).

@@ -37,12 +37,21 @@ exactly why it did not warrant a fee of its own.
 That does mean **three pools share one balance**, so C1 holds to a stated envelope:
 
 ```
-balance >= total_staked + (yield funded but unclaimed) + airdrop float
+balance >= total_staked + (yield funded but unclaimed)
+         + (unstaked, queued, still in cooldown) + airdrop float
 ```
 
 Only the airdrop may spend the unobligated remainder, and it checks before paying.
 Yield pays from its own funded pool; principal is only ever returned to the staker who
 put it in.
+
+**The third term is the one that was missing.** `unstake` drops `total_staked`
+immediately — it must, or an account on its way out keeps earning weight — but moves
+no tokens: they serve the cooldown in custody. Until that was counted, the envelope
+reported a staker's queued principal as free float for the whole cooldown, and
+`sweepUnobligated` would hand it to the treasury (measured: `{"swept":"1000"}`, then
+the staker's own `claimUnstaked` failed on "Insufficient balance"). Tracked now as
+`unstake_outstanding`, incremented at `unstake` and released at `claimUnstaked`.
 
 `sdk/` and `runtime/` are copied verbatim from `magi_token-contract` and **must never
 be edited**. The Go module is named `magi_token` so those copied imports resolve.
@@ -63,7 +72,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 163 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 167 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 164 reporter + indexer tests, no network
 ```
 
@@ -508,7 +517,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **163 contract tests, 164
+All three contracts + reporter are complete, audited, and green: **167 contract tests, 164
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.
