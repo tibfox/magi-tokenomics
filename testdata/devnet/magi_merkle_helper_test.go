@@ -136,8 +136,15 @@ func waitStateKeyPresent(t *testing.T, d *Devnet, ctx context.Context, node int,
 	for {
 		st, err := d.GetStateByKeys(ctx, node, cid, []string{key})
 		if err == nil {
-			if v, ok := st[key]; ok {
-				if s := strings.Trim(fmt.Sprintf("%v", v), `"`); s != "" {
+			// A key the contract has not written yet comes back PRESENT with a nil
+			// value, and fmt.Sprintf("%v", nil) is the non-empty string "<nil>" — so
+			// checking only for emptiness reports every unwritten key as written, and
+			// every caller returns immediately without waiting for anything. That is
+			// not theoretical: it made magi_tokenomics snapshot `funded|author|0` as
+			// "<nil>" before pullFunding had landed, then read the real 50000 later and
+			// report it as SECURITY FAILURE: epoch-0 funding changed.
+			if v, ok := st[key]; ok && v != nil {
+				if s := strings.Trim(fmt.Sprintf("%v", v), `"`); s != "" && s != "<nil>" {
 					return true
 				}
 			}
