@@ -446,8 +446,19 @@ func ScheduleInfo(_ *string) *string {
 	// instance actually means.
 	// `genesis` is empty until adoptSchedule runs. C7 reads it to confirm this C1 is
 	// actually accumulating drawdowns before it agrees to pay against them.
+	// `token` is here so a distributor naming this contract as its stake target can
+	// check they hold the SAME asset. c3-distributor's init has always contained that
+	// comparison — `if tok := pickField(si, "token"); tok != "" && tok != ...` — but
+	// this response carried no token field, so pickField returned "" and the guard
+	// could never fire.
+	//
+	// It matters because cfg_stakeContract is pinned at init and immutable, and a
+	// claim's staked half goes out as approve-then-stakeFor, which pulls THIS
+	// contract's asset from the distributor. Mismatched tokens mean that pull finds
+	// nothing and every claim carrying a staked portion aborts, permanently, with no
+	// way to repoint the target.
 	return str(`{"epochLen":"` + getStr(kEpochLen) + `","cooldown":"` + getStr(kCooldown) +
-		`","genesis":"` + getStr(kGenesis) + `"}`)
+		`","genesis":"` + getStr(kGenesis) + `","token":"` + getStr(kToken) + `"}`)
 }
 
 //go:wasmexport stakeOf
