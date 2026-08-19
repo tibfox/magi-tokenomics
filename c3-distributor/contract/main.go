@@ -376,7 +376,32 @@ func applyEntries(ch, ep, page, entries string) {
 	// disagree, and the mismatch surfacing at finalize is the point rather than a
 	// side effect — that divergence used to dilute everyone else silently.
 	sk := "pagesum|" + ch + "|" + ep
-	setBig(sk, new(big.Int).Add(getBig(sk), pageTotal))
+	newSum := new(big.Int).Add(getBig(sk), pageTotal)
+	// A page may still land AFTER the root: submitShares gates only on status, and in
+	// attest mode a page can still be gathering votes when the root commits. Landing
+	// UNDER the committed total is therefore normal and must keep working.
+	//
+	// Landing OVER it is terminal, and that is the asymmetry to catch here. pagesum
+	// only accumulates and the root is write-once, so once the sum exceeds the total
+	// nothing can restore equality — the total cannot be raised and the sum cannot be
+	// lowered — and finalizeEpoch's check can never pass again. The epoch's whole
+	// funding then reaches the treasury through a guardian stale-cancel instead of the
+	// earners it belongs to.
+	//
+	// (finalizeEpoch's own comment used to claim its refusal was "self-healing". That
+	// holds only BELOW the total, where the fix is to submit the missing page.)
+	//
+	// Refusing the overshooting page is recoverable by construction: it simply does
+	// not apply, everything already published stays valid, and the epoch still
+	// finalizes. The refused entries were never in the committed tree, so their
+	// earners could not have claimed against this root in any case.
+	if ts := getBig("totalShares|" + ch + "|" + ep); ts.Sign() > 0 && newSum.Cmp(ts) > 0 {
+		sdk.Abort("this page carries shares beyond the committed total for the epoch (" +
+			newSum.String() + " would exceed the declared " + ts.String() + ") — applying it " +
+			"would make the epoch permanently unfinalizable, because the total cannot be " +
+			"raised and the published sum cannot be lowered")
+	}
+	setBig(sk, newSum)
 	// ONE log per page carrying the submitted entries verbatim, rather than one log
 	// per entry.
 	//
@@ -454,9 +479,12 @@ func FinalizeEpoch(payload *string) *string {
 	// unfinalizable epoch that binding to totalShares used to cause. Here it fires
 	// only on the call that would actually commit.
 	//
-	// Aborting here reverts the committing attestation along with everything else,
-	// which is the right outcome and self-healing: no vote is recorded, so once the
-	// pages are complete the same authority can vote again and it goes through.
+	// Aborting here reverts the committing attestation along with everything else, so
+	// no vote is recorded and the same authority can vote again once the pages are
+	// complete. That heals the BELOW case — submit the missing page. It cannot heal
+	// the above case, where the published sum already exceeds the committed total:
+	// nothing decrements pagesum and the root is write-once. applyEntries therefore
+	// refuses the page that would overshoot, so this check only ever sees a shortfall.
 	//
 	// Catches three things that all ended the same way, with funding no call could
 	// reach:
