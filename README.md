@@ -595,6 +595,27 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   [`docs/rc-costs.md`](docs/rc-costs.md#attest-mode--the-payload-record-dominates-and-it-is-priced-by-the-byte)
   for the measured curve. Still not done, but the reason to do it is now measured
   rather than assumed.
+- **`TestDevnetMagiUpgrade` cannot be run from a stock go-vsc-node checkout.** It
+  needs `Devnet.UpdateContract`, `ContractUpdateOpts` and `Devnet.PendingUpdates`,
+  which live on that repo's `feat/contract-update-timelock` branch, not on main.
+  Against a checkout without them the whole `devnet` package fails to compile, so the
+  file has to be moved aside to run any of the others. The result above stands — it
+  was exercised on a checkout that had them — but it is not reproducible today
+  without that branch, and saying so is the difference between a verified claim and
+  an unfalsifiable one.
+- **Seven audit findings remain open, all narrow and none fund-loss.** `executeTokenOp`
+  lets any single VETO authority execute a matured token op, giving the blocking set
+  unilateral power to complete what it exists to stop; posts whose payout falls
+  between one epoch's last block time and the next epoch's first are scored in no
+  epoch; `shares.muted` and `source.exclude` silently do nothing unless each entry
+  carries a `hive:` prefix; bucket names are unvalidated in all three contracts, so a
+  quote in a name truncates the JSON C1 and C3 build; and `submitRoot` has no on-chain
+  progress marker, so every resume re-broadcasts a call that must abort.
+- **About nineteen findings from the audit were never adjudicated.** The multi-agent
+  run that produced them lost 66 of 91 agents to a classifier, including every
+  verifier on those findings and the synthesis step. They are recoverable from the
+  run's `journal.jsonl` and are mostly low-severity, but "not adjudicated" is not the
+  same as "not real", and this file should not imply the audit was completed.
 - Per-tenant config values and the governance DAO are out of scope here.
 
 ### Two suites worth knowing about
