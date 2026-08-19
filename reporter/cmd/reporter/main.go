@@ -588,20 +588,46 @@ type computed struct {
 	Pages     []sharecore.Page
 }
 
+// computeForProof is compute WITHOUT the submit-path policy gates.
+//
+// Those gates exist to stop a divergent reporter SUBMITTING, and they are right for
+// that. Applied to a read-only proof they lock earners out: after a setPolicy from
+// digest A to B, an epoch funded under A satisfies NEITHER config — the old one fails
+// verifyPolicy (A != current B), the new one fails verifyEpochPolicy (B != pin A). So
+// `reporter proof` refused every pre-change epoch, and both docs/how-it-works.md and
+// reporter/README.md promise it as the path that "needs no indexer at all… so you are
+// never locked out by someone else's server being down". Combined with proofsvc
+// being down, that left no route at all to a proof.
+//
+// What replaces the gates is a STRICTER check, in cmdProof: the computed book must
+// reproduce the epoch's COMMITTED ROOT. A policy digest is a proxy for "did this
+// reporter score the epoch the agreed way"; the root is the thing itself. If the root
+// matches, the proof will verify on chain whatever the digests say. If it does not,
+// no digest could have made the proof good.
+func (a *app) computeForProof(epochFlag string) (*computed, error) {
+	return a.computeInner(epochFlag, false)
+}
+
 func (a *app) compute(epochFlag string) (*computed, error) {
+	return a.computeInner(epochFlag, true)
+}
+
+func (a *app) computeInner(epochFlag string, enforcePolicy bool) (*computed, error) {
 	ep, _, err := a.resolveEpoch(epochFlag)
 	if err != nil {
 		return nil, err
 	}
-	if problems := a.verifyChainConfig(); len(problems) > 0 {
+	if problems := a.verifyChainConfig(); enforcePolicy && len(problems) > 0 {
 		return nil, fmt.Errorf("refusing to compute: %s", strings.Join(problems, "; "))
 	}
 	// The epoch may have been funded under an OLDER policy than the channel now
 	// declares — governance is allowed to change it, and pullFunding pins whatever
 	// was in force to the epoch. That pin is what this epoch must be scored against
 	// for the rest of its life, so it outranks the channel-level check above.
-	if err := a.verifyEpochPolicy(ep); err != nil {
-		return nil, err
+	if enforcePolicy {
+		if err := a.verifyEpochPolicy(ep); err != nil {
+			return nil, err
+		}
 	}
 	if a.cfg.Kind() == SourceLP {
 		return a.computeLP(ep)
@@ -1317,6 +1343,30 @@ func (a *app) confirmBeforeFinalize(pl submit.Plan, sentThisRun map[string]bool,
 // logs. This path needs no indexer at all — it recomputes from Hive — which makes it
 // the fallback when the indexer is unavailable and the check that the indexer's copy
 // is honest.
+
+// assertRootMatchesChain refuses to hand over a proof from a book the chain did not
+// commit. An empty on-chain root means the epoch has no commitment yet, so there is
+// nothing to claim against and nothing to compare.
+func (a *app) assertRootMatchesChain(ep uint64, mine string) error {
+	key := a.chKey("root", strconv.FormatUint(ep, 10))
+	st, err := a.reader().StateGet(a.cfg.Contracts.Distributor, []string{key})
+	if err != nil {
+		return fmt.Errorf("could not read the committed root for epoch %d: %w", ep, err)
+	}
+	onChain := strings.TrimSpace(st[key])
+	if onChain == "" {
+		return fmt.Errorf("epoch %d has no committed root yet, so there is nothing to prove "+
+			"against — a claim would be refused", ep)
+	}
+	if !strings.EqualFold(onChain, mine) {
+		return fmt.Errorf("epoch %d committed root %s but this config computes %s.\n"+
+			"    A proof from this book would not verify on chain. The epoch was scored with "+
+			"different\n    settings than this config carries — if policy changed since, use "+
+			"the configuration\n    the epoch was funded under.", ep, onChain, mine)
+	}
+	return nil
+}
+
 func (a *app) cmdProof(epochFlag, account string, asJSON bool) error {
 	if account == "" {
 		return fmt.Errorf("-account is required for proof")
@@ -1324,11 +1374,18 @@ func (a *app) cmdProof(epochFlag, account string, asJSON bool) error {
 	if !strings.Contains(account, ":") {
 		account = "hive:" + account
 	}
-	c, err := a.compute(epochFlag)
+	c, err := a.computeForProof(epochFlag)
 	if err != nil {
 		return err
 	}
 	tree := sharecore.BuildTree(c.Result.Shares)
+	// The book must reproduce what the chain committed. This is what makes skipping
+	// the policy gates above safe — and it is a check the proof path never had, so a
+	// divergent book used to yield a proof that verified locally and then failed at
+	// the point of payment, which is the worst place to find out.
+	if err := a.assertRootMatchesChain(c.Epoch, tree.Root()); err != nil {
+		return err
+	}
 	proof, ok := tree.Proof(account)
 	if !ok {
 		return fmt.Errorf("%s earned nothing in epoch %d — there is no proof to give",
