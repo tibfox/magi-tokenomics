@@ -72,7 +72,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 191 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 194 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 174 reporter + indexer tests, no network
 ```
 
@@ -517,7 +517,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **191 contract tests, 174
+All three contracts + reporter are complete, audited, and green: **194 contract tests, 174
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.

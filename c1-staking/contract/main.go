@@ -306,6 +306,17 @@ func StakeFor(payload *string) *string {
 		sdk.Abort("acct required")
 	}
 	validateAddr(acct)
+	// A ledger DOMAIN, not just a well-formed string. msg.caller is always
+	// domain-qualified, so stake credited to a bare "alice" can never be unstaked by
+	// anyone — and it still enters total_staked, which is the yield denominator, so it
+	// dilutes every other staker for the life of the deployment by a share nobody can
+	// claim. airdropBatch, the treasury check at init, and C3's applyEntries all
+	// enforce this; stakeFor was the one path that did not.
+	if !isLedgerAddr(acct) {
+		sdk.Abort("acct must be a ledger address (hive:/contract:/did:/system:) — stake " +
+			"credited to a bare name can never be unstaked and would dilute every other " +
+			"staker's yield permanently")
+	}
 	amt := mustAmount(payload)
 	creditFor(c, acct, amt)
 	return ok()
