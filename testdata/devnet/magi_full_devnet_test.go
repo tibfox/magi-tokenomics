@@ -655,7 +655,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, holderB), "stakeFor while not allowlisted"},
 		// roles they do not hold
 		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "finalize as a mere shareholder"},
-		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"2"}`, "sweep the content pot (valid nonce)"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"2","amount":"1"}`, "sweep the content pot (valid nonce)"},
 		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "sweep a yield epoch that has stakers (refused on that, before auth)"},
 	}
 	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
@@ -791,7 +791,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
 		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "C3 finalize an epoch they do not control"},
 		{c3ID, "cancelEpoch", `{"channel":"content","epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
-		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1","amount":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "C3 claim with no share"},
 
 		// --- the LP channel: same contract, same surface, DIFFERENT channel ---
@@ -804,7 +804,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "lp push fraudulent shares"},
 		{c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "lp finalize"},
 		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "lp veto a legitimate epoch"},
-		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "lp sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1","amount":"1"}`, "lp sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "lp claim with no share"},
 		{c3ID, "addChannel", fmt.Sprintf(
 			`{"channel":"pirate","bucket":"content","window":"1","reporterMode":"0",`+

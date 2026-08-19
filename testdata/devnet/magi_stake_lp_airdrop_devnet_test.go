@@ -287,7 +287,7 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 		{c5ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, holder), "fake LP shares"},
 		{c5ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "attacker finalizes C5"},
 		{c5ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "attacker vetoes C5"},
-		{c5ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "attacker sweeps C5"},
+		{c5ID, "sweepUnallocated", `{"channel":"lp","nonce":"1","amount":"1"}`, "attacker sweeps C5"},
 		// the holder's REAL proof, so the double-claim guard is what refuses it
 		{c5ID, "claim", lpBook.ClaimPayload(t, "lp", "0", "hive:"+holder), "attacker double-claims C5"},
 		{c1ID, "claimYield", `{"epoch":"0"}`, "attacker double-claims C7"},

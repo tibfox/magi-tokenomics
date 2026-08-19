@@ -279,8 +279,11 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	}
 	t.Logf("  rogue claimed nothing (balance still %s)", rogueBefore)
 
-	// the rolled-forward funding is recoverable by the guardian to the PINNED treasury
-	callN(5, c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "guardian sweeps the rolled-forward pool")
+	// the rolled-forward funding is recoverable by the guardian to the PINNED treasury.
+	// The amount is DECLARED: guardians attest to a specific figure rather than to
+	// whatever the pool holds when the last vote lands, so a co-signature approving a
+	// sweep of 0 cannot be reused later to move a large balance.
+	callN(5, c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1","amount":"5000"}`, "guardian sweeps the rolled-forward pool")
 	waitValue(c3ID, "unalloc|content", "0", "C3 unallocated after sweep")
 	if got := bal(treasury); got.String() != "5000" {
 		t.Fatalf("treasury should hold the recovered 5000, has %s", got)
@@ -358,7 +361,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		{tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"hive:%s"}`, rogue), "reporter seizes the token"},
 		{c2ID, "claimBucket", `{"epoch":"0"}`, "reporter impersonates a bucket"},
 		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "reporter vetoes (guardian-only)"},
-		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"7"}`, "reporter sweeps (guardian-only)"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"7","amount":"1"}`, "reporter sweeps (guardian-only)"},
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"0","page":"1","entries":"hive:%s:5"}`, rogue), "reporter reopens a cancelled epoch"},
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"1","entries":"hive:%s:5"}`, rogue), "reporter adds shares after finalize"},
 	} {

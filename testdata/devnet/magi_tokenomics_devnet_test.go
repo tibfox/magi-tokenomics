@@ -345,7 +345,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"1","page":"0","entries":"hive:%s:999999"}`, attacker), "attacker pushes fake shares"},
 		{c3ID, "finalizeEpoch", `{"channel":"author","epoch":"1"}`, "attacker finalizes"},
 		{c3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "attacker vetoes"},
-		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "attacker sweeps"},
+		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"1"}`, "attacker sweeps"},
 		// carries their REAL proof, so the double-claim guard is what refuses it
 		// rather than the missing-proof check — otherwise the guard under test
 		// never runs.
