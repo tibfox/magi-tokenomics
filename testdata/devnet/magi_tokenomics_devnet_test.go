@@ -2,8 +2,11 @@ package devnet
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -52,12 +55,38 @@ var magiTokenWasm = envOr("MAGI_TOKEN_WASM",
 // without editing their repo. Override with MAGI_POSTGREST_IMAGE / MAGI_HAFAH_IMAGE.
 func magiDevnetConfig() *Config {
 	cfg := DefaultConfig()
+	// NAMESPACE THIS RUN so it can never be confused with another devnet on the host.
+	//
+	// The harness defaults to "devnet-test-<4 random bytes>", and any other checkout
+	// on this machine produces names from the same space — a second agent session
+	// working the market contracts runs its own devnet concurrently. Sharing a
+	// namespace means every cleanup has to distinguish them by inspecting compose
+	// config paths, and a filter that gets that wrong destroys someone else's run.
+	//
+	// The prefix deliberately avoids the substring "magi": production services on this
+	// host are named magi-deployer-*, magi-mongo-indexer-*, and a `--filter name=magi-`
+	// cleanup once removed the live contract deployers. A namespace that cannot
+	// accidentally match a production container is worth more than a readable one.
+	cfg.ProjectName = "tokdevnet-" + randomSuffix()
 	cfg.PostgRESTImage = envOr("MAGI_POSTGREST_IMAGE",
 		"registry.gitlab.syncad.com/hive/haf_api_node/postgrest:1.28.5")
 	// hafah is deliberately NOT pinned: it is not what broke, and pinning it alongside
 	// postgrest left the chain stuck at block 1 with no witnesses registered. Only the
 	// component that actually changed behaviour is held back.
 	return cfg
+}
+
+// randomSuffix is the per-run half of the project namespace. Kept distinct per run so
+// two of OUR suites cannot collide either — they cannot run concurrently, but a
+// crashed run leaving containers behind must not be adopted by the next one.
+func randomSuffix() string {
+	b := make([]byte, 4)
+	if _, err := crand.Read(b); err != nil {
+		// A collision is worse than a boring name, but rand failing is not a reason to
+		// abort a test run; fall back to the pid, which is unique among live processes.
+		return "pid" + strconv.Itoa(os.Getpid())
+	}
+	return hex.EncodeToString(b)
 }
 
 // requireDiskSpace fails the test immediately when the filesystem cannot hold a run.

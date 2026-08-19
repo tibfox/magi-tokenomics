@@ -9,6 +9,32 @@ internals (`d.cfg`, `d.witnessAccount`, …), so they must sit *inside* that pac
 `testdata/` is ignored by the Go tool, so keeping them here preserves them under
 version control without breaking `go build ./...`.
 
+## These runs are namespaced — keep it that way
+
+`magiDevnetConfig()` sets `cfg.ProjectName = "tokdevnet-<rand>"`. The harness would
+otherwise default to `devnet-test-<rand>`, which is the same namespace every other
+go-vsc-node checkout on a machine uses — including a second agent session running the
+market contracts' devnet concurrently.
+
+Clean up by matching **that prefix and nothing else**:
+
+```sh
+docker ps -aq --filter "label=com.docker.compose.project" \
+  --format '{{.Label "com.docker.compose.project"}} {{.ID}}' \
+  | awk '$1 ~ /^tokdevnet-/ {print $2}' | xargs -r docker rm -f
+```
+
+Two rules learned the hard way, both from real damage on this host:
+
+- **Never select containers by name substring.** `--filter name=magi-` matches
+  `magi-deployer-contractdeploy-*` — the production contract deployers — and removed
+  them. The prefix here deliberately contains no "magi" for that reason.
+- **Never select by the `devnet-test-` prefix either.** That is the shared default,
+  so it matches other people's concurrent runs.
+- **List the selector before you pass it to `rm`.** Run it with
+  `--format '{{.Names}}'` and read the output first. Both mistakes above were caught
+  that way, one of them before it did any harm.
+
 ## Before you run them: two things that are not in this directory
 
 **`waitStateKeyPresent` was missing until 2026-08-18.** Eleven suites call it and it
