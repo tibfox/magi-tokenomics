@@ -339,6 +339,58 @@ size. The cost is getting a collision-resistant digest into a tinygo wasm contra
 | deployer (one-off) | ~18,000 RC | the whole sequence at once; ~10 HBD is ample |
 | migration (per 25-holder batch) | ~9,600 RC | the run, not the batch — back-to-back batches do not thaw in between |
 
+### Sizing a real deployment: how much HBD each role must hold
+
+The tables above are per call. This is the number an operator actually needs: given a
+community size and an epoch cadence, what balance does the reporter need to hold.
+
+**Two facts do the work.** Capacity is the account's VSC-ledger HBD balance in millis
+plus 10,000 for a `hive:` account — confirmed on a real chain by the scale run, whose
+reporter logged `ledger hbd=290000 -> RC ~300000`. And a spend does not deduct, it
+FREEZES, thawing linearly back over ~5 days.
+
+That second fact is what catches people. With epochs longer than the thaw window each
+spend has fully returned before the next one, so capacity need only cover one epoch.
+With DAILY epochs it does not: the spend from *d* days ago still has `1 − d/5` frozen,
+so at steady state the frozen total settles at
+
+    E × (1 + 0.8 + 0.6 + 0.4 + 0.2) = 3E
+
+**Reporter capacity, derived from the measured per-page cost** (1,956 RC at 60 entries,
+plus ~600 submitRoot, ~2,500 poke and pull, ~600 finalize):
+
+| earners | pages | RC per epoch | daily epochs need | weekly epochs need |
+|---:|---:|---:|---:|---:|
+| 50 | 1 | 5,656 | 16,968 | 5,656 |
+| 200 | 4 | 11,524 | 34,572 | 11,524 |
+| 500 | 9 | 21,304 | 63,912 | 21,304 |
+| 1,000 | 17 | 36,952 | 110,856 | 36,952 |
+| 2,000 | 34 | 70,204 | 210,612 | 70,204 |
+| 5,000 | 84 | 168,004 | 504,012 | 168,004 |
+
+Capacity is millis, so **subtract the 10,000 free tier and read the rest as HBD/1000**:
+a 500-earner tribe on daily epochs needs ~63,912 − 10,000 ≈ **54 HBD** on the
+reporter's ledger; on weekly epochs, ~11 HBD. A 2,000-earner tribe on daily epochs
+needs ~200 HBD.
+
+Three things worth taking from the shape of that table:
+
+- **Cadence costs more than size.** Moving 500 earners from weekly to daily epochs
+  triples the requirement; growing from 500 to 1,000 earners only adds ~70%. A tribe
+  under RC pressure should lengthen its epoch before it trims its earner list.
+- **`min_share_bps` is the other lever, and it is cheaper than it looks.** Pages scale
+  with earners, so dropping a long tail of dust earners removes whole pages. Going
+  from 500 to 200 earners saves 5 pages — nearly half the epoch's cost — and the value
+  redistributes to those who remain rather than being stranded.
+- **The keeper and claimants need nothing.** A keeper poke plus pulls is ~5,400 RC and
+  a claim ~600–1,100, both inside the free tier. Only the reporter and the deployer
+  need a funded ledger; an earner claiming a reward never does.
+
+Sanity-check against the real chain: the scale run's reporter held 290,000 millis
+against a 502-earner epoch measured here at ~21,300 RC, i.e. roughly 14× headroom —
+which is why it never came close to the ceiling even submitting all 9 pages
+back-to-back.
+
 ### The minimum deployment is 1.3% under the free tier
 
 A deployer holding **no HBD at all** has exactly 10,000 RC. The smallest useful
