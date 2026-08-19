@@ -241,7 +241,9 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	for ep := first; ep <= latest; ep++ {
 		keys = append(keys, a.chKey("status", strconv.FormatUint(ep, 10)))
 	}
-	state, err := a.vsc.StateGet(a.cfg.Contracts.Distributor, keys)
+	// reader(), not a.vsc: every other chain read in this file goes through it, and
+	// bypassing it here made the epoch selector the one path a test could not stub.
+	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
 	if err != nil {
 		return 0, err
 	}
@@ -253,6 +255,42 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	// Everything in the window is finalized/cancelled. Return the latest closed
 	// epoch so the caller reports "already fully submitted" rather than an error.
 	return latest, nil
+}
+
+// nextUnfinalizedAfter returns the first unfinalized epoch strictly after `ep`,
+// still inside the lookback window.
+//
+// This is what lets a run step OVER an epoch it cannot work. An epoch with no
+// earners computes to an empty book, and cmdRun refuses it — correctly, since
+// finalizeEpoch requires totalShares>0 and funding an epoch that can never finalize
+// strands it. But nothing sets `status` for such an epoch, so oldestUnfinalized kept
+// returning the same one every run and every LATER epoch — with real earners and
+// real funding — went unlooked-at until the empty one fell below the window floor.
+// One quiet week at launch froze the channel for up to `lookback` epochs.
+//
+// An empty epoch cannot be finalized by anyone; only a guardian cancelEpoch resolves
+// it. So the reporter's job is to step past it and keep working, having said so.
+func (a *app) nextUnfinalizedAfter(ep, latest uint64) (uint64, error) {
+	if ep >= latest {
+		return 0, fmt.Errorf("no epoch after %d is closed yet (head epoch is %d): "+
+			"nothing further to work in this window", ep, latest)
+	}
+	first := ep + 1
+	keys := make([]string, 0, latest-first+1)
+	for e := first; e <= latest; e++ {
+		keys = append(keys, a.chKey("status", strconv.FormatUint(e, 10)))
+	}
+	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
+	if err != nil {
+		return 0, err
+	}
+	for e := first; e <= latest; e++ {
+		if state[a.chKey("status", strconv.FormatUint(e, 10))] == "" {
+			return e, nil
+		}
+	}
+	return 0, fmt.Errorf("every epoch after %d up to %d is already finalized or "+
+		"cancelled — nothing left to work", ep, latest)
 }
 
 // windowFloor is the oldest epoch the lookback window will consider.
@@ -778,8 +816,75 @@ func (a *app) cmdPlan(epochFlag string, asJSON bool) error {
 	return nil
 }
 
-func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
+// selectWorkableEpoch builds a plan, stepping OVER any auto-selected epoch that has
+// no earners.
+//
+// An epoch with no qualifying posts computes to an empty book, and it must never
+// reach the chain: distributeEpoch and pullFunding would move C2's slice into a
+// distributor that can then never finalize (finalizeEpoch requires totalShares>0),
+// leaving the funding recoverable only by a guardian stale-cancel that pays the
+// treasury rather than any earner.
+//
+// Refusing was right; STOPPING there was not. Nothing sets `status` for such an
+// epoch, so oldestUnfinalized returned the same one on every subsequent run and every
+// later epoch — with real earners and real funding — was never looked at, because a
+// run handles exactly one epoch. It only cleared when the empty epoch fell below the
+// window floor: up to `lookback` (default 20) epochs of frozen payouts from a single
+// quiet week, which is guaranteed at launch and routine for a small tribe.
+//
+// An empty epoch cannot be finalized by anyone, so the reporter cannot resolve it —
+// only a guardian cancelEpoch can. What it CAN do is say so and get on with the
+// epochs it can work.
+//
+// An EXPLICIT -epoch is never stepped over: the operator named that epoch, and
+// silently working a different one would be worse than refusing.
+func (a *app) selectWorkableEpoch(epochFlag string) (*computed, submit.Plan, error) {
 	c, pl, err := a.buildPlan(epochFlag)
+	if err != nil {
+		return nil, submit.Plan{}, err
+	}
+	if epochFlag != "" || !planHasFinalize(pl) || countSubmitShares(pl) > 0 {
+		return c, pl, nil
+	}
+
+	_, head, err := a.resolveEpoch("")
+	if err != nil {
+		return nil, submit.Plan{}, err
+	}
+	latest, err := hivesrc.LatestClosedEpoch(a.cfg.Epoch.Genesis, a.cfg.Epoch.Len, head)
+	if err != nil {
+		return nil, submit.Plan{}, err
+	}
+
+	// Bounded by the window: nextUnfinalizedAfter never returns an epoch past
+	// `latest`, so this cannot spin.
+	for {
+		ep, perr := strconv.ParseUint(pl.Epoch, 10, 64)
+		if perr != nil {
+			return nil, submit.Plan{}, perr
+		}
+		fmt.Printf("epoch %d has no share entries, so it can never be finalized "+
+			"(finalizeEpoch requires totalShares>0). NOT funding it — pulling funding into an "+
+			"epoch with no earners strands it until a guardian cancels it after "+
+			"epochEnd+staleBlocks, which pays the treasury and not the earners.\n"+
+			"  A guardian should cancelEpoch %d; skipping to the next open epoch.\n", ep, ep)
+
+		next, nerr := a.nextUnfinalizedAfter(ep, latest)
+		if nerr != nil {
+			return nil, submit.Plan{}, fmt.Errorf("epoch %d has no earners and %w", ep, nerr)
+		}
+		c, pl, err = a.buildPlan(strconv.FormatUint(next, 10))
+		if err != nil {
+			return nil, submit.Plan{}, err
+		}
+		if !planHasFinalize(pl) || countSubmitShares(pl) > 0 {
+			return c, pl, nil
+		}
+	}
+}
+
+func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
+	c, pl, err := a.selectWorkableEpoch(epochFlag)
 	if err != nil {
 		return err
 	}
@@ -825,18 +930,6 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	if len(remaining) == 0 {
 		fmt.Println("epoch already fully submitted")
 		return nil
-	}
-
-	// An epoch with no earners must never reach the chain. distributeEpoch and
-	// pullFunding would move C2's slice into a distributor that can then never
-	// finalize (finalizeEpoch requires totalShares>0), leaving the funding
-	// recoverable only by a guardian stale-cancel that pays the treasury rather than
-	// any earner. Refuse before the first broadcast, not at the finalize step.
-	if planHasFinalize(pl) && countSubmitShares(pl) == 0 {
-		return fmt.Errorf("epoch %s has no share entries, so it can never be finalized "+
-			"(finalizeEpoch requires totalShares>0). Refusing to fund it: pulling funding into an "+
-			"epoch with no earners strands it until a guardian cancels the epoch after "+
-			"epochEnd+staleBlocks, which pays the treasury and not the earners", pl.Epoch)
 	}
 
 	var b broadcast.Broadcaster
