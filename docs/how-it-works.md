@@ -152,6 +152,7 @@ against everyone else — outsiders, and token holders who aren't the owner.
 | reporter | submit share lists, close an epoch | mint, move funds, pay itself |
 | guardian | cancel a bad report during the challenge window; sweep a day that **nobody could ever claim** to a **fixed** treasury | redirect the treasury, take funds, touch a day that had any staker |
 | owner | queue token operations (pause, change owner) on a **time delay** | act instantly, or bypass the veto |
+| veto | cancel a queued token operation at its threshold, at any point before it executes | queue one, change one, or stop `unpause` |
 
 Two rules are enforced by the contracts, not by convention:
 
@@ -163,6 +164,17 @@ Two rules are enforced by the contracts, not by convention:
 
 Staked funds sit in the staking contract and **no role can touch them** — not the
 owner, not the guardian.
+
+**Executing a matured operation is not an authorisation step.** Once the guardian
+threshold has queued an operation and its timelock has run, any single member of the
+guardian *or* veto set can fire it. That sounds like more power than it is: the
+executor cannot choose the operation, its nonce or its target — all three are bound
+into the queued key and re-checked on the way through — and execution moves nothing in
+the framework's own ledger. What it means in practice is that letting an operation
+lapse takes *unanimous* inaction across both sets rather than one party sitting out.
+The veto's actual power is unaffected: its cancel has no time gate, so the coalition
+can still block at its threshold right up to the instant of execution, and it can
+never block `unpause`, so a freeze cannot be held.
 
 ## What you configure
 

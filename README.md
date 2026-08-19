@@ -603,19 +603,41 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   was exercised on a checkout that had them — but it is not reproducible today
   without that branch, and saying so is the difference between a verified claim and
   an unfalsifiable one.
-- **Seven audit findings remain open, all narrow and none fund-loss.** `executeTokenOp`
-  lets any single VETO authority execute a matured token op, giving the blocking set
-  unilateral power to complete what it exists to stop; posts whose payout falls
-  between one epoch's last block time and the next epoch's first are scored in no
-  epoch; `shares.muted` and `source.exclude` silently do nothing unless each entry
-  carries a `hive:` prefix; bucket names are unvalidated in all three contracts, so a
-  quote in a name truncates the JSON C1 and C3 build; and `submitRoot` has no on-chain
-  progress marker, so every resume re-broadcasts a call that must abort.
-- **About nineteen findings from the audit were never adjudicated.** The multi-agent
-  run that produced them lost 66 of 91 agents to a classifier, including every
-  verifier on those findings and the synthesis step. They are recoverable from the
-  run's `journal.jsonl` and are mostly low-severity, but "not adjudicated" is not the
-  same as "not real", and this file should not imply the audit was completed.
+- ~~**Seven audit findings remain open.**~~ **Two remain, both low and neither
+  fund-loss, and both are now closed in code.** `submitRoot` had no on-chain progress
+  marker, so a resume re-broadcast a call the contract must abort — `chainApplied` now
+  reads `root|<ch>|<ep>`, which is safe as a presence check because the resume guard
+  has already refused any run whose plan root differs from the committed one. And
+  `shares.muted`/`source.exclude` silently did nothing without a `hive:` prefix, since
+  both are exact-match sets probed with a domain-prefixed account; `Config.Validate`
+  now refuses a bare name rather than normalising it, matching
+  `shares.app_tax.beneficiary`. Both guards are mutation-tested, and the consumers are
+  pinned in their own packages so the validator cannot outlive the rule it enforces.
+- **Three of those seven were refuted, not fixed.** Re-reading the audit journal (see
+  below) turned up verdicts that already disposed of them. `executeTokenOp`'s
+  single-veto execution is real but is not the veto's problem: the same bare membership
+  check already lets any one of N guardians fire a matured op, execution moves nothing
+  in the ledger, and `cancelTokenOp` has no height gate, so the coalition's block stays
+  live until the instant of execution and can never hold an `unpause`. Bucket-name
+  truncation needs a payload that is not valid JSON, and both ingest paths hand the
+  contract a JSON marshaller's output. The epoch-boundary gap is real in the code and
+  unreachable in the data: Hive block times sit on a three-second slot grid and
+  `payout_at = created + 604800s` stays on it, so the uncovered interval holds only
+  seconds that no payout can occupy. It becomes representable only when Hive misses the
+  boundary slot *and* a scored post lands on precisely that second — order one dropped
+  post per 140 years. **Deliberately not fixed:** the one-line correction changes every
+  epoch's boundary and so every root, and a fleet that upgraded unevenly would have two
+  attesters computing different books — a strictly worse failure than the one being
+  closed. It belongs with a policy-version bump, not a cleanup sweep. The roles table
+  in [`docs/how-it-works.md`](docs/how-it-works.md) now states the execute semantics.
+- ~~**About nineteen findings from the audit were never adjudicated.**~~ **That was
+  wrong, and the correction is worth more than the claim.** The run's `journal.jsonl`
+  holds 25 completed agents: 6 finders producing 28 raw findings that deduplicate to 19
+  distinct issues, and **19 verifiers whose verdicts did land**. After dedup exactly one
+  issue had neither a verdict nor a fix — the `muted`/`exclude` prefix above, which was
+  then verified directly against the source rather than taken from the journal. What
+  the classifier cost was the synthesis step, not the adjudication, so the findings
+  looked unadjudicated only because nothing had collated them.
 - Per-tenant config values and the governance DAO are out of scope here.
 
 ### Two suites worth knowing about

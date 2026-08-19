@@ -74,11 +74,11 @@ which is unrecoverable.
 | `source.tag` | *required for* `kind=content` | the Hive tag/community that counts |
 | `source.limit` | `1000` | max posts fetched per epoch |
 | `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required). Either way a vote contributes its **weight**, not a unit: `hive_rshares` uses Hive's own stake-weighted figure, `token_stake` uses `stake x vote% / 10000` |
-| `source.exclude` | `[]` | accounts whose posts are skipped entirely |
+| `source.exclude` | `[]` | accounts whose posts are skipped entirely, and whose votes carry no weight. Entries **must** carry the ledger domain — `hive:botfarm`, not `botfarm`. Matched exactly against the prefixed account, so a bare name excludes nobody; refused at load rather than silently ignored |
 | `shares.author_reward_bps` | `0` | author/curator split, `0..10000` |
 | `shares.author_curve` | `"1/1"` | `"num/den"` rational exponent |
 | `shares.curation_curve` | `"1/1"` | `"1/2"` = sqrt = **early** voters win; `>1` rewards late voters. Opposite cultures — pick deliberately |
-| `shares.muted` | `[]` | accounts that earn nothing |
+| `shares.muted` | `[]` | accounts that earn nothing. Same rule as `source.exclude`: **must** be `hive:spammer`, not `spammer`. (`submit.account` is the exception that takes either form — it is normalised, these are not) |
 | `page.max_entries` | `60` | entries per `submitShares` call |
 | `page.max_bytes` | `3800` | must be `<= 4096`, the auth module's payload cap |
 | `submit.account` | `""` | reporter Hive account, with or without `hive:` |
@@ -303,7 +303,25 @@ file:
 |-----------------|-------------------------|
 | pullFunding     | `funded\|<ep>`          |
 | submitShares P  | `ssdone\|<ep>\|<P>`     |
+| submitRoot      | `root\|<ep>`            |
 | finalizeEpoch   | `status\|<ep>`          |
+
+Each marker is written where the contract actually applies the call — inside the
+`if committed` block — so under Attest it appears when the quorum converges, not
+when this reporter voted.
+
+`submitRoot` was missing from this table and from the check, which is why a re-run
+of an already-committed epoch re-broadcast it every time: the contract aborts on
+`root already submitted for this epoch`, but only after the RC is spent, and the
+broadcaster sees an L1 txid and no L2 receipt, so nothing reported it.
+
+Reading `root|<ep>` is safe as a bare *presence* check — rather than a comparison —
+because a run whose plan root differs from the committed one never gets this far.
+Before deciding what remains, `run` re-reads `root|<ep>` and refuses outright if this
+run's book does not reproduce it: the book is recomputed and repaginated every run, so
+a repagination between a partial run and its resume would otherwise publish this
+book's pages against that book's root, and the root is immutable. A non-empty
+`root|<ep>` at the idempotency check is therefore always *this* run's root.
 
 The progress file is an audit trail and is reported when it disagrees with the
 chain. This is deliberate: a `pullFunding` that was broadcast but claimed 0 (because
