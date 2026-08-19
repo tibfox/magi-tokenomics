@@ -417,11 +417,31 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 			yield["3"].String(), yield["4"].String()}, yield["4"], yield["0"])
 
 	// ---- the unstake queued in epoch 1 matures and is withdrawable ---------
+	//
+	// POLLED, not slept on. This was `time.Sleep(20s)` and then an exact balance
+	// assertion — the only wait in this suite that did not poll, while every other one
+	// uses waitValue. A withdrawal that had not been applied yet reads as a delta of
+	// 0, which is indistinguishable from "claimUnstaked paid nothing", and that is
+	// exactly how it failed a sweep: `A withdrew 0 from the unstake, want 100` sent me
+	// looking for a contract regression that was not there.
+	//
+	// It retries the CALL as well as re-reading the balance. The entry matures on a
+	// block height, so if the cooldown has not elapsed the claim legitimately pays
+	// nothing and the right response is to ask again later, not to fail.
 	aBefore := bal(owner)
-	callN(1, c1ID, "claimUnstaked", `{}`, "A withdraws the matured unstake")
-	time.Sleep(20 * time.Second)
-	if got := new(big.Int).Sub(bal(owner), aBefore); got.String() != "100" {
-		t.Fatalf("A withdrew %s from the unstake, want 100", got)
+	var withdrawn *big.Int
+	wdDeadline := time.Now().Add(5 * time.Minute)
+	for {
+		callN(1, c1ID, "claimUnstaked", `{}`, "A withdraws the matured unstake")
+		withdrawn = new(big.Int).Sub(bal(owner), aBefore)
+		if withdrawn.String() == "100" {
+			break
+		}
+		if time.Now().After(wdDeadline) {
+			t.Fatalf("A withdrew %s from the unstake after 5 minutes, want 100 — the entry "+
+				"was queued in epoch 1 and its cooldown has long elapsed", withdrawn)
+		}
+		time.Sleep(15 * time.Second)
 	}
 	waitValue(c1ID, "total_staked", "1400", "C1 total_staked after withdrawal")
 	t.Logf("UNSTAKE LIFECYCLE OK: queued in epoch 1, matured and withdrawn after cooldown")
