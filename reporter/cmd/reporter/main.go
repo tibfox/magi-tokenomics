@@ -1033,6 +1033,7 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 //
 //	funded|<ep>        set by pullFunding (and only by it)
 //	ssdone|<ep>|<page> set when a page is APPLIED (not merely attested)
+//	root|<ep>          set when the share-book root is COMMITTED (same rule)
 //	status|<ep>        set to finalized/cancelled by finalizeEpoch/cancelEpoch
 //
 // distributeEpoch has no per-epoch marker on the distributor — it is a keeper poke
@@ -1126,7 +1127,7 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, 
 	// cfg_rMode rides along: the finalize gate needs to know whether unapplied pages
 	// are a fault or the normal state of an Attest quorum that has not converged yet.
 	keys := []string{a.chKey("funded", pl.Epoch), a.chKey("status", pl.Epoch),
-		"ch_rMode|" + a.cfg.Contracts.Channel}
+		a.chKey("root", pl.Epoch), "ch_rMode|" + a.cfg.Contracts.Channel}
 	for _, c := range pl.Calls {
 		if c.Action == "submitShares" {
 			keys = append(keys, a.chKey("ssdone", pl.Epoch, strconv.Itoa(submit.PageOf(c))))
@@ -1158,6 +1159,15 @@ func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, 
 			out[k] = funded
 		case "submitShares":
 			out[k] = state[a.chKey("ssdone", pl.Epoch, strconv.Itoa(page))] != ""
+		case "submitRoot":
+			// The root is immutable once set, so its presence is the whole story: the
+			// contract aborts a second submitRoot outright. Safe as a bare presence
+			// check ONLY because assertBookMatchesChain already ran on this path and
+			// refused the run if the committed root were not this plan's — see the
+			// note there. Written by set(rk, root) inside submitRoot's `if committed`
+			// block, the same place a page's ssdone| is written, so under Attest this
+			// appears when the quorum converges and not when this reporter voted.
+			out[k] = state[a.chKey("root", pl.Epoch)] != ""
 		case "finalizeEpoch":
 			out[k] = finalized
 		}
