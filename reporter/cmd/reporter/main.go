@@ -893,6 +893,13 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 		return nil
 	}
 
+	// Before anything is broadcast: if this epoch already carries a committed root,
+	// this run's book must reproduce it. Otherwise a resume splices two books and the
+	// epoch can never satisfy the on-chain pagesum guard.
+	if err := a.assertBookMatchesChain(pl); err != nil {
+		return err
+	}
+
 	prog, err := submit.LoadProgress(a.cfg.Submit.ProgressFile)
 	if err != nil {
 		return err
@@ -1023,6 +1030,70 @@ func (a *app) chKey(prefix string, parts ...string) string {
 		k += "|" + p
 	}
 	return k
+}
+
+// assertBookMatchesChain refuses a run whose book is not the one the epoch already
+// committed.
+//
+// buildPlan recomputes and repaginates the whole book every run, while chainApplied
+// decides a page is done purely from ssdone|<ch>|<ep>|<pageIndex>. Nothing compared
+// the two, so if the book changed between a partial run and its resume — a
+// repagination, or a load-balanced api.hive.blog backend returning one more post —
+// the indices already marked done were treated as satisfying the NEW pagination and a
+// contiguous middle slice of the canonical list was never published.
+//
+// On chain that is terminal: applyEntries accumulates pagesum from what actually
+// landed while submitRoot recorded the full declared totalShares, so finalizeEpoch
+// fails its pagesum guard forever and submitRoot is immutable, so the declared total
+// can never be corrected. Recovery is a guardian stale-cancel, which pays the
+// treasury rather than the earners.
+//
+// And it was invisible: broadcast.Send returns an L1 txid and no L2 receipt is read
+// anywhere, so the run recorded progress and printed "epoch N submitted" every time.
+//
+// The committed root IS the epoch's identity — it is the commitment every claim
+// verifies against. If one is on chain and this run's book does not reproduce it,
+// they are different books and there is nothing safe to resume.
+func (a *app) assertBookMatchesChain(pl submit.Plan) error {
+	mine := ""
+	for _, c := range pl.Calls {
+		if c.Action == "submitRoot" {
+			var q struct {
+				Root string `json:"root"`
+			}
+			if err := json.Unmarshal([]byte(c.Payload), &q); err != nil {
+				return fmt.Errorf("the plan's submitRoot payload does not parse: %w", err)
+			}
+			mine = q.Root
+			break
+		}
+	}
+	if mine == "" {
+		return nil // no commitment in this plan; nothing to compare
+	}
+	key := a.chKey("root", pl.Epoch)
+	st, err := a.reader().StateGet(a.cfg.Contracts.Distributor, []string{key})
+	if err != nil {
+		return err
+	}
+	onChain := strings.TrimSpace(st[key])
+	if onChain == "" {
+		return nil // first run for this epoch
+	}
+	// Case-insensitive: the contract stores lowercase, and refusing an identical book
+	// over a rendering difference would be a false alarm on the one check that exists
+	// to prevent a false negative.
+	if !strings.EqualFold(onChain, mine) {
+		return fmt.Errorf("epoch %s already committed root %s but this run computes %s — "+
+			"the book has changed since the last run (a repagination, or a different set of "+
+			"posts from the Hive API). Resuming would publish THIS book's pages against THAT "+
+			"book's root: the pages already applied stay, the missing slice is never "+
+			"published, and finalizeEpoch can then never satisfy its pagesum guard. The root "+
+			"is immutable, so this is not recoverable by re-running. Reproduce the original "+
+			"book (same config, same source data) or have a guardian cancel the epoch",
+			pl.Epoch, onChain, mine)
+	}
+	return nil
 }
 
 func (a *app) chainApplied(pl submit.Plan) (map[string]bool, map[string]string, error) {

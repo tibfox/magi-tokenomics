@@ -73,7 +73,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 
 ```bash
 GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 183 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 168 reporter + indexer tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 174 reporter + indexer tests, no network
 ```
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
@@ -517,7 +517,7 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **183 contract tests, 168
+All three contracts + reporter are complete, audited, and green: **183 contract tests, 174
 reporter and indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.
