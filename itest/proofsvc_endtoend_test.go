@@ -47,13 +47,13 @@ func rowsFromLogs(t *testing.T, logs []string) ([]proofsvc.SharesRow, []proofsvc
 		case "shares":
 			pages = append(pages, proofsvc.SharesRow{
 				Channel: top.Attrs["channel"], Epoch: num("epoch"), Page: num("page"),
-				Entries: num("entries"), PageTotal: top.Attrs["page_total"],
+				Entries: num("entries"), PageTotal: proofsvc.Numeric(top.Attrs["page_total"]),
 				Submitted: top.Attrs["submitted"],
 			})
 		case "root":
 			roots = append(roots, proofsvc.RootRow{
 				Channel: top.Attrs["channel"], Epoch: num("epoch"), Root: top.Attrs["root"],
-				TotalShares: top.Attrs["total_shares"], Accounts: num("accounts"),
+				TotalShares: proofsvc.Numeric(top.Attrs["total_shares"]), Accounts: num("accounts"),
 			})
 		}
 	}
@@ -145,12 +145,12 @@ func TestIndexerAndReporterAgreeOnTheSameBook(t *testing.T) {
 		s, _ := sharecore.ParseEntries(sub)
 		pages = append(pages, proofsvc.SharesRow{
 			Channel: "content", Epoch: 0, Page: int64(i), Entries: int64(len(s)),
-			PageTotal: sharecore.TotalOf(s).String(), Submitted: sub,
+			PageTotal: proofsvc.Numeric(sharecore.TotalOf(s).String()), Submitted: sub,
 		})
 	}
 	book, err := proofsvc.BuildBook(proofsvc.RootRow{
 		Channel: "content", Epoch: 0, Root: reporterRoot,
-		TotalShares: sharecore.TotalOf(fromReporter).String(),
+		TotalShares: proofsvc.Numeric(sharecore.TotalOf(fromReporter).String()),
 		Accounts:    int64(len(fromReporter)),
 	}, pages)
 	if err != nil {

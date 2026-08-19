@@ -222,6 +222,30 @@ func SubmitRoot(payload *string) *string {
 	if _, ok := hexToBytes(root); !ok {
 		sdk.Abort("root must be 64 hex characters")
 	}
+	// LOWERCASE, because that is the only form the verifier can ever match.
+	//
+	// hexToBytes accepts A-F (hexNibble), but the root is stored VERBATIM and
+	// verifyProof ends with `bytesToHex(h) == root` — a plain string compare against
+	// output built from the constant "0123456789abcdef". So a root carrying any
+	// uppercase digit passed here, passed finalizeEpoch (which only checks presence),
+	// and then failed every claim no matter how correct the proof was. The root is
+	// immutable by design and cancelEpoch refuses once the window elapses, so the
+	// epoch's whole funding became unreachable.
+	//
+	// Refused rather than lowercased on the way in: silently rewriting a caller's
+	// commitment would mean the value they signed is not the value stored, and a
+	// reporter comparing the two would see a mismatch it could not explain. The
+	// reference reporter already emits lowercase (hex.EncodeToString) and
+	// PlanOpts.Validate rejects anything else, so this only ever fires for a
+	// hand-submitted root or a re-implemented reporter — exactly the callers with no
+	// other guard.
+	for i := 0; i < len(root); i++ {
+		if root[i] >= 'A' && root[i] <= 'F' {
+			sdk.Abort("root must be lowercase hex — an upper-case root is accepted by the " +
+				"parser but can never equal the verifier's own lowercase rendering, so every " +
+				"claim against it would fail and the epoch's funding would be stranded")
+		}
+	}
 	ts := parseBig(f(payload, "totalShares"))
 	if ts.Sign() <= 0 {
 		sdk.Abort("totalShares must be positive")
