@@ -2,6 +2,7 @@ package proofsvc
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -98,5 +99,34 @@ func TestWire_NullNumericIsEmptyNotZero(t *testing.T) {
 	}
 	if got := out.Rows[0].TotalShares.String(); got != "" {
 		t.Errorf("null total_shares = %q, want empty", got)
+	}
+}
+
+// Queries must be scoped to one distributor when an indexer serves several.
+//
+// magi-mongo-indexer adds indexer_contract_id to every table, but the queries
+// filtered on (channel, epoch) alone. The collision is the likely case rather than a
+// contrived one: channel names are conventional ("content", "lp") and every
+// deployment numbers its epochs from 0, so two tenants collide on their very first
+// epoch — and BuildBook then reconciles one contract's pages against another's root
+// and fails, denying proofs to both.
+func TestWire_QueriesScopeToTheDistributorWhenSet(t *testing.T) {
+	h := &Hasura{}
+	q, vars := h.scope(rootQuery, rootQueryScoped, map[string]any{"channel": "content", "epoch": int64(0)})
+	if _, ok := vars["contract"]; ok {
+		t.Error("an unset Contract must stay unscoped — existing single-tenant deployments " +
+			"have no reason to change")
+	}
+	if q != rootQuery {
+		t.Error("unset Contract must use the unscoped query")
+	}
+
+	h.Contract = "vsc1Bpc3SgDqCRQxzeDrvV7T4XKV6BZuHmME5F"
+	q, vars = h.scope(rootQuery, rootQueryScoped, map[string]any{"channel": "content", "epoch": int64(0)})
+	if vars["contract"] != h.Contract {
+		t.Errorf("a set Contract must be passed as a variable, got %v", vars["contract"])
+	}
+	if !strings.Contains(q, "indexer_contract_id") {
+		t.Error("a set Contract must select the query that filters on indexer_contract_id")
 	}
 }
