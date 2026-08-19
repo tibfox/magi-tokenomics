@@ -462,23 +462,23 @@ func TestCovAuth_C3GuardianAttest2of3(t *testing.T) {
 	caFailedFor(t, caCall(t, ct, caC3ID, "claim", `{"channel":"author","epoch":"0"}`, []string{"hive:alice"}, 4, false), "not finalized")
 
 	// --- sweepUnallocated needs 2 of 3, and pays only the pinned treasury -
-	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g1"}, 4, true)
+	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"100000"}`, []string{"hive:g1"}, 4, true)
 	assert.Contains(t, r.Ret, `"swept":false`, "one guardian must not sweep")
 	b := caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"0"`, "nothing may move below the threshold")
 
-	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g3"}, 4, true)
+	r = caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"100000"}`, []string{"hive:g3"}, 4, true)
 	assert.Contains(t, r.Ret, `"swept":"100000"`)
 	b = caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"100000"`)
 
 	// the committed sweep action cannot be replayed, and a fresh nonce finds
 	// an empty pool (no double-spend of the unallocated balance)
-	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, []string{"hive:g2"}, 4, false),
+	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"100000"}`, []string{"hive:g2"}, 4, false),
 		"already committed")
-	caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2"}`, []string{"hive:g1"}, 4, true)
-	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2"}`, []string{"hive:g2"}, 4, false),
-		"nothing to sweep")
+	caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2","amount":"100000"}`, []string{"hive:g1"}, 4, true)
+	caFailedFor(t, caCall(t, ct, caC3ID, "sweepUnallocated", `{"channel":"author","nonce":"2","amount":"100000"}`, []string{"hive:g2"}, 4, false),
+		"pool no longer holds")
 	b = caCall(t, ct, caTokenID, "balanceOf", `{"account":"hive:treasury"}`, []string{"hive:x"}, 4, true)
 	assert.Contains(t, b.Ret, `"100000"`)
 }

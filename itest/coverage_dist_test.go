@@ -352,12 +352,12 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 	assert.Equal(t, "0", covBalance(t, ct, "hive:cova", 20).String())
 
 	// a non-guardian cannot sweep
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, "hive:coveve", 20, false)
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, covReporter, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000"}`, "hive:coveve", 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000"}`, covReporter, 20, false)
 
 	// the guardian sweeps — and a `to` field in the payload is IGNORED: the only
 	// destination is the treasury pinned at init (H2).
-	s := call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	s := call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String(),
 		"cancelled funding must land in the PINNED treasury")
@@ -367,7 +367,7 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 		"the whole cancelled epoch must have left the distributor")
 
 	// a second sweep (fresh nonce, so auth is not the blocker) has nothing to move
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"2","amount":"100000"}`, covGuardian, 20, false)
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 
 	// ---- and the veto EXPIRES: a second epoch, cancelled after its window ----
@@ -479,11 +479,11 @@ func TestCovDist_C5PagesRoundingAndVetoParity(t *testing.T) {
 	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, "hive:coveve", 11, false)
 	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, covGuardian, 11, true)
 	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"1"}`, "hive:covlp1", 20, false)
-	s := call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	s := call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 	assert.Equal(t, "0", covBalance(t, ct, "hive:coveve", 20).String())
-	call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"2","amount":"100000"}`, covGuardian, 20, false)
 }
 
 // ---------------------------------------------------------------------------

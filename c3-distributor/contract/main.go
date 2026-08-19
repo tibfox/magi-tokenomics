@@ -673,18 +673,42 @@ func SweepUnallocated(payload *string) *string {
 		sdk.Abort("no treasury configured")
 	}
 	nonce := canon(f(payload, "nonce"), "nonce")
-	amt := getBig("unalloc|" + ch)
-	// Bind the attestation to the AMOUNT — otherwise a co-signer approving a sweep
-	// of 0 could be reused weeks later to move a large balance (MED). Authorize
-	// BEFORE the emptiness check so a replayed nonce still reports "already
-	// committed" rather than masking it behind an empty pool.
+	// The DECLARED amount, not the live pool.
+	//
+	// Binding the attestation to an amount is right — a co-signer approving a sweep of
+	// 0 must not have that vote reused weeks later to move a large balance (MED). But
+	// it used to bind to `unalloc|<ch>` read live, and cancelEpoch ADDS to that key.
+	// So in attest mode a guardian voting before a cancellation and one voting after
+	// attested different payloads, landing in different tallies; anti-equivocation
+	// gives each authority one vote per ACTION, so both burned theirs and the
+	// threshold became unreachable — the same deadlock finalizeEpoch had when it bound
+	// to totalShares, and for the same reason.
+	//
+	// A declared amount does not move while the vote is open, so honest guardians
+	// converge. The live pool is then checked at the moment it commits, so the
+	// approval is still an approval OF AN AMOUNT rather than a blank cheque.
+	amtStr := f(payload, "amount")
+	if amtStr == "" {
+		sdk.Abort("amount required — the guardians must attest to a specific amount, not to " +
+			"whatever the pool happens to hold when the last vote lands")
+	}
+	declared := parseBig(amtStr)
+	if declared.Sign() <= 0 {
+		sdk.Abort("amount must be positive")
+	}
 	ak := "sweep:" + ch + ":" + nonce
-	if !auth.Authorize(guardianCfg(), "grd", ak, amt.String(), mustCaller(), reqAuths()) {
+	if !auth.Authorize(guardianCfg(), "grd", ak, declared.String(), mustCaller(), reqAuths()) {
 		return str(`{"swept":false}`)
 	}
-	if amt.Sign() <= 0 {
-		sdk.Abort("nothing to sweep")
+	amt := getBig("unalloc|" + ch)
+	if amt.Cmp(declared) != 0 {
+		sdk.Abort("the unallocated pool no longer holds the amount this sweep was approved " +
+			"for (approved " + declared.String() + ", pool holds " + amt.String() + ") — " +
+			"re-propose under a new nonce for the current amount")
 	}
+	// No "nothing to sweep" branch: `declared` must be positive and `amt` must equal
+	// it, so an empty pool is already refused above with a message that says which
+	// amount was approved and what the pool actually holds.
 	setBig("unalloc|"+ch, new(big.Int)) // CEI before transfer
 	adapter.Transfer(asset(), to, amt)
 	events.New("sweep_unallocated").
