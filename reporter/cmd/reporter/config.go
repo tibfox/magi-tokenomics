@@ -381,6 +381,12 @@ func (c *Config) validateSource() error {
 		if err := c.validateAppTax(); err != nil {
 			return err
 		}
+		if err := validateLedgerAccounts("shares.muted", c.Shares.Muted); err != nil {
+			return err
+		}
+		if err := validateLedgerAccounts("source.exclude", c.Source.Exclude); err != nil {
+			return err
+		}
 		switch hivesrc.WeightMode(c.Source.Weight) {
 		case hivesrc.WeightHiveRshares:
 			// Hive's rshares already embed Hive's mana. A second budget here would
@@ -613,6 +619,37 @@ func (c *Config) validateAppTax() error {
 	for _, a := range t.Apps {
 		if a == "" {
 			return fmt.Errorf("shares.app_tax.apps contains an empty entry")
+		}
+	}
+	return nil
+}
+
+// validateLedgerAccounts refuses an account list whose entries could never match.
+//
+// `shares.muted` and `source.exclude` are exact-match sets probed with a
+// LEDGER-DOMAIN account: sharecore tests muted[who] where who is "hive:"+author, and
+// hivesrc tests excl["hive:"+p.Author] and excl["hive:"+v.Voter]. Neither list is
+// normalised on the way in. So a bare `"muted": ["spammer"]` — the spelling every
+// operator reaches for, because it is how the account reads everywhere on Hive —
+// mutes nobody, and NOTHING says so: the run succeeds, the book is well formed, the
+// epoch finalizes, and the account keeps earning. A silent no-op in a list whose
+// entire purpose is to deny someone rewards.
+//
+// Refused rather than auto-prefixed, matching shares.app_tax.beneficiary just above.
+// Rewriting an operator's account list on their behalf would mean the accounts they
+// believe they excluded are not the accounts the reporter used, and under Attest that
+// divergence surfaces only as two reporters computing different roots.
+func validateLedgerAccounts(field string, list []string) error {
+	for _, a := range list {
+		if a == "" {
+			return fmt.Errorf("%s contains an empty entry — it matches no account "+
+				"(probably a stray comma)", field)
+		}
+		if !strings.HasPrefix(a, "hive:") {
+			return fmt.Errorf("%s entry %q must carry a ledger domain, e.g. hive:%s — "+
+				"the list is matched exactly against domain-prefixed accounts, so a bare "+
+				"name silently matches nobody and the account goes on earning",
+				field, a, strings.TrimPrefix(a, "@"))
 		}
 	}
 	return nil

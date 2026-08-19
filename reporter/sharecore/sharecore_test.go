@@ -312,3 +312,29 @@ func TestValidateAccounts_AcceptsRealAccounts(t *testing.T) {
 		t.Fatalf("legitimate accounts must be accepted: %v", err)
 	}
 }
+
+// Muting is EXACT-MATCH on the ledger-domain account, and this pins that.
+//
+// The reporter's config layer refuses a bare Hive name in `shares.muted` because a
+// bare name matches nothing here — `muted[who]` is probed with who == "hive:"+author.
+// If this rule were ever relaxed (a normalisation added here, say), that validator
+// would go on rejecting configs for a reason that no longer existed, and nothing else
+// in the tree would notice. So assert the rule itself, in both directions.
+func TestMutedNameMustCarryTheLedgerDomain(t *testing.T) {
+	posts := []Post{{Author: "hive:spammer", Permlink: "p", Votes: []Vote{
+		{Voter: "hive:good", Weight: bi(100), Order: 0}}}}
+
+	bare := linCfg()
+	bare.Muted = []string{"spammer"}
+	if _, ok := ComputeShares(posts, bare).Shares["hive:spammer"]; !ok {
+		t.Fatal("a BARE muted name must not mute anyone — muting is exact-match on the " +
+			"domain-prefixed account. If this now mutes, the config validator that " +
+			"rejects bare names is enforcing a rule this package dropped")
+	}
+
+	pref := linCfg()
+	pref.Muted = []string{"hive:spammer"}
+	if _, ok := ComputeShares(posts, pref).Shares["hive:spammer"]; ok {
+		t.Fatal("hive:spammer is the documented form and must mute")
+	}
+}
