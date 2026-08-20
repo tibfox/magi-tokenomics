@@ -175,9 +175,14 @@ Proves a drained pool can be REFILLED — the property that makes batched mintin
 viable. Pool is sized to exactly one epoch's emission, so epoch 0 funds and epoch 1
 starves regardless of how many epochs really elapsed when each poke lands; devnet
 wall-clock timing is not controllable, so the dependency is designed out rather than
-raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
-deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
-would make the refill impossible. The test therefore fails if anyone reintroduces it.
+raced. Deploys only the token and C2 (the bucket pays a plain hive account), and never
+hands ownership to C2 — `mint` is owner-only, so the handover would make the refill
+impossible. The test fails if anyone reintroduces it.
+
+That used to make this suite the exception. It no longer is: **no suite hands the
+token to C2**, because C2 has no entrypoint that could use ownership since the guardian
+passthrough was removed, and a handover would strand `mint`/`pause`/`changeOwner`
+permanently. Refill was simply the first to need what is now the rule everywhere.
 
 ## Verification status
 
