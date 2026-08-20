@@ -703,12 +703,6 @@ func hasPrefix(s, p string) bool {
 	return true
 }
 
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
 func ok() *string          { return str(`{"success":true}`) }
 func str(s string) *string { return &s }
 

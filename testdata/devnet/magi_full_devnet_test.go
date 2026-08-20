@@ -291,16 +291,16 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	callOwner(c1ID, "airdropBatch", fmt.Sprintf(
 		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C1 airdrop")
-	// C2 no longer mints — it PULLS each epoch's emission from an account that has
-	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
-	// only the owner may mint. (C2 no longer needs to own the token at all; the
-	// handover below is kept only so the guardian token-op passthrough stays live.)
+	// C2 does not mint — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 first; only the owner may mint.
+	//
+	// The token is NOT handed to C2. It has no entrypoint that could use ownership
+	// since the guardian passthrough was removed, so handing it over would strand
+	// mint/pause/changeOwner permanently — an unrecoverable deployment, and one the
+	// README explicitly warns against. The owner keeps it.
 	callOwner(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	callOwner(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-
-	callOwner(tokenID, "changeOwner",
-		fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token ownership -> C2")
 
 	// ---------------- PHASE 3: stake (BEFORE C2 init) ----------------
 	//
@@ -854,13 +854,6 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	if v := stateOf(c1ID, "stake|hive:"+outsider); v != "" && v != "0" {
 		t.Fatalf("outsider acquired stake: %s", v)
-	}
-	// The queued-op table must be empty. The key is tl|<op>:<nonce>[:<newOwner>]
-	// (opKeyOf), NOT tl|<op>|<nonce> — a wrong key here would read empty and pass
-	// vacuously, which is worse than no assertion at all.
-	tlKey := fmt.Sprintf("tl|changeOwner:1:hive:%s", outsider)
-	if v := stateOf(c2ID, tlKey); v != "" {
-		t.Fatalf("outsider queued a token op (%s = %s)", tlKey, v)
 	}
 	t.Logf("adversarial sweep clean: no state moved, outsider holds nothing")
 
