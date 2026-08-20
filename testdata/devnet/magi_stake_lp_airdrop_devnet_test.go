@@ -351,8 +351,10 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read token owner: %v", err)
 	}
-	if got := fmt.Sprintf("%v", stTok["owner"]); !strings.Contains(got, c2ID) {
-		t.Fatalf("SECURITY FAILURE: token owner changed to %q", got)
+	// The token stays with the DEPLOYER — it is no longer handed to C2, which has no
+	// entrypoint that could use ownership. The property is unchanged: nobody seized it.
+	if got := fmt.Sprintf("%v", stTok["owner"]); !strings.Contains(got, "hive:"+ownerAcct) {
+		t.Fatalf("SECURITY FAILURE: token owner changed to %q, want hive:%s", got, ownerAcct)
 	}
 
 	t.Log("DEVNET RESULT: C1/C5/C6/C7 honest flow succeeded; every outsider attack rejected on-chain")

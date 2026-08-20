@@ -607,9 +607,11 @@ func TestDevnetMagiFull(t *testing.T) {
 		}
 	}
 
-	// token ownership must still sit with C2 after all of that
-	if o := stateOf(tokenID, "owner"); o != "contract:"+c2ID {
-		t.Fatalf("token owner drifted to %q, want contract:%s", o, c2ID)
+	// Token ownership must still sit with the DEPLOYER after all of that. It is no
+	// longer handed to C2 — C2 has no entrypoint that could use it — so the property
+	// under test is that nobody SEIZED it, which is what it always really was.
+	if o := stateOf(tokenID, "owner"); o != "hive:"+owner {
+		t.Fatalf("token owner drifted to %q, want hive:%s", o, owner)
 	}
 
 	// ---------------- PHASE 7b: a malicious STAKED HOLDER ----------------

@@ -288,7 +288,7 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	mustCall(1, tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 
-	t.Logf("token owner is now contract:%s", c2ID)
+	t.Logf("token owner stays with the deployer hive:%s (never handed to C2)", owner)
 
 	// ---------------- PHASE 2: honest operation ----------------
 	// distributeEpoch is permissionless — poke it from the ATTACKER's node to
@@ -366,8 +366,10 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		t.Fatalf("read token state after attacks: %v", err)
 	}
 	t.Logf("token state after attacks: %v", stAfter)
-	if got := fmt.Sprintf("%v", stAfter["owner"]); !strings.Contains(got, c2ID) {
-		t.Fatalf("SECURITY FAILURE: token owner changed to %q", got)
+	// The token is NOT handed to C2 any more, so the owner must still be the DEPLOYER.
+	// The property is unchanged — no attacker seized it — only the expected value is.
+	if got := fmt.Sprintf("%v", stAfter["owner"]); !strings.Contains(got, "hive:"+owner) {
+		t.Fatalf("SECURITY FAILURE: token owner changed to %q, want hive:%s", got, owner)
 	}
 
 	c3after, err := d.GetStateByKeys(ctx, 1, c3ID,

@@ -390,8 +390,10 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 			t.Fatalf("REPORTER CHANGED STATE %s: %q -> %q", k, want, got)
 		}
 	}
-	if o := stateOf(tokenID, "owner"); o != "contract:"+c2ID {
-		t.Fatalf("token owner drifted to %q", o)
+	// The token stays with the DEPLOYER — it is no longer handed to C2, which has no
+	// entrypoint that could use ownership. The property is unchanged: nobody seized it.
+	if o := stateOf(tokenID, "owner"); o != "hive:"+rogue {
+		t.Fatalf("token owner drifted to %q, want hive:%s", o, rogue)
 	}
 
 	// honest claims still work after all of that

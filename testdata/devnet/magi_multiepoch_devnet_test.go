@@ -183,7 +183,7 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	call(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	call(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-	waitValue(tokenID, "owner", "contract:"+c2ID, "token owner")
+	waitValue(tokenID, "owner", "hive:"+owner, "token owner stays with the deployer")
 
 	call(c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
