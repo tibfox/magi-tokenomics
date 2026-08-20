@@ -86,7 +86,7 @@ to your own paths.
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
 | `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode against a faked indexer | 24 min |
-| `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast | 12 min |
+| `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast — then re-runs it to prove a resume broadcasts nothing | 16 min |
 | `magi_cosigned_devnet_test.go` | **auth mode 1 (Cosigned)**: 2-of-2 in ONE transaction, and one authority applying nothing | 13 min |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
@@ -178,7 +178,7 @@ is worse than no entry at all.
 | `magi_refill_devnet_test.go` | yes | 1006s |
 | `magi_lp_multiepoch_devnet_test.go` | yes | 1205s |
 | `magi_reporter_devnet_test.go` | yes | 721s |
-| `magi_realbroadcast_devnet_test.go` | yes | 692s |
+| `magi_realbroadcast_devnet_test.go` | yes | 939s |
 | `magi_cosigned_devnet_test.go` | yes | 755s |
 
 **Do not mark a suite verified by reasoning about its source. Run it.**
