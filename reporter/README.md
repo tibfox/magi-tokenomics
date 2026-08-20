@@ -20,13 +20,18 @@ reporter run      # send it (DRY-RUN unless -broadcast)
 ## Quick start
 
 ```sh
-go build -o reporter ./reporter/cmd/reporter
-./reporter init-config > reporter.json     # then edit contract ids, tag, curves
-./reporter epoch   -config reporter.json   # sanity: config vs chain
-./reporter compute -config reporter.json   # see the shares
-./reporter run     -config reporter.json   # dry run, nothing signed
+# Build to bin/. NOT `-o reporter`: `reporter/` is a directory, so go silently
+# writes the binary to `reporter/reporter` INSIDE the package, and every
+# `./reporter ...` line below then fails with "./reporter: Is a directory".
+GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
+alias reporter=./reporter/bin/reporter     # the lines below assume this
+
+reporter init-config > reporter.json       # then edit contract ids, tag, curves
+reporter epoch   -config reporter.json     # sanity: config vs chain
+reporter compute -config reporter.json     # see the shares
+reporter run     -config reporter.json     # dry run, nothing signed
 export REPORTER_ACTIVE_WIF=5J...           # the reporter account's ACTIVE key
-./reporter run     -config reporter.json -broadcast
+reporter run     -config reporter.json -broadcast
 ```
 
 ## Packages
@@ -484,7 +489,7 @@ domain-less share recipients, and the airdrop does the same for its recipients.
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1
 ```
 
-74 offline tests, no network and no keys required — the Hive and VSC layers are
+174 offline tests, no network and no keys required — the Hive and VSC layers are
 behind `Transport` / `StateReader` interfaces.
 
 A live smoke test against real nodes is skipped by default:

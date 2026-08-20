@@ -83,9 +83,24 @@ That makes this indexer the only thing that can answer "what did this account
 earn?", and `proofsvc` is what answers it.
 
 ```
-go build ./indexer/proofsvc/cmd/proofsvc
+GOTOOLCHAIN=go1.25.3 go build ./indexer/proofsvc/cmd/proofsvc
 HASURA_ENDPOINT=https://…/v1/graphql ./proofsvc -addr :8099
+
+# If this Hasura serves MORE THAN ONE deployment, scope it — see below.
+MAGI_DISTRIBUTOR=vsc1… HASURA_ENDPOINT=https://…/v1/graphql ./proofsvc -addr :8099
 ```
+
+**`-distributor` / `MAGI_DISTRIBUTOR` is optional and silently wrong to omit on a
+shared indexer.** Empty means unscoped, which is correct for a single-tenant indexer
+and is why it is not required. But channel names are conventional and every
+deployment numbers its epochs from 0, so two tenants on one Hasura collide on their
+first epoch and each poisons the other's book. The service compares its rebuilt root
+against the committed one, so the likely symptom is a refusal to serve rather than a
+bad proof — but it is a refusal with a confusing cause. Scope it whenever the
+database holds more than your own deployment.
+
+`HASURA_ADMIN_SECRET` is read from the environment when the endpoint needs it, and
+`-hasura` sets the endpoint if you prefer a flag to `HASURA_ENDPOINT`.
 
 - `GET /proof?channel=content&epoch=0&account=hive:alice` → the account's share,
   its merkle path, and a ready-to-send `claim_payload`.

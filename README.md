@@ -72,9 +72,15 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 194 contract tests, real wasm engine
-GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 174 reporter + indexer tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 195 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 174 reporter tests, no network
+GOTOOLCHAIN=go1.25.3 go test ./indexer/... -count=1     # 13 indexer/proofsvc tests
 ```
+
+The indexer needs its own line: it lives at `./indexer/proofsvc`, **not** under
+`./reporter/...`, so the reporter command does not run it. `go test ./...` is not a
+substitute — the contract packages are `//go:build gc.custom` and only compile under
+tinygo, so a plain `./...` reports them as `[setup failed]` and buries the real result.
 
 Devnet (docker multi-node, in the go-vsc-node clone — see [Devnet tests](#devnet-tests)):
 
@@ -517,8 +523,8 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **194 contract tests, 174
-reporter and indexer tests, and twelve devnet suites** — the full-system run, the
+All three contracts + reporter are complete, audited, and green: **195 contract tests,
+174 reporter tests, 13 indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
 token-op passthrough, full-scale distribution, and the in-place upgrade path.
 
