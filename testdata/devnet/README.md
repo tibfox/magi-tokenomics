@@ -90,20 +90,22 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The ten suites
+## The twelve suites
 
 | test | covers | ~time |
 |---|---|---|
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
 | `magi_stake_lp_airdrop_devnet_test.go` | staking + yield + airdrop (C1) and an LP channel, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
+| `magi_full_devnet_test.go` | **all 4 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
 | `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode against a faked indexer | 24 min |
 | `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast — then re-runs it to prove a resume broadcasts nothing | 16 min |
 | `magi_cosigned_devnet_test.go` | **auth mode 1 (Cosigned)**: 2-of-2 in ONE transaction, and one authority applying nothing | 13 min |
+| `magi_scale_devnet_test.go` | **volume + cost**: 500 users, 200 posts, 10,000 votes in one epoch — what an epoch COSTS and whether anyone is silently dropped across 9 share pages | 20 min |
+| `magi_upgrade_devnet_test.go` | contract-update timelock — **does not compile against a stock go-vsc-node**; see the note above and move it aside | — |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -184,18 +186,39 @@ Keep this table honest as the code moves: a suite that stops funding a pool now 
 nothing and fails several minutes later with a misleading message, so a stale "yes"
 is worse than no entry at all.
 
-| suite | run green on devnet | runtime |
-|---|---|---|
-| `magi_full_devnet_test.go` | yes | 2433s |
-| `magi_multiepoch_devnet_test.go` | yes | 2025s |
-| `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
-| `magi_tokenomics_devnet_test.go` | yes | 591s |
-| `magi_stake_lp_airdrop_devnet_test.go` | pending re-run on the merged layout | — |
-| `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s |
-| `magi_reporter_devnet_test.go` | yes | 721s |
-| `magi_realbroadcast_devnet_test.go` | yes | 939s |
-| `magi_cosigned_devnet_test.go` | yes | 755s |
+**Record the DATE, not just the runtime.** A bare number cannot be checked against
+the code it ran on, which is how this table silently went stale: its runtimes were
+written on 2026-07-31, the six-into-three merge landed on 2026-08-04, and nothing in
+the table said so. A reader saw ten green rows for a layout none of them had run.
+
+| suite | run green on devnet | runtime | last verified |
+|---|---|---|---|
+| `magi_full_devnet_test.go` | yes | 2433s | 2026-08-19 sweep |
+| `magi_multiepoch_devnet_test.go` | yes | 2030s | 2026-08-19 sweep |
+| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | 2026-08-19 sweep |
+| `magi_tokenomics_devnet_test.go` | yes | 591s | 2026-08-19 sweep |
+| `magi_stake_lp_airdrop_devnet_test.go` | yes | 999s | **2026-08-20** |
+| `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s | 2026-08-19 sweep |
+| `magi_reporter_devnet_test.go` | yes | 721s | 2026-08-19 sweep |
+| `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
+| `magi_cosigned_devnet_test.go` | yes | 755s | 2026-08-19 sweep |
+| `magi_scale_devnet_test.go` | yes | — | the run behind `docs/rc-costs.md` |
+| `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
+
+Two rows carry a date because they were run on 2026-08-20 and timed directly:
+`magi_stake_lp_airdrop` (998.59s) and `magi_realbroadcast` (939.34s). The rows marked
+"2026-08-19 sweep" are from that sweep's record rather than a run timed here — treat
+their runtimes as indicative. `magi_stake_lp_airdrop` had been sitting at "pending
+re-run on the merged layout" since 2026-08-04; it now passes on the merged layout,
+with all 13 outsider attacks broadcast and rejected on chain and C5/C6/C7 state
+unchanged afterwards.
+
+Note its log labels still say C5/C6/C7. They are variable names that outlived the
+merge: `c5ID` is the `c3-distributor` wasm, and every `c6.*`/`c7.*` call is sent to
+`c1ID`, which absorbed the airdrop and the yield. The suite deploys FOUR wasm — token,
+c1-staking, c2-emission, c3-distributor — so it is on the current layout despite
+reading otherwise.
 
 **Do not mark a suite verified by reasoning about its source. Run it.**
 
