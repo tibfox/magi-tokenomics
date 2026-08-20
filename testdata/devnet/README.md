@@ -19,10 +19,26 @@ market contracts' devnet concurrently.
 Clean up by matching **that prefix and nothing else**:
 
 ```sh
-docker ps -aq --filter "label=com.docker.compose.project" \
-  --format '{{.Label "com.docker.compose.project"}} {{.ID}}' \
+# 1. LIST first, and read it.
+docker ps -a --filter "label=com.docker.compose.project" \
+  --format '{{.Label "com.docker.compose.project"}} {{.Names}}' \
+  | awk '$1 ~ /^tokdevnet-/ {print $2}'
+
+# 2. Only then remove, by piping the SAME command into rm.
+docker ps -a --filter "label=com.docker.compose.project" \
+  --format '{{.Label "com.docker.compose.project"}} {{.Names}}' \
   | awk '$1 ~ /^tokdevnet-/ {print $2}' | xargs -r docker rm -f
 ```
+
+**Do not put `-q` on that `docker ps`.** `-aq` silently overrides `--format`
+(`WARNING: Ignoring custom format, because both --format and --quiet are set`) and
+emits bare container IDs. The project label the awk pattern tests is then gone, so
+`$1` is a hex ID, `/^tokdevnet-/` matches nothing, `{print $2}` prints nothing, and
+`xargs -r` runs nothing at all. This snippet had that bug and was therefore a silent
+no-op: it never removed anything, and a devnet was found still running eleven hours
+after its `go test` had exited. It failed *safe* — an over-broad selector is the far
+worse failure, and this one could never have reached production containers — but a
+cleanup command that quietly cleans nothing still costs a host full of orphans.
 
 Two rules learned the hard way, both from real damage on this host:
 
