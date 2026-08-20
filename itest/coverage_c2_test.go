@@ -16,7 +16,7 @@ import (
 // Coverage tests for C2 (emission controller) — the economic core. The pre-existing
 // suite only ever exercised ONE epoch through ONE 100%-weight bucket, so the
 // flat emission, pool exhaustion, keeper catch-up, multi-bucket splitting
-// (incl. dust/remainder), claim authorization, the guardian passthrough round-trip
+// (incl. dust/remainder), claim authorization
 // and the init validation gauntlet were all untested. These fill that gap.
 //
 // Naming: every test is TestCovEmit_*, every helper/const is cv*-prefixed so this
@@ -32,11 +32,9 @@ const (
 	cvBad1  = "vsc1BriTkBcRUmzVXkB7t9gqgneR8rA45yNn49"
 	cvBad2  = "vsc1BVXLQTVFhvCUhP9cVTpd1seLTtJ32D2rFH"
 	cvBad3  = "vsc1BqxdHrnt94QHYKVjrQiUFCnqvZVnXLbN8W"
-	cvBad4  = "vsc1BfnJXgDtEvBqMoDkAPp61zKXUNJrAiuhZh"
 	cvBad5  = "vsc1Bmvm1T6pbLZPRg35gvVDWj4CQmVKMCNVFJ"
 	cvBad6  = "vsc1BZR12Cj3Ats3qVhPArm81V33bZoLX6Hvx2"
 	cvBad7  = "vsc1BkNsjgWwLvZzReAEofrq5hrThoADRdbKzz"
-	cvBad8  = "vsc1BiyuQUCMaTpMvpyngP9MbGVvQpqeDGMx5A"
 	cvBad9  = "vsc1BXCNrcXSqKHUHZPC9jH3m8r6E9FucBBxEJ"
 	cvBad10 = "vsc1BqLpwwWVAWCyNTobG6NyypC75Zm7aMAZLh"
 	cvBad11 = "vsc1BerVs984Uxfd3XyFYbVzTJXyL3JPrtsQX5"
@@ -101,13 +99,6 @@ func cvCfg(over map[string]string) string {
 		"baseAnnual":        "1000000",
 		"blocksPerYear":     "10",
 		"dustBucket":        "solo",
-		"timelock":          "1",
-		"guardianMode":      "0",
-		"guardianAuth":      "hive:cvguardian",
-		"guardianThreshold": "1",
-		"vetoMode":          "0",
-		"vetoAuth":          "hive:cvveto",
-		"vetoThreshold":     "1",
 		"buckets":           "solo:" + cvSolo + ":10000",
 	}
 	for k, v := range over {
@@ -590,89 +581,6 @@ func TestCovEmit_ClaimBucketAuthAndOnce(t *testing.T) {
 		"C2 must retain nothing once every bucket has pulled")
 }
 
-// ---- guardian passthrough (end to end) -----------------------------------
-
-// The whole guardian round-trip against a REAL token: queue → too-early execute
-// fails → post-timelock execute succeeds → the token is genuinely paused (a
-// transfer reverts) → queue+execute unpause → transfers work again.
-func TestCovEmit_GuardianPauseUnpauseEndToEnd(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	cvBoot(t, &ct, "1000000000", map[string]string{"timelock": "5"})
-
-	// fund a real holder through the normal emission path
-	assert.Equal(t, "1", cvField(cvPoke(t, &ct, 1), "distributed"))
-	call(t, &ct, cvC2, "claimBucket", `{"bucket":"solo","epoch":"0"}`, cvSolo, 1, true)
-	assert.Equal(t, "100000", cvBalance(t, &ct, cvSolo, 1).String())
-
-	pause := `{"op":"pause","nonce":"1"}`
-	// a non-guardian cannot queue
-	call(t, &ct, cvC2, "queueTokenOp", pause, "hive:cvstranger", 10, false)
-	call(t, &ct, cvC2, "queueTokenOp", pause, owner, 10, false)
-	call(t, &ct, cvC2, "queueTokenOp", pause, "hive:cvveto", 10, false)
-	// nothing was queued, so nothing can be executed
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvguardian", 10, false)
-
-	// guardian queues it; timelock matures at 10+5=15
-	call(t, &ct, cvC2, "queueTokenOp", pause, "hive:cvguardian", 10, true)
-	// execution is not permissionless — only the guardian/veto may fire a matured op
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvstranger", 11, false)
-	// ...and not before the timelock has elapsed
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvguardian", 12, false)
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvguardian", 14, false)
-	// the token is still live while the timelock runs
-	call(t, &ct, cvToken, "transfer", `{"to":"hive:cvsink","amount":"1"}`, cvSolo, 14, true)
-
-	// matured — the op fires for real
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvguardian", 15, true)
-	p := call(t, &ct, cvToken, "isPaused", `{}`, "hive:cvreader", 15, true)
-	assert.Contains(t, p.Ret, `"paused":true`, "token must report paused")
-	// and the pause is REAL: transfers revert
-	call(t, &ct, cvToken, "transfer", `{"to":"hive:cvsink","amount":"100"}`, cvSolo, 16, false)
-	assert.Equal(t, "1", cvBalance(t, &ct, "hive:cvsink", 16).String(), "no transfer while paused")
-	// a spent op cannot be replayed
-	call(t, &ct, cvC2, "executeTokenOp", pause, "hive:cvguardian", 16, false)
-
-	// unpause goes through the same gauntlet (distinct nonce)
-	unpause := `{"op":"unpause","nonce":"2"}`
-	call(t, &ct, cvC2, "executeTokenOp", unpause, "hive:cvguardian", 16, false)
-	call(t, &ct, cvC2, "queueTokenOp", unpause, "hive:cvguardian", 16, true)
-	call(t, &ct, cvC2, "executeTokenOp", unpause, "hive:cvguardian", 20, false)
-	call(t, &ct, cvC2, "executeTokenOp", unpause, "hive:cvguardian", 21, true)
-	p = call(t, &ct, cvToken, "isPaused", `{}`, "hive:cvreader", 21, true)
-	assert.Contains(t, p.Ret, `"paused":false`, "token must report unpaused")
-
-	call(t, &ct, cvToken, "transfer", `{"to":"hive:cvsink","amount":"100"}`, cvSolo, 22, true)
-	assert.Equal(t, "101", cvBalance(t, &ct, "hive:cvsink", 22).String(), "transfers work again")
-}
-
-// The VETO authority — not the guardian — owns cancellation, and a cancelled op
-// is unexecutable.
-func TestCovEmit_VetoCancelsQueuedOp(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	cvBoot(t, &ct, "1000000000", map[string]string{"timelock": "5"})
-
-	op := `{"op":"changeOwner","nonce":"1","newOwner":"hive:cvevil"}`
-	call(t, &ct, cvC2, "queueTokenOp", op, "hive:cvguardian", 10, true)
-	// the guardian cannot veto its own op, nor can a bystander
-	call(t, &ct, cvC2, "cancelTokenOp", op, "hive:cvguardian", 11, false)
-	call(t, &ct, cvC2, "cancelTokenOp", op, "hive:cvstranger", 11, false)
-	// the veto authority can
-	call(t, &ct, cvC2, "cancelTokenOp", op, "hive:cvveto", 11, true)
-	// and the cancelled op is gone for good — even for the guardian itself
-	call(t, &ct, cvC2, "executeTokenOp", op, "hive:cvguardian", 15, false)
-	call(t, &ct, cvC2, "executeTokenOp", op, "hive:cvveto", 100, false)
-	call(t, &ct, cvC2, "cancelTokenOp", op, "hive:cvveto", 100, false)
-
-	// the token owner is untouched — C2 still owns it and can still emit
-	o := call(t, &ct, cvToken, "getOwner", `{}`, "hive:cvreader", 100, true)
-	assert.Contains(t, o.Ret, "contract:"+cvC2, "a vetoed changeOwner must not have landed")
-	assert.Equal(t, "50", cvField(cvPoke(t, &ct, 100), "distributed"))
-}
-
 // ---- init validation gauntlet --------------------------------------------
 
 // Every economic parameter is immutable after init, so a bad config must be
@@ -684,8 +592,8 @@ func TestCovEmit_InitValidationRejectsBadConfig(t *testing.T) {
 	t.Cleanup(func() { ct.DataLayer.Stop() })
 
 	ct.RegisterContract(cvToken, owner, read(tokenWasmPath))
-	bad := []string{cvBad0, cvBad1, cvBad2, cvBad3, cvBad4, cvBad5,
-		cvBad6, cvBad7, cvBad8, cvBad9, cvBad10, cvBad11}
+	bad := []string{cvBad0, cvBad1, cvBad2, cvBad3, cvBad5,
+		cvBad6, cvBad7, cvBad9, cvBad10, cvBad11}
 	for _, id := range bad {
 		ct.RegisterContract(id, owner, read(cvC2Wasm))
 	}
@@ -702,12 +610,8 @@ func TestCovEmit_InitValidationRejectsBadConfig(t *testing.T) {
 			map[string]string{"buckets": "solo:" + cvSolo + ":9000"}},
 		{cvBad3, "dustBucket names no configured bucket",
 			map[string]string{"dustBucket": "nosuchbucket"}},
-		{cvBad4, "timelock=0 (guardian ops would be instant)",
-			map[string]string{"timelock": "0"}},
 		{cvBad7, "bucket target is C2 itself (R21)",
 			map[string]string{"buckets": "solo:contract:" + cvBad7 + ":10000"}},
-		{cvBad8, "guardian and veto authorities overlap (CRIT-1)",
-			map[string]string{"guardianAuth": "hive:cvsame", "vetoAuth": "hive:cvsame"}},
 		{cvBad9, "non-numeric genesis (HIGH-4)", map[string]string{"genesis": "notanumber"}},
 		// NOTE: "missing genesis" is now VALID — it defaults to the deployment block,
 		// and a genesis in the PAST is rejected (that foot-gun is covered separately;

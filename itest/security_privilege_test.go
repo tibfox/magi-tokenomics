@@ -61,59 +61,10 @@ func TestPriv_PostingKeyCannotUsePrivilegedPaths(t *testing.T) {
 	ct.RegisterContract(pvC6, owner, read("../c1-staking/artifacts/main.wasm"))
 	pvInitC2(t, &ct, pvC3)
 
-	// guardian's posting key must NOT be able to queue a token takeover
-	pvCallPosting(t, &ct, pvC2, "queueTokenOp",
-		`{"op":"changeOwner","nonce":"1","newOwner":"hive:evil"}`, "hive:guardian", 10, false)
-	// ...while the same guardian WITH an active auth can
-	call(t, &ct, pvC2, "queueTokenOp",
-		`{"op":"changeOwner","nonce":"1","newOwner":"hive:evil"}`, "hive:guardian", 10, true)
-
 	// C6 owner's posting key must NOT be able to move the bootstrap balance
 	call(t, &ct, pvC6, "init", fmt.Sprintf(`{"token":"%s","kind":"0","cooldown":"5","epochLen":"1","allow":"","maxAirdrop":"1000"}`, pvTok), owner, 0, true)
 	pvCallPosting(t, &ct, pvC6, "airdropBatch",
 		`{"batchId":"b1","entries":"hive:evil:500"}`, owner, 0, false)
-}
-
-// HIGH: a matured token op must be executed by the guardian or veto — not by any
-// random account — so honest parties can decline to execute; and it must EXPIRE.
-func TestPriv_ExecuteTokenOpAuthorizedAndExpires(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	ct.RegisterContract(pvTok, owner, read(tokenWasmPath))
-	ct.RegisterContract(pvC2, owner, read("../c2-emission/artifacts/main.wasm"))
-	pvInitC2(t, &ct, pvC3)
-	// C2 must own the token for pause/unpause to be executable
-	call(t, &ct, pvTok, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, pvC2), owner, 0, true)
-
-	op := `{"op":"pause","nonce":"1"}`
-	call(t, &ct, pvC2, "queueTokenOp", op, "hive:guardian", 10, true) // ready at 15
-	call(t, &ct, pvC2, "executeTokenOp", op, "hive:randombot", 20, false)
-	call(t, &ct, pvC2, "executeTokenOp", op, "hive:guardian", 12, false) // too early
-	call(t, &ct, pvC2, "executeTokenOp", op, "hive:guardian", 16, true)  // in window
-
-	// a queued op left un-executed past its expiry window must die
-	op2 := `{"op":"unpause","nonce":"2"}`
-	call(t, &ct, pvC2, "queueTokenOp", op2, "hive:guardian", 100, true) // ready 105, expires 110
-	call(t, &ct, pvC2, "executeTokenOp", op2, "hive:guardian", 200, false)
-}
-
-// HIGH: the veto must not be able to keep the token paused forever — a paused token
-// freezes every claim AND stakers' own withdrawals.
-func TestPriv_VetoCannotBlockUnpause(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	ct.RegisterContract(pvTok, owner, read(tokenWasmPath))
-	ct.RegisterContract(pvC2, owner, read("../c2-emission/artifacts/main.wasm"))
-	pvInitC2(t, &ct, pvC3)
-
-	// veto may cancel a pause...
-	call(t, &ct, pvC2, "queueTokenOp", `{"op":"pause","nonce":"1"}`, "hive:guardian", 10, true)
-	call(t, &ct, pvC2, "cancelTokenOp", `{"op":"pause","nonce":"1"}`, "hive:veto", 11, true)
-	// ...but must NOT be able to veto a liveness-restoring unpause
-	call(t, &ct, pvC2, "queueTokenOp", `{"op":"unpause","nonce":"2"}`, "hive:guardian", 20, true)
-	call(t, &ct, pvC2, "cancelTokenOp", `{"op":"unpause","nonce":"2"}`, "hive:veto", 21, false)
 }
 
 // HIGH: the pinned treasury must not be a guardian authority (cancel+sweep would be

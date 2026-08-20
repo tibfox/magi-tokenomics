@@ -265,8 +265,8 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	mustCall(1, tokenID, "init", `{"name":"MAGI","symbol":"MAGI","decimals":0,"maxSupply":"100000000"}`, "token.init")
 	waitKey(tokenID, "isInit", "token init")
 	mustCall(1, c2ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","epochLen":"5","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s3","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`,
-		tokenID, owner, d.cfg.WitnessPrefix, c3ID), "c2.init")
+		`{"token":"%s","kind":"0","epochLen":"5","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","buckets":"author:contract:%s:10000"}`,
+		tokenID, c3ID), "c2.init")
 	waitKey(c2ID, "init", "c2 init")
 	mustCall(1, c3ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
@@ -351,8 +351,6 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		// never runs.
 		{c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker), "attacker double-claims"},
 		{c3ID, "pullFunding", `{"channel":"author","epoch":"00"}`, "attacker non-canonical epoch"},
-		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker queues token takeover"},
-		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker executes token takeover"},
 	}
 	for _, a := range attacks {
 		if _, err := d.CallContract(ctx, 2, a.id, a.action, a.payload); err != nil {

@@ -81,7 +81,6 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	relay(hosC1, "sweepResidual", `{"epoch":"0"}`, 12)                                                   // not the guardian
 	relay(hosC1, "stakeFor", `{"acct":"hive:hosmallory","amount":"100"}`, 12)                            // not allowlisted
 	relay(hosC1, "unstake", `{"amount":"100"}`, 12)                                                      // no stake of its own
-	relay(hosC2, "queueTokenOp", `{"op":"changeOwner","nonce":"1","newOwner":"hive:hosmallory"}`, 12)    // not the guardian
 	relay(hosTok, "mint", `{"amount":"1000000"}`, 12)                                                    // not the token owner
 	relay(hosTok, "changeOwner", `{"newOwner":"hive:hosmallory"}`, 12)                                   // not the token owner
 	relay(hosC2, "init", `{"token":"x"}`, 12)                                                            // re-init

@@ -154,28 +154,15 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	// 10. steal another user's stake
 	F(advC1, "unstake", `{"amount":"600"}`, advMal, 12)
 	F(advC1, "stakeFor", fmt.Sprintf(`{"acct":"%s","amount":"500"}`, advMal), advMal, 12)
-	// 11. hijack the token via the guardian passthrough
-	F(advC2, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"%s"}`, advMal), advMal, 12)
-	// ...and against a REAL op the guardian legitimately queued: the attacker may
-	// neither veto it (veto-only) nor execute it (guardian/veto-only). The veto
-	// then cancels it, proving the escape hatch works and the op dies.
-	legitOp := `{"op":"pause","nonce":"7"}`
-	call(t, &ct, advC2, "queueTokenOp", legitOp, advGuardian, 12, true)
-	F(advC2, "cancelTokenOp", legitOp, advMal, 13)  // not the veto
-	F(advC2, "executeTokenOp", legitOp, advMal, 18) // not guardian/veto
-	call(t, &ct, advC2, "cancelTokenOp", legitOp, advVeto, 13, true)
-	F(advC2, "executeTokenOp", legitOp, advGuardian, 18) // cancelled → gone
-	// 12. drain the migration contract
+	// 11. drain the migration contract
 	F(advC6, "airdropBatch", fmt.Sprintf(`{"batchId":"steal","entries":"%s:300"}`, advMal), advMal, 12)
-	// 13. posting-key privilege escalation (runtime derives msg.caller from posting auths)
+	// 12. posting-key privilege escalation (runtime derives msg.caller from posting auths)
 	pvCallPosting(t, &ct, advC3, "submitShares",
 		fmt.Sprintf(`{"epoch":"1","page":"0","entries":"%s:1"}`, advMal), advReporter, 12, false)
 	pvCallPosting(t, &ct, advC6, "airdropBatch",
 		fmt.Sprintf(`{"batchId":"p","entries":"%s:100"}`, advMal), owner, 12, false)
-	pvCallPosting(t, &ct, advC2, "queueTokenOp",
-		fmt.Sprintf(`{"op":"changeOwner","nonce":"9","newOwner":"%s"}`, advMal), advGuardian, 12, false)
 
-	// 14. flash-stake to capture a full epoch of yield he wasn't committed to
+	// 13. flash-stake to capture a full epoch of yield he wasn't committed to
 	call(t, &ct, advTok, "approve", fmt.Sprintf(`{"spender":"contract:%s","amount":"69700"}`, advC1), advAlice, 12, true)
 	call(t, &ct, advC1, "stake", `{"amount":"5000"}`, advAlice, 19, true) // joins at the END of epoch 1
 	call(t, &ct, advC2, "distributeEpoch", ``, advKeeper, 20, true)
@@ -186,9 +173,6 @@ func TestDevnet_HonestThenAdversarial(t *testing.T) {
 	rB := call(t, &ct, advC1, "claimYield", `{"epoch":"1"}`, advBob, 21, true)
 	assert.Equal(t, "24000", pickJSON(rA.Ret, "claimed"), "flash-stake must not inflate alice")
 	assert.Equal(t, "16000", pickJSON(rB.Ret, "claimed"), "bob must not be diluted")
-
-	// 15. execute a token op nobody legitimately queued
-	F(advC2, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"%s"}`, advMal), advMal, 30)
 
 	// ---------------- PHASE 4: invariants survived ----------------
 	assert.Equal(t, "0", advBal(t, &ct, advMal, 31).String(), "ATTACKER MUST HOLD NOTHING")

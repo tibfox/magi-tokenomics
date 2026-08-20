@@ -36,7 +36,7 @@ later.
 | contract | events |
 |---|---|
 | **C1** | `c1_init` `stake` `unstake` `unstake_claim` `drawdown` `yield_funded` `yield_claim` `yield_sweep` `airdrop` `sweep_unobligated` `schedule_adopted` `skip` |
-| **C2** | `c2_init` `emit` `poke` `alloc` `bucket_claim` `tokenop` |
+| **C2** | `c2_init` `emit` `poke` `alloc` `bucket_claim` |
 | **C3** | `c3_init` `channel` `pull` `shares` `skip` `epoch_status` `sweep_unallocated` `claim` |
 
 Every payout event carries its own arithmetic — `claim` ships `share`, `total_shares`

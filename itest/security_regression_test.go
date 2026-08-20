@@ -281,34 +281,6 @@ func TestSec_C7SweepRecoversAnEpochNobodyCanClaim(t *testing.T) {
 	call(t, &ct, eC1, "sweepEmptyEpoch", `{"epoch":"0"}`, "hive:guardian", 4, false)
 }
 
-// FINAL/HIGH-2: a guardian must not escape a spent veto by re-queueing the same op.
-func TestSec_CannotRequeueToEscapeVeto(t *testing.T) {
-	os.RemoveAll("data/badger")
-	ct := test_utils.NewContractTest()
-	t.Cleanup(func() { ct.DataLayer.Stop() })
-	ct.RegisterContract(tokenID, owner, read(tokenWasmPath))
-	ct.RegisterContract(c2ID, owner, read("../c2-emission/artifacts/main.wasm"))
-	ct.RegisterContract(rgC3, owner, read("../c3-distributor/artifacts/main.wasm"))
-	call(t, &ct, tokenID, "init", `{"name":"T","symbol":"T","decimals":0,"maxSupply":"1000000000"}`, owner, 0, true)
-	fundC2Pool(t, &ct, tokenID, c2ID, "500000000", 0)
-	call(t, &ct, c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","genesis":"0","epochLen":"1","baseAnnual":"1000000","blocksPerYear":"10","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:guardian","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:veto","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`, tokenID, rgC3), owner, 0, true)
-
-	op := `{"op":"changeOwner","nonce":"1","newOwner":"hive:evil"}`
-	call(t, &ct, c2ID, "queueTokenOp", op, "hive:guardian", 10, true)
-	// a queued op cannot be re-queued (which previously reset the timelock and
-	// inherited a spent cancellation)
-	call(t, &ct, c2ID, "queueTokenOp", op, "hive:guardian", 11, false)
-	// the VETO (not the guardian) cancels it
-	call(t, &ct, c2ID, "cancelTokenOp", op, "hive:guardian", 11, false)
-	call(t, &ct, c2ID, "cancelTokenOp", op, "hive:veto", 11, true)
-	// after cancellation the op is gone and cannot be executed
-	call(t, &ct, c2ID, "executeTokenOp", op, "hive:anyone", 100, false)
-	// re-queueing is allowed again, but the veto can cancel the NEW instance too
-	call(t, &ct, c2ID, "queueTokenOp", op, "hive:guardian", 101, true)
-	call(t, &ct, c2ID, "cancelTokenOp", op, "hive:veto", 102, true)
-	call(t, &ct, c2ID, "executeTokenOp", op, "hive:anyone", 200, false)
-}
-
 // FINAL/MED: keeper lag must not strand an epoch. The claim window is anchored to
 // max(epoch end, funding arrival) + grace, so a late (permissionless) keeper poke
 // cannot deliver funds into an already-closed window and hand them to the sweep.

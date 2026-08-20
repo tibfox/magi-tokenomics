@@ -213,16 +213,6 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 		`{"epoch":"0"}`, alice, 60, true))
 	record("C1 staking", "fundedOf", "query", call(t, &ct, pC1, "fundedOf", `{"epoch":"0"}`, "hive:any", 60, true))
 
-	// ---- guardian / governance paths --------------------------------------
-	record("C2 emission", "queueTokenOp", "timelocked", call(t, &ct, pC2, "queueTokenOp",
-		`{"op":"pause","nonce":"1"}`, guard, 60, true))
-	record("C2 emission", "cancelTokenOp", "veto", call(t, &ct, pC2, "cancelTokenOp",
-		`{"op":"pause","nonce":"1"}`, veto, 61, true))
-	record("C2 emission", "queueTokenOp", "re-queue after cancel", call(t, &ct, pC2, "queueTokenOp",
-		`{"op":"pause","nonce":"2"}`, guard, 62, true))
-	record("C2 emission", "executeTokenOp", "after timelock; calls token.pause", call(t, &ct, pC2, "executeTokenOp",
-		`{"op":"pause","nonce":"2"}`, guard, 70, true))
-
 	// ---- report -----------------------------------------------------------
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].contract != rows[j].contract {
