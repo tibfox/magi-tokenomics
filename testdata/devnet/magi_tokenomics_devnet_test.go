@@ -2,8 +2,11 @@ package devnet
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -52,12 +55,38 @@ var magiTokenWasm = envOr("MAGI_TOKEN_WASM",
 // without editing their repo. Override with MAGI_POSTGREST_IMAGE / MAGI_HAFAH_IMAGE.
 func magiDevnetConfig() *Config {
 	cfg := DefaultConfig()
+	// NAMESPACE THIS RUN so it can never be confused with another devnet on the host.
+	//
+	// The harness defaults to "devnet-test-<4 random bytes>", and any other checkout
+	// on this machine produces names from the same space — a second agent session
+	// working the market contracts runs its own devnet concurrently. Sharing a
+	// namespace means every cleanup has to distinguish them by inspecting compose
+	// config paths, and a filter that gets that wrong destroys someone else's run.
+	//
+	// The prefix deliberately avoids the substring "magi": production services on this
+	// host are named magi-deployer-*, magi-mongo-indexer-*, and a `--filter name=magi-`
+	// cleanup once removed the live contract deployers. A namespace that cannot
+	// accidentally match a production container is worth more than a readable one.
+	cfg.ProjectName = "tokdevnet-" + randomSuffix()
 	cfg.PostgRESTImage = envOr("MAGI_POSTGREST_IMAGE",
 		"registry.gitlab.syncad.com/hive/haf_api_node/postgrest:1.28.5")
 	// hafah is deliberately NOT pinned: it is not what broke, and pinning it alongside
 	// postgrest left the chain stuck at block 1 with no witnesses registered. Only the
 	// component that actually changed behaviour is held back.
 	return cfg
+}
+
+// randomSuffix is the per-run half of the project namespace. Kept distinct per run so
+// two of OUR suites cannot collide either — they cannot run concurrently, but a
+// crashed run leaving containers behind must not be adopted by the next one.
+func randomSuffix() string {
+	b := make([]byte, 4)
+	if _, err := crand.Read(b); err != nil {
+		// A collision is worse than a boring name, but rand failing is not a reason to
+		// abort a test run; fall back to the pid, which is unique among live processes.
+		return "pid" + strconv.Itoa(os.Getpid())
+	}
+	return hex.EncodeToString(b)
 }
 
 // requireDiskSpace fails the test immediately when the filesystem cannot hold a run.
@@ -200,6 +229,38 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	genesis := head
 	t.Logf("chain head=%d; C2 genesis will auto-default to its init block (epochLen=5)", head)
 
+	// Fund the actors for RC before any contract call.
+	//
+	// RC is `ledger HBD + 10,000 free`, and this suite's setup alone — three inits
+	// plus addChannel — measures at 9,866 RC in the local harness (see
+	// TestRCBudget_TokenomicsSetupFitsTheFreeTier). That left 134 RC of headroom,
+	// and devnet adds per-transaction overhead the harness does not, so addChannel
+	// was the first call to fall off the end: the three inits landed and the fourth
+	// silently never applied. An attacker running dry has the same problem in
+	// reverse — a call that dies of RC exhaustion proves nothing about
+	// authorisation, so the attacker is funded too.
+	for _, node := range []int{1, 2} {
+		moved := 0
+		for round := 0; round < 3; round++ {
+			progressed := false
+			for _, amt := range []string{"100.000", "50.000", "20.000", "5.000"} {
+				if _, ferr := d.Deposit(ctx, node, amt, "hbd"); ferr == nil {
+					t.Logf("node %d deposited %s HBD for RC (round %d)", node, amt, round+1)
+					moved++
+					progressed = true
+					break
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+		if moved == 0 {
+			t.Fatalf("node %d could not deposit — it would run on the 10k free tier, which "+
+				"this suite's setup already very nearly exhausts", node)
+		}
+	}
+
 	// init token, C2, C3 (all from the owner account)
 	mustCall(1, tokenID, "init", `{"name":"MAGI","symbol":"MAGI","decimals":0,"maxSupply":"100000000"}`, "token.init")
 	waitKey(tokenID, "isInit", "token init")
@@ -253,15 +314,23 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	t.Logf("C3 epoch-0 funded = %s", funded)
 
 	// reporter (owner acct) pushes shares to the attacker + a third party, then finalizes
-	mustCall(1, c3ID, "submitShares", fmt.Sprintf(
-		`{"channel":"author","epoch":"0","page":"0","entries":"hive:%s:75,hive:%s3:25"}`, attacker, d.cfg.WitnessPrefix), "c3.submitShares")
+	book := buildBook(t, map[string]string{
+		"hive:" + attacker:                  "75",
+		"hive:" + d.cfg.WitnessPrefix + "3": "25",
+	})
+	mustCall(1, c3ID, "submitShares", book.SubmitPayload("author", "0"), "c3.submitShares")
+	// The commitment. totalShares now lands with the ROOT, not with the pages —
+	// applyEntries writes no per-account state and accumulates nothing, so waiting
+	// for it before submitRoot would wait forever.
+	mustCall(1, c3ID, "submitRoot", book.RootPayload("author", "0"), "c3.submitRoot")
 	shares := waitKey(c3ID, "totalShares|author|0", "c3 shares recorded")
 	t.Logf("C3 epoch-0 totalShares = %s", shares)
 	mustCall(1, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "c3.finalizeEpoch")
 	waitKeyValue(c3ID, "status|author|0", "finalized", "c3 epoch-0 finalize")
 
 	// the attacker legitimately claims the share the reporter assigned them
-	mustCall(2, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "c3.claim (legit share)")
+	mustCall(2, c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker),
+		"c3.claim (legit share)")
 
 	// ---------------- PHASE 3: outsider attacks ----------------
 	// Each must FAIL on-chain. We broadcast and then assert state is unchanged;
@@ -276,8 +345,11 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"author","epoch":"1","page":"0","entries":"hive:%s:999999"}`, attacker), "attacker pushes fake shares"},
 		{c3ID, "finalizeEpoch", `{"channel":"author","epoch":"1"}`, "attacker finalizes"},
 		{c3ID, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "attacker vetoes"},
-		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "attacker sweeps"},
-		{c3ID, "claim", `{"channel":"author","epoch":"0"}`, "attacker double-claims"},
+		{c3ID, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"1"}`, "attacker sweeps"},
+		// carries their REAL proof, so the double-claim guard is what refuses it
+		// rather than the missing-proof check — otherwise the guard under test
+		// never runs.
+		{c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker), "attacker double-claims"},
 		{c3ID, "pullFunding", `{"channel":"author","epoch":"00"}`, "attacker non-canonical epoch"},
 		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker queues token takeover"},
 		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker executes token takeover"},

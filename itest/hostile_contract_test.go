@@ -77,7 +77,7 @@ func TestHostile_AttackerContractHasNoPrivilege(t *testing.T) {
 	relay(hosC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:x:1"}`, 12) // not the reporter
 	relay(hosC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, 12)                                // not the reporter
 	relay(hosC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, 12)                                  // not the guardian
-	relay(hosC3, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, 12)                             // not the guardian
+	relay(hosC3, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"1"}`, 12)                             // not the guardian
 	relay(hosC1, "sweepResidual", `{"epoch":"0"}`, 12)                                                   // not the guardian
 	relay(hosC1, "stakeFor", `{"acct":"hive:hosmallory","amount":"100"}`, 12)                            // not allowlisted
 	relay(hosC1, "unstake", `{"amount":"100"}`, 12)                                                      // no stake of its own

@@ -53,10 +53,10 @@ func TestLive_FetchAndCompute(t *testing.T) {
 	// cashout attribution: the epoch is the PAYOUT window; walk the creation
 	// window one payout period earlier (exactly what the CLI does).
 	posts, err := Collect(tr, Options{
-		Tag: tag, Limit: 15, Mode: WeightHiveRshares,
+		Tags: []string{tag}, Limit: 15, Mode: WeightHiveRshares,
 		Since: win.StartTime, Until: win.EndTime,
-		PayoutSince: win.StartTime.Add(PayoutPeriod),
-		PayoutUntil: win.EndTime.Add(PayoutPeriod),
+		PayoutSince: win.StartTime.Add(DefaultPayoutPeriod),
+		PayoutUntil: win.EndTime.Add(DefaultPayoutPeriod),
 	})
 	if err != nil {
 		t.Fatalf("Collect: %v", err)

@@ -23,7 +23,7 @@ func TestExampleConfig_Loads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init-config output does not load: %v", err)
 	}
-	if c.Epoch.Len == 0 || c.Source.Tag == "" {
+	if c.Epoch.Len == 0 || len(c.Source.Tags) == 0 {
 		t.Fatalf("example config is missing required values: %+v", c)
 	}
 }
@@ -106,7 +106,7 @@ func TestValidate_RequiredAndBoundedFields(t *testing.T) {
 		{"no distributor", func(c *Config) { c.Contracts.Distributor = "" }, "distributor"},
 		{"no channel", func(c *Config) { c.Contracts.Channel = "" }, "channel"},
 		{"zero epoch len", func(c *Config) { c.Epoch.Len = 0 }, "epoch.len"},
-		{"no tag", func(c *Config) { c.Source.Tag = "" }, "source.tag"},
+		{"no tag", func(c *Config) { c.Source.Tags = nil }, "source.tag"},
 		{"bad weight mode", func(c *Config) { c.Source.Weight = "vibes" }, "source.weight"},
 		{"token_stake without C1", func(c *Config) {
 			c.Source.Weight = "token_stake"
@@ -143,6 +143,12 @@ func TestValidate_TokenStakeWithC1IsAccepted(t *testing.T) {
 	}
 	c.Source.Weight = "token_stake"
 	c.Contracts.Stake = "vsc1Bjn53csDr6wUoYsjXiN9Nhadu458Tw9wvR"
+	// token_stake REQUIRES a vote budget: a staked balance is not consumed by being
+	// used, so without one the same stake votes every post at full weight.
+	c.Source.VoteRegenDays = 5
+	c.Source.VotePowerConsumption = 200
+	c.Source.DownvoteRegenDays = 30
+	c.Source.DownvotePowerConsumption = 200
 	if err := c.Validate(); err != nil {
 		t.Fatalf("token_stake with a C1 id should be valid: %v", err)
 	}
@@ -154,7 +160,7 @@ func TestApplyDefaults_StayWithinChainLimits(t *testing.T) {
 	  "vsc":       { "api": "http://localhost:8080/graphql", "net_id": "vsc-testnet" },
 	  "contracts": { "distributor": "vsc1abc", "channel": "content" },
 	  "epoch":     { "genesis": 10, "len": 100 },
-	  "source":    { "tag": "t" }
+	  "source":    { "tags": ["t"] }
 	}`
 	c, err := LoadConfig(writeCfg(t, minimal))
 	if err != nil {
@@ -195,7 +201,7 @@ func TestValidate_LPModeNeedsIndexerNotContentSettings(t *testing.T) {
 		c.Indexer.API = "http://indexer:8081/v1/graphql"
 		c.Indexer.Pool = "vsc1pool"
 		// deliberately strip everything content-specific
-		c.Source.Tag = ""
+		c.Source.Tags = nil
 		c.Source.Weight = ""
 		c.Shares.AuthorCurve = ""
 		c.Shares.CurationCurve = ""
@@ -252,7 +258,7 @@ func TestKind_DefaultsToContentAndStillValidatesTag(t *testing.T) {
 		t.Fatalf("Kind() = %q, want %q", c.Kind(), SourceContent)
 	}
 	// and the content-only rules must still bite in the default mode
-	c.Source.Tag = ""
+	c.Source.Tags = nil
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "source.tag") {
 		t.Fatalf("content mode must still require source.tag, got: %v", err)
 	}
@@ -275,8 +281,8 @@ func TestExampleLPConfig_LoadsAndValidates(t *testing.T) {
 		t.Fatal("the LP example must carry an indexer api and pool")
 	}
 	// The LP example must not smuggle in content policy it cannot honour.
-	if c.Source.Tag != "" {
-		t.Fatalf("LP example should not set source.tag, got %q", c.Source.Tag)
+	if len(c.Source.Tags) != 0 {
+		t.Fatalf("LP example should not set source.tag, got %v", c.Source.Tags)
 	}
 	// pull_funding has no default — it is a plain bool, so omitting it yields false
 	// and the distributor never gets funded. The epoch then reports shares against
@@ -350,7 +356,7 @@ func TestConfig_AttributionIsNotConfigurable(t *testing.T) {
 	  "vsc":       {"api":"http://x","net_id":"vsc-testnet"},
 	  "contracts": {"distributor":"vsc1c3","channel":"content"},
 	  "epoch":     {"len":100},
-	  "source":    {"tag":"t","attribution":"created"},
+	  "source":    {"tags":["t"],"attribution":"created"},
 	  "submit":    {"rc_limit":60000}
 	}`
 	f := filepath.Join(t.TempDir(), "c.json")

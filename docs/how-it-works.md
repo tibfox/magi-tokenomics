@@ -83,12 +83,41 @@ Each round (an "epoch", usually a day):
 1. Someone pokes C2 — anyone can, it's not privileged.
 2. C2 draws that day's tokens from the pool and records how much each bucket is owed.
 3. Each payout contract pulls its share.
-4. For content and LP, a reporter submits the list of who earned what.
+4. For content and LP, a reporter publishes the list of who earned what, and commits
+   a **fingerprint** of it to the chain.
 5. A **challenge window** opens — a guardian can cancel a bad report during it.
-6. After the window, people claim.
+6. After the window, people claim — each proving their own entry against that
+   fingerprint.
 
 Staking yield skips steps 4 and 5 entirely: it reads the staking history itself, so
 there's nothing to report and nothing to challenge.
+
+### Where the list of who earned what actually lives
+
+This is worth understanding, because it is the one place the system asks something of
+you that a simpler design would not.
+
+The chain stores a **32-byte fingerprint** of the earnings list, not the list itself.
+The list is published alongside it, and the indexer keeps it. Anyone can rebuild the
+fingerprint from the published list and check it matches — so the list cannot be
+altered after the fact without the mismatch being obvious.
+
+Why: storing one entry per earner cost about 311 units of chain resource *per person*,
+whatever they were owed. For a 500-member tribe that was ~92% of what a round cost to
+run. The fingerprint made a round roughly six times cheaper, which is the difference
+between a reporter holding ~125 HBD and ~20.
+
+What it means in practice:
+
+- **The chain cannot tell you what you earned.** It only knows the fingerprint. Your
+  wallet asks the indexer, and the fingerprint is what proves the answer honest.
+- **Claiming takes one extra piece of information** — a short proof that your entry is
+  in the list. Your wallet fetches it; `reporter proof -account you` will also produce
+  it from public Hive data if no indexer is reachable, so you are never locked out by
+  someone else's server being down.
+- **It costs the claimer a little more** (~130 units) and the operator a great deal
+  less. That is a deliberate trade: the operator pays for every earner every round,
+  while a claimer pays only when they actually collect.
 
 ### Nothing you earn ever expires
 
@@ -123,6 +152,7 @@ against everyone else — outsiders, and token holders who aren't the owner.
 | reporter | submit share lists, close an epoch | mint, move funds, pay itself |
 | guardian | cancel a bad report during the challenge window; sweep a day that **nobody could ever claim** to a **fixed** treasury | redirect the treasury, take funds, touch a day that had any staker |
 | owner | queue token operations (pause, change owner) on a **time delay** | act instantly, or bypass the veto |
+| veto | cancel a queued token operation at its threshold, at any point before it executes | queue one, change one, or stop `unpause` |
 
 Two rules are enforced by the contracts, not by convention:
 
@@ -134,6 +164,17 @@ Two rules are enforced by the contracts, not by convention:
 
 Staked funds sit in the staking contract and **no role can touch them** — not the
 owner, not the guardian.
+
+**Executing a matured operation is not an authorisation step.** Once the guardian
+threshold has queued an operation and its timelock has run, any single member of the
+guardian *or* veto set can fire it. That sounds like more power than it is: the
+executor cannot choose the operation, its nonce or its target — all three are bound
+into the queued key and re-checked on the way through — and execution moves nothing in
+the framework's own ledger. What it means in practice is that letting an operation
+lapse takes *unanimous* inaction across both sets rather than one party sitting out.
+The veto's actual power is unaffected: its cancel has no time gate, so the coalition
+can still block at its threshold right up to the instant of execution, and it can
+never block `unpause`, so a freeze cannot be held.
 
 ## What you configure
 
@@ -177,11 +218,28 @@ schedule, customize the contract.
 
 | setting | what it decides |
 |---|---|
-| tag | which Hive community/tag counts |
+| tags | which Hive communities/tags count — up to five |
+| excluded tags | tags that disqualify a post even if it also carries an included one |
 | author share | how the pot splits between the writer and the voters (e.g. 50/50) |
 | curation curve | whether **early** or **late** voters earn more |
 | muted accounts | who earns nothing |
 | voting power | comes from **HIVE stake**, or from **your own token's** stake |
+| cashout window | how long a post collects votes before it is scored |
+| downvotes | whether they reduce a payout, or are ignored entirely |
+| declined payouts | whether an author who refused their Hive payout is paid here |
+| app tax | a cut taken from posts published outside a chosen front-end |
+| **minimum share** | drop earners below a threshold — **the main lever on running cost** |
+| staked share | how much of each payout arrives as stake rather than spendable tokens |
+
+**The minimum share is the one that decides what a round costs you.** Every earner
+costs the same to publish whether they earned a fortune or a rounding error, so a long
+tail of near-zero earners can be most of the bill. Setting a floor drops them — and
+their share is redistributed to everyone above it, not lost. It is a real policy
+choice, not housekeeping: someone below the line receives nothing at all.
+
+**The app tax matches something the author's software declares about itself**, so
+anyone posting through the API can simply claim to be using your app. It nudges
+ordinary users on ordinary clients and does nothing to anyone motivated to avoid it.
 
 **The curation curve is worth a moment.** It's the setting people get wrong.
 

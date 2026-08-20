@@ -20,13 +20,18 @@ reporter run      # send it (DRY-RUN unless -broadcast)
 ## Quick start
 
 ```sh
-go build -o reporter ./reporter/cmd/reporter
-./reporter init-config > reporter.json     # then edit contract ids, tag, curves
-./reporter epoch   -config reporter.json   # sanity: config vs chain
-./reporter compute -config reporter.json   # see the shares
-./reporter run     -config reporter.json   # dry run, nothing signed
+# Build to bin/. NOT `-o reporter`: `reporter/` is a directory, so go silently
+# writes the binary to `reporter/reporter` INSIDE the package, and every
+# `./reporter ...` line below then fails with "./reporter: Is a directory".
+GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
+alias reporter=./reporter/bin/reporter     # the lines below assume this
+
+reporter init-config > reporter.json       # then edit contract ids, tag, curves
+reporter epoch   -config reporter.json     # sanity: config vs chain
+reporter compute -config reporter.json     # see the shares
+reporter run     -config reporter.json     # dry run, nothing signed
 export REPORTER_ACTIVE_WIF=5J...           # the reporter account's ACTIVE key
-./reporter run     -config reporter.json -broadcast
+reporter run     -config reporter.json -broadcast
 ```
 
 ## Packages
@@ -74,11 +79,11 @@ which is unrecoverable.
 | `source.tag` | *required for* `kind=content` | the Hive tag/community that counts |
 | `source.limit` | `1000` | max posts fetched per epoch |
 | `source.weight` | `hive_rshares` | or `token_stake` (then `contracts.stake` is required). Either way a vote contributes its **weight**, not a unit: `hive_rshares` uses Hive's own stake-weighted figure, `token_stake` uses `stake x vote% / 10000` |
-| `source.exclude` | `[]` | accounts whose posts are skipped entirely |
+| `source.exclude` | `[]` | accounts whose posts are skipped entirely, and whose votes carry no weight. Entries **must** carry the ledger domain — `hive:botfarm`, not `botfarm`. Matched exactly against the prefixed account, so a bare name excludes nobody; refused at load rather than silently ignored |
 | `shares.author_reward_bps` | `0` | author/curator split, `0..10000` |
 | `shares.author_curve` | `"1/1"` | `"num/den"` rational exponent |
 | `shares.curation_curve` | `"1/1"` | `"1/2"` = sqrt = **early** voters win; `>1` rewards late voters. Opposite cultures — pick deliberately |
-| `shares.muted` | `[]` | accounts that earn nothing |
+| `shares.muted` | `[]` | accounts that earn nothing. Same rule as `source.exclude`: **must** be `hive:spammer`, not `spammer`. (`submit.account` is the exception that takes either form — it is normalised, these are not) |
 | `page.max_entries` | `60` | entries per `submitShares` call |
 | `page.max_bytes` | `3800` | must be `<= 4096`, the auth module's payload cap |
 | `submit.account` | `""` | reporter Hive account, with or without `hive:` |
@@ -303,7 +308,25 @@ file:
 |-----------------|-------------------------|
 | pullFunding     | `funded\|<ep>`          |
 | submitShares P  | `ssdone\|<ep>\|<P>`     |
+| submitRoot      | `root\|<ep>`            |
 | finalizeEpoch   | `status\|<ep>`          |
+
+Each marker is written where the contract actually applies the call — inside the
+`if committed` block — so under Attest it appears when the quorum converges, not
+when this reporter voted.
+
+`submitRoot` was missing from this table and from the check, which is why a re-run
+of an already-committed epoch re-broadcast it every time: the contract aborts on
+`root already submitted for this epoch`, but only after the RC is spent, and the
+broadcaster sees an L1 txid and no L2 receipt, so nothing reported it.
+
+Reading `root|<ep>` is safe as a bare *presence* check — rather than a comparison —
+because a run whose plan root differs from the committed one never gets this far.
+Before deciding what remains, `run` re-reads `root|<ep>` and refuses outright if this
+run's book does not reproduce it: the book is recomputed and repaginated every run, so
+a repagination between a partial run and its resume would otherwise publish this
+book's pages against that book's root, and the root is immutable. A non-empty
+`root|<ep>` at the idempotency check is therefore always *this* run's root.
 
 The progress file is an audit trail and is reported when it disagrees with the
 chain. This is deliberate: a `pullFunding` that was broadcast but claimed 0 (because
@@ -406,7 +429,37 @@ would let a posting key satisfy the reporter role.
 When the distributor's reporter authority is configured in Attest mode, run this
 service on N machines with the **same config** but each machine's own account and
 key. Determinism guarantees the pages are byte-identical, so the contract's
-threshold is reached without the machines coordinating. Nothing else changes.
+threshold is reached without the machines coordinating.
+
+**"Same config" is enforced, not assumed.** The settings that decide a share book
+hash to a policy digest, the channel declares it on chain, and a reporter whose
+config hashes differently **refuses to run** instead of attesting a different book.
+That matters more here than anywhere else: the tally is per payload hash and each
+authority gets one vote per action, so two honest reporters who disagree each burn
+their vote in a different bucket and the page can never reach threshold. A config
+typo would deadlock the epoch, not merely pay someone the wrong amount.
+
+```bash
+reporter policy-digest -config reporter.json     # run on EVERY machine; must match
+```
+
+Pass that value as `policy` to `addChannel` (required for attest channels) and to
+`setPolicy` when governance changes the rules. Covered: tags, excluded tags,
+excluded and muted accounts, `min_share_bps`, the author and curation curves,
+`author_reward_bps`, `cashout_days`, downvote and declined-payout handling, the
+vote-mana settings, the app tax, `staked_bps`, page limits, and the epoch schedule.
+Not covered: endpoints, `submit.*`, and the progress file — all per-operator.
+
+The digest is pinned to each epoch when it is **funded**, so `setPolicy` never
+rewrites an epoch already being reported, and an old epoch stays reproducible against
+the rules it was actually scored under. A backlog epoch left over from before a policy
+change must be reported with the config it was funded under; the reporter says so by
+name rather than failing at `submitRoot`.
+
+> **LP quorums must share one indexer.** The digest covers config, not data. Two
+> magi-mongo-indexer instances can assign the same event different heights and land it
+> in different epochs, which no digest computed here can detect. Content quorums are
+> unaffected — they read Hive directly.
 
 ## End-to-end verification
 
@@ -436,7 +489,7 @@ domain-less share recipients, and the airdrop does the same for its recipients.
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1
 ```
 
-74 offline tests, no network and no keys required — the Hive and VSC layers are
+174 offline tests, no network and no keys required — the Hive and VSC layers are
 behind `Transport` / `StateReader` interfaces.
 
 A live smoke test against real nodes is skipped by default:

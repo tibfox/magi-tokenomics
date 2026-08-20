@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,7 +183,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		b, _ := d.GetAccountBalance(ctx, 1, "hive:"+a.name)
 		t.Logf("ledger balance hive:%-14s hbd=%d  -> RC ~%d", a.name, b.Hbd, b.Hbd+10000)
 		if a.node == 3 && b.Hbd < 10000 {
-			t.Fatalf("attacker ledger hbd=%d is too thin: the 34-attack sweep needs RC "+
+			t.Fatalf("attacker ledger hbd=%d is too thin: the PHASE 8 outsider sweep needs RC "+
 				"well past the free tier or it fails on RC, not on authority", b.Hbd)
 		}
 	}
@@ -389,7 +390,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		"vsc":       map[string]any{"api": d.GQLEndpoint(1), "net_id": "vsc-devnet"},
 		"contracts": map[string]any{"distributor": c3ID, "channel": "content", "funder": c2ID, "stake": c1ID},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
-		"source": map[string]any{"tag": "magitribe", "limit": 100,
+		"source": map[string]any{"tags": []string{"magitribe"}, "limit": 100,
 			"weight": "hive_rshares", "exclude": []string{}},
 		"shares": map[string]any{"author_reward_bps": 5000, "author_curve": "1/1",
 			"curation_curve": "1/2", "muted": []string{}},
@@ -427,6 +428,22 @@ func TestDevnetMagiFull(t *testing.T) {
 	call(c3ID, "submitShares", fmt.Sprintf(
 		`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:70,hive:%s:30"}`,
 		holderA, holderB), "lp shares")
+	// The LP channel is pushed BY HAND, not through the reporter's Hive pipeline, so
+	// nothing computed a commitment for it — and finalizeEpoch refuses an epoch with
+	// no root. `reporter root` does that arithmetic over the same entries string,
+	// which is what an operator submitting a list by hand has to do.
+	lpEntries := fmt.Sprintf("hive:%s:70,hive:%s:30", holderA, holderB)
+	var lpRoot struct {
+		Root        string `json:"root"`
+		TotalShares string `json:"total_shares"`
+		Accounts    int    `json:"accounts"`
+	}
+	if err := json.Unmarshal(runReporter("root", "-entries", lpEntries, "-json"), &lpRoot); err != nil {
+		t.Fatalf("reporter root for the lp channel: %v", err)
+	}
+	call(c3ID, "submitRoot", fmt.Sprintf(
+		`{"channel":"lp","epoch":"0","root":"%s","totalShares":"%s","accounts":"%d"}`,
+		lpRoot.Root, lpRoot.TotalShares, lpRoot.Accounts), "lp root")
 	call(c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, "lp finalize")
 
 	// ---------------- PHASE 7: claims, invariants, outsider ----------------
@@ -467,13 +484,37 @@ func TestDevnetMagiFull(t *testing.T) {
 	// that used to be here sent {"epoch":"0"} to everything, which meant the two
 	// distributor claims were the same call issued twice and the yield claim named an
 	// action C1 does not export (it has claimYield, not claim).
-	claimDist := func(node int, ch, what string) {
-		callN(node, c3ID, "claim", fmt.Sprintf(`{"channel":"%s","epoch":"0"}`, ch), what)
+	// Every claim now carries a proof. Content comes from `reporter proof`, which
+	// recomputes the epoch from Hive; LP comes from `reporter root -account`, because
+	// that list never went through the Hive pipeline.
+	claimParts := func(ch, acct string) (share, proof string) {
+		var pf struct {
+			Share string   `json:"share"`
+			Proof []string `json:"proof"`
+		}
+		var raw []byte
+		if ch == "content" {
+			raw = runReporter("proof", "-epoch", "0", "-account", "hive:"+acct, "-json")
+		} else {
+			raw = runReporter("root", "-entries", lpEntries, "-account", "hive:"+acct, "-json")
+		}
+		if err := json.Unmarshal(raw, &pf); err != nil {
+			t.Fatalf("proof for %s on %s: %v\n%s", acct, ch, err, raw)
+		}
+		return pf.Share, strings.Join(pf.Proof, ",")
 	}
-	claimDist(1, "content", "A claims content")
-	claimDist(2, "content", "B claims content")
-	claimDist(1, "lp", "A claims LP")
-	claimDist(2, "lp", "B claims LP")
+	claimPayloadEp := func(ch, acct, ep string) string {
+		share, proof := claimParts(ch, acct)
+		return fmt.Sprintf(`{"channel":"%s","epoch":"%s","share":"%s","proof":"%s"}`, ch, ep, share, proof)
+	}
+	claimPayload := func(ch, acct string) string { return claimPayloadEp(ch, acct, "0") }
+	claimDist := func(node int, ch, acct, what string) {
+		callN(node, c3ID, "claim", claimPayload(ch, acct), what)
+	}
+	claimDist(1, "content", holderA, "A claims content")
+	claimDist(2, "content", holderB, "B claims content")
+	claimDist(1, "lp", holderA, "A claims LP")
+	claimDist(2, "lp", holderB, "B claims LP")
 	callN(1, c1ID, "claimYield", `{"epoch":"0"}`, "A claims yield")
 	callN(2, c1ID, "claimYield", `{"epoch":"0"}`, "B claims yield")
 
@@ -505,10 +546,28 @@ func TestDevnetMagiFull(t *testing.T) {
 	// the claims, since holderA also holds the undrawn emission pool.
 	c3TotalN := bigOf(c3Total)
 	c5TotalN := bigOf(waitKey(c3ID, "totalShares|lp|0", "C5 totalShares"))
-	// Shares are per CHANNEL. Taking the contract id instead made the content and lp
-	// share books the same book, so the two channels compared identical numbers.
+	// Shares are per CHANNEL, and the chain no longer stores them — it stores a root.
+	// The reporter is the authority on what an account earned, so ask IT: `reporter
+	// proof` recomputes the epoch from Hive and returns the share it committed to.
+	// That is a stronger check than reading state was, because it re-derives the
+	// number rather than reading back whatever the contract happened to record.
 	share := func(ch, acct string) *big.Int {
-		return bigOf(stateOf(c3ID, "share|"+ch+"|0|hive:"+acct))
+		if ch != "content" {
+			// lp shares were pushed directly by this suite (70/30), not by the
+			// reporter, so the suite already knows them.
+			if acct == holderA {
+				return big.NewInt(70)
+			}
+			return big.NewInt(30)
+		}
+		var pf struct {
+			Share string `json:"share"`
+		}
+		out := runReporter("proof", "-epoch", "0", "-account", "hive:"+acct, "-json")
+		if err := json.Unmarshal(out, &pf); err != nil {
+			t.Fatalf("reporter proof for %s: %v\n%s", acct, err, out)
+		}
+		return bigOf(pf.Share)
 	}
 	payout := func(funded string, sh, total *big.Int) *big.Int {
 		if total.Sign() == 0 {
@@ -573,13 +632,17 @@ func TestDevnetMagiFull(t *testing.T) {
 	}
 	t.Logf("holder-attacker hive:%s holds %s tokens and %s stake", holderB, holderBefore, holderStake)
 
+	// The double-claim rows carry the holder's REAL proof, so the double-claim guard
+	// is what refuses them. Without it they would be refused for having no proof —
+	// which is a different guard, and would leave the one under test unexercised.
 	holderAttacks := []struct{ id, action, payload, what string }{
 		// they DID have a valid share and already claimed it — the second must fail
-		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "double-claim content (has a real share)"},
-		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "double-claim LP (has a real share)"},
+		{c3ID, "claim", claimPayload("content", holderB), "double-claim content (has a real share)"},
+		{c3ID, "claim", claimPayload("lp", holderB), "double-claim LP (has a real share)"},
 		{c1ID, "claimYield", `{"epoch":"0"}`, "double-claim yield (is really staked)"},
 		// canonicalisation: "00" must not alias epoch 0 into a second payout
-		{c3ID, "claim", `{"channel":"content","epoch":"00"}`, "re-claim content via a non-canonical epoch alias"},
+		{c3ID, "claim", claimPayloadEp("content", holderB, "00"),
+			"re-claim content via a non-canonical epoch alias"},
 		{c1ID, "claimYield", `{"epoch":"00"}`, "re-claim yield via a non-canonical epoch alias"},
 		// an epoch they have no share in
 		{c3ID, "claim", `{"channel":"content","epoch":"1"}`, "claim an epoch with no share"},
@@ -592,7 +655,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c1ID, "stakeFor", fmt.Sprintf(`{"account":"hive:%s","amount":"100"}`, holderB), "stakeFor while not allowlisted"},
 		// roles they do not hold
 		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "finalize as a mere shareholder"},
-		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"2"}`, "sweep the content pot (valid nonce)"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"2","amount":"1"}`, "sweep the content pot (valid nonce)"},
 		{c1ID, "sweepEmptyEpoch", `{"epoch":"0"}`, "sweep a yield epoch that has stakers (refused on that, before auth)"},
 	}
 	t.Logf("holder sweep: %d attacks from a legitimately staked holder", len(holderAttacks))
@@ -728,7 +791,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"0","page":"00","entries":"hive:%s:999999"}`, outsider), "C3 re-apply page 0 via a non-canonical alias"},
 		{c3ID, "finalizeEpoch", `{"channel":"content","epoch":"1"}`, "C3 finalize an epoch they do not control"},
 		{c3ID, "cancelEpoch", `{"channel":"content","epoch":"0"}`, "C3 veto a legitimate epoch (griefing)"},
-		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1","amount":"1"}`, "C3 sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"channel":"content","epoch":"0"}`, "C3 claim with no share"},
 
 		// --- the LP channel: same contract, same surface, DIFFERENT channel ---
@@ -741,7 +804,7 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"1","page":"0","entries":"hive:%s:999999"}`, outsider), "lp push fraudulent shares"},
 		{c3ID, "finalizeEpoch", `{"channel":"lp","epoch":"1"}`, "lp finalize"},
 		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "lp veto a legitimate epoch"},
-		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1"}`, "lp sweep the pot (valid nonce, so this reaches the guardian gate)"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"1","amount":"1"}`, "lp sweep the pot (valid nonce, so this reaches the guardian gate)"},
 		{c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "lp claim with no share"},
 		{c3ID, "addChannel", fmt.Sprintf(
 			`{"channel":"pirate","bucket":"content","window":"1","reporterMode":"0",`+
@@ -773,7 +836,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	// The loop is over CHANNELS, not contract ids: content and lp share one distributor
 	// now, so every key needs the channel component or it addresses nothing.
 	for _, ch := range []string{"content", "lp"} {
-		if v := stateOf(c3ID, "share|"+ch+"|0|hive:"+outsider); v != "" && v != "0" {
+		if v := stateOf(c3ID, "claimed|"+ch+"|0|hive:"+outsider); v != "" && v != "0" {
 			t.Fatalf("%s channel granted the outsider a share: %s", ch, v)
 		}
 		if v := stateOf(c3ID, "totalShares|"+ch+"|1"); v != "" && v != "0" {
@@ -877,6 +940,6 @@ func TestDevnetMagiFull(t *testing.T) {
 	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")
 	t.Logf("PASSTHROUGH OK: and unpaused again — the retained power works in both directions")
 
-	t.Logf("FULL SYSTEM DEVNET PASSED — 7 contracts + reporter, one emission split 3 ways")
+	t.Logf("FULL SYSTEM DEVNET PASSED — the token + all three contracts + reporter, one emission split 3 ways")
 	t.Logf("hive fixture calls: %v", fixture.hits)
 }

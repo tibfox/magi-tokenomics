@@ -1,6 +1,10 @@
 package submit
 
-import "magi_token/reporter/sharecore"
+import (
+	"fmt"
+
+	"magi_token/reporter/sharecore"
+)
 
 // PlanOpts describes a complete epoch cycle, not just the share pages.
 //
@@ -39,6 +43,67 @@ type PlanOpts struct {
 
 	Pages   []sharecore.Page
 	RcLimit int
+
+	// Root is the merkle commitment for this epoch's share book, and TotalShares the
+	// denominator every claim divides by. Both are REQUIRED for a claimable epoch:
+	// the pages above only publish the leaves for the indexer, and without a root no
+	// claim can verify against anything.
+	//
+	// The plan puts submitRoot after the pages and before finalize. Order matters for
+	// the same reason it always did — finalizeEpoch now refuses an epoch with no root,
+	// because finalizing one would lock its funding away with nothing able to claim it.
+	Root        string
+	TotalShares string
+	Accounts    int
+
+	// Policy is the digest of the settings this book was scored under. The contract
+	// compares it against the digest pinned to the epoch when it was funded and
+	// refuses a root that does not match, so a reporter running different rules
+	// cannot commit a root at all.
+	//
+	// Empty is legitimate: a channel that never declared a policy (single-reporter
+	// deployments, which have nobody to disagree with) pins nothing and enforces
+	// nothing. Attest channels must declare one — addChannel refuses mode 2 without it.
+	Policy string
+}
+
+// Validate refuses a plan that could not succeed on chain.
+//
+// The Root fields were documented as REQUIRED and enforced nowhere: an empty Root
+// silently dropped submitRoot from the plan, and the plan then went on to finalize
+// an epoch that no claim could ever verify against. On chain that is not a soft
+// failure — finalizeEpoch refuses an epoch with no root, so the run dies partway
+// with the pages already published and the funding pulled.
+//
+// Checked here rather than at the call site because the call site is exactly what
+// a future caller would forget.
+func (o PlanOpts) Validate() error {
+	if len(o.Pages) == 0 {
+		return nil // nothing to publish, nothing to commit
+	}
+	if o.Root == "" {
+		return fmt.Errorf("this epoch has %d pages of shares but no merkle root: "+
+			"publishing leaves with no commitment leaves every claim unverifiable, "+
+			"and finalizeEpoch would refuse the epoch outright", len(o.Pages))
+	}
+	if len(o.Root) != 64 {
+		return fmt.Errorf("merkle root %q is %d hex chars, want 64", o.Root, len(o.Root))
+	}
+	for i := 0; i < len(o.Root); i++ {
+		c := o.Root[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return fmt.Errorf("merkle root %q is not lowercase hex: the contract parses it "+
+				"byte by byte and aborts on anything else", o.Root)
+		}
+	}
+	if o.TotalShares == "" || o.TotalShares == "0" {
+		return fmt.Errorf("totalShares is %q: every payout divides by it, so a zero or "+
+			"missing denominator makes the epoch unclaimable", o.TotalShares)
+	}
+	if o.Accounts <= 0 {
+		return fmt.Errorf("accounts is %d but there are pages to publish", o.Accounts)
+	}
+	return nil
 }
 
 // BuildFullPlan returns the ordered calls for one epoch cycle.
@@ -77,6 +142,18 @@ func BuildFullPlan(o PlanOpts) Plan {
 		pages, finalize = pages[:n-1], pages[n-1:]
 	}
 	pl.Calls = append(pl.Calls, pages...)
+	if o.Root != "" {
+		pl.Calls = append(pl.Calls, Call{
+			ContractID: o.DistributorID,
+			Action:     "submitRoot",
+			Payload: `{"channel":"` + o.Channel + `","epoch":"` + o.Epoch +
+				`","root":"` + o.Root + `","totalShares":"` + o.TotalShares +
+				`","accounts":"` + itoaPlan(o.Accounts) +
+				`","policy":"` + o.Policy + `"}`,
+			RcLimit: o.RcLimit,
+			Note:    "commit the share-book root — claims verify against this",
+		})
+	}
 
 	if o.PullFunding {
 		pl.Calls = append(pl.Calls, Call{
@@ -89,4 +166,19 @@ func BuildFullPlan(o PlanOpts) Plan {
 	}
 	pl.Calls = append(pl.Calls, finalize...)
 	return pl
+}
+
+// itoaPlan avoids pulling strconv in for one conversion.
+func itoaPlan(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }

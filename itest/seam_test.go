@@ -113,7 +113,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	rawPosts, rawVotes := realisticEpoch()
 	opt := hivesrc.Options{
-		Tag:             "hive-167922",
+		Tags:            []string{"hive-167922"},
 		Mode:            hivesrc.WeightHiveRshares,
 		ExcludeAccounts: []string{"hive:erin"}, // muted author
 	}
@@ -158,8 +158,14 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 	assert.NotContains(t, canon, "erin", "muted account leaked into the report")
 	assert.NotContains(t, canon, "flagger", "a downvoter earned shares")
 
+	// The tree the claims will prove against, built from the SAME share set the
+	// reporter paginated — so a disagreement between leaves and root is impossible.
+	tree := sharecore.BuildTree(res.Shares)
 	plan := submit.BuildFullPlan(submit.PlanOpts{
 		Channel:       "author",
+		Root:          tree.Root(),
+		TotalShares:   res.Total.String(),
+		Accounts:      len(res.Shares),
 		Epoch:         "0",
 		DistributorID: seamC3,
 		FunderID:      seamC2,
@@ -194,7 +200,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	// Nothing below constructs a payload. Every one comes from the reporter.
 	caller := func(action string) string {
-		if action == "submitShares" || action == "finalizeEpoch" {
+		if action == "submitShares" || action == "submitRoot" || action == "finalizeEpoch" {
 			return "hive:reporter"
 		}
 		return "hive:keeper" // distributeEpoch / pullFunding are permissionless
@@ -223,10 +229,10 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 		want := new(big.Int).Div(new(big.Int).Mul(funded, share), onChainTotal)
 		if want.Sign() == 0 {
 			// contract aborts rather than emit a zero transfer; assert that instead
-			call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 4, false)
+			call(t, &ct, seamC3, "claim", seamClaim(t, tree, "author", "0", acct), acct, 4, false)
 			continue
 		}
-		r := call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 4, true)
+		r := call(t, &ct, seamC3, "claim", seamClaim(t, tree, "author", "0", acct), acct, 4, true)
 		assert.Contains(t, r.Ret, `"claimed":"`+want.String()+`"`,
 			"%s: payout disagrees with funded*share/total", acct)
 		assert.Equal(t, want.String(), balanceOf(t, &ct, seamToken, acct),
@@ -242,7 +248,7 @@ func TestSeam_ReporterOutputDrivesRealContracts(t *testing.T) {
 
 	// a second claim must fail for everyone
 	for acct := range res.Shares {
-		call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, acct, 5, false)
+		call(t, &ct, seamC3, "claim", seamClaim(t, tree, "author", "0", acct), acct, 5, false)
 		break
 	}
 }
@@ -323,16 +329,40 @@ func TestSeam_BareAddressIsRejectedNotStranded(t *testing.T) {
 	// The domain-less entry is now SKIPPED rather than counted — consistent with how
 	// every other malformed entry is handled, and enough to close the stranding bug
 	// because nothing uncountable ever enters totalShares.
-	call(t, &ct, seamC3, "submitShares",
-		`{"channel":"author","epoch":"0","page":"0","entries":"alice:100,hive:bob:100"}`, "hive:reporter", 2, true)
+	bk1 := publishEntries(t, &ct, seamC3, "author", "0", "alice:100,hive:bob:100", "hive:reporter", 2)
 	assert.Equal(t, "100", stateStr(t, &ct, seamC3, "totalShares|author|0"),
 		"a domain-less account must not be counted into totalShares")
 	call(t, &ct, seamC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 2, true)
 
 	// bob gets the WHOLE pot: no share is stranded on an unclaimable address.
 	// (Before the fix he received 50000 and the other half was lost forever.)
-	r := call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 4, true)
+	r := call(t, &ct, seamC3, "claim", bk1.claimFor(t, "author", "0", "hive:bob"), "hive:bob", 4, true)
 	assert.Contains(t, r.Ret, `"claimed":"100000"`,
 		"funding must not be stranded on an address that cannot claim")
-	call(t, &ct, seamC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 4, false)
+	// "alice:100" carried no ledger domain, so it never entered the book — there is
+	// no proof for it and no share to claim. That is the whole point: before this,
+	// the entry was COUNTED into totalShares and then unclaimable forever, silently
+	// diluting bob and stranding that slice of the funding.
+	call(t, &ct, seamC3, "claim", bk1.claimForged(t, "author", "0", "hive:bob", "100"),
+		"hive:alice", 4, false)
+}
+
+// seamClaim builds a claim payload from the REPORTER's tree — the same object the
+// root was taken from — so the proof the contract verifies is the reporter's own
+// output rather than something the test computed separately.
+func seamClaim(t *testing.T, tree *sharecore.Tree, ch, ep, acct string) string {
+	t.Helper()
+	proof, ok := tree.Proof(acct)
+	if !ok {
+		t.Fatalf("%s is not in the reporter's tree", acct)
+	}
+	var share string
+	for _, l := range tree.Leaves {
+		if l.Account == acct {
+			share = l.Share
+			break
+		}
+	}
+	return fmt.Sprintf(`{"channel":"%s","epoch":"%s","share":"%s","proof":"%s"}`,
+		ch, ep, share, strings.Join(proof, ","))
 }

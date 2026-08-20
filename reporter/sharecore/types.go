@@ -33,6 +33,20 @@ type Post struct {
 	Author   string // "hive:bob"
 	Permlink string // stable id, used for deterministic tie-breaking
 	Votes    []Vote
+
+	// Downweight is the summed MAGNITUDE of the post's downvotes, already positive.
+	// It is kept apart from Votes rather than folded in as negative weights because
+	// the two are used differently: it nets off the post's total, deciding what the
+	// post earns, but it never enters the curation curve — a downvoter is not a
+	// curator and must not draw from the curation pool.
+	//
+	// Zero when downvotes are disabled, which is the collector's job to enforce.
+	Downweight *big.Int
+
+	// TaxBps skims this many basis points off the post's weight before the
+	// author/curator split, paying Config.AppTaxBeneficiary. Set by the collector
+	// for a post published outside the designated apps.
+	TaxBps int
 }
 
 // Config mirrors the SCOT reward knobs the framework cares about. All values are
@@ -56,6 +70,30 @@ type Config struct {
 
 	// Muted accounts earn nothing (SCOT account muting). Sorted or not; matched exactly.
 	Muted []string
+
+	// AppTaxBeneficiary receives every post's Post.TaxBps skim. Empty means the skim
+	// is not collected at all: a tax with nowhere to go would silently BURN the
+	// slice, shrinking the epoch's total shares and quietly paying it to everyone
+	// else, so the collector refuses that configuration upstream.
+	AppTaxBeneficiary string
+
+	// MinShareBps drops any account whose share is below this many basis points of
+	// the epoch's total. 0 pays everyone.
+	//
+	// WHY IT EXISTS: cost. Every earner costs ~311 RC of state on chain whatever they
+	// are owed, so a long tail of accounts earning a rounding error is the single
+	// largest line in a reporter's bill — for 500 earners it IS the bill. Dropping
+	// them is the one lever that scales it down.
+	//
+	// It is a POLICY choice, not a technicality: a dropped account receives nothing.
+	// Expressed relative to the epoch's total rather than in tokens because the
+	// reporter computes shares before it knows what the epoch was funded with — with
+	// emission E, a threshold of B basis points is a floor of E*B/10000 tokens.
+	//
+	// Nothing is stranded. Payout is funded*share/totalShares and dropped shares
+	// leave totalShares, so the amount simply redistributes pro-rata to everyone who
+	// remains rather than sitting unclaimable.
+	MinShareBps int
 }
 
 // Result is the deterministic output for one epoch.

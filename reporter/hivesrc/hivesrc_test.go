@@ -128,3 +128,29 @@ func TestMapping_FeedsDeterministicCore(t *testing.T) {
 	}
 	t.Logf("stable: %s", first)
 }
+
+// Exclusion is EXACT-MATCH on the ledger-domain account, and this pins that.
+//
+// Every probe of the exclusion set prefixes the raw Hive name — excl["hive:"+p.Author]
+// for authors, excl["hive:"+v.Voter] for voters and again in replayMana — so a bare
+// name in `source.exclude` excludes nobody. The reporter's config layer refuses one
+// for exactly that reason; this is the other half of that contract.
+func TestMapPost_BareExclusionDoesNotMatch(t *testing.T) {
+	p := RawPost{Author: "bob", Permlink: "x", IsPaidout: true, PayoutAt: "2026-01-08T00:00:00"}
+	votes := []RawVote{
+		{Voter: "muted", Rshares: "500", Percent: 10000, Time: "2026-01-01T00:00:01"},
+		{Voter: "ok", Rshares: "100", Percent: 10000, Time: "2026-01-01T00:00:02"},
+	}
+
+	bare, _ := MapPost(p, votes, Options{Mode: WeightHiveRshares}, map[string]bool{"muted": true})
+	if len(bare.Votes) != 2 {
+		t.Fatalf("a BARE excluded name must not match — exclusion is exact-match on the "+
+			"domain-prefixed account, which is why the config layer refuses bare names. "+
+			"Got %d votes, want both kept", len(bare.Votes))
+	}
+
+	pref, _ := MapPost(p, votes, Options{Mode: WeightHiveRshares}, map[string]bool{"hive:muted": true})
+	if len(pref.Votes) != 1 || pref.Votes[0].Voter != "hive:ok" {
+		t.Fatalf("hive:muted is the documented form and must drop that voter: %+v", pref.Votes)
+	}
+}

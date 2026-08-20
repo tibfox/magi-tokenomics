@@ -70,15 +70,16 @@ func TestHolder_DonationCannotInflateClaims(t *testing.T) {
 	// the donor dumps tokens directly into C3 hoping to enlarge the pool
 	call(t, &ct, hdTok, "transfer", fmt.Sprintf(`{"to":"contract:%s","amount":"50000"}`, hdC3), "hive:hddonor", 10, true)
 
-	call(t, &ct, hdC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:hda:1"}`, "hive:hdreporter", 10, true)
+	bk1 := publishEntries(t, &ct, hdC3, "author", "0", "hive:hda:1", "hive:hdreporter", 10)
 	call(t, &ct, hdC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:hdreporter", 10, true)
-	r := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hda", 11, true)
+	r := call(t, &ct, hdC3, "claim", bk1.claimFor(t, "author", "0", "hive:hda"), "hive:hda", 11, true)
 
 	// Emission is 100000/epoch and C3's bucket is 50%, so funded|0 == 50000.
 	// The sole claimant must receive exactly that — NOT funded + the 50000 donation.
 	assert.Equal(t, "50000", pickJSON(r.Ret, "claimed"), "donation must not inflate the payout")
 	// the donation is still sitting in C3, unclaimed and unclaimable by the donor
-	call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hddonor", 11, false)
+	// the donor is not in the book at all, so no proof exists for them
+	call(t, &ct, hdC3, "claim", bk1.claimForged(t, "author", "0", "hive:hda", "100"), "hive:hddonor", 11, false)
 	assert.Equal(t, "0", hdBal(t, &ct, "hive:hddonor", 11).String(), "donor cannot recover the donation")
 	assert.Equal(t, "50000", hdBal(t, &ct, "contract:"+hdC3, 11).String(),
 		"the donated 50000 remains stranded in C3 — accounting is ledger-based, not balance-based")
@@ -97,15 +98,14 @@ func TestHolder_SybilSplitNeverBeatsSingleAccount(t *testing.T) {
 
 	// honest whale holds 300 shares in ONE account; sybil holds 300 split 3 ways.
 	// funded=25000, totalShares=600 → each share unit is worth 41.66…
-	call(t, &ct, hdC3, "submitShares",
-		`{"channel":"author","epoch":"0","page":"0","entries":"hive:hdwhale:300,hive:hdsyb1:100,hive:hdsyb2:100,hive:hdsyb3:100"}`,
-		"hive:hdreporter", 10, true)
+	bk1 := publishEntries(t, &ct, hdC3, "author", "0",
+		"hive:hdwhale:300,hive:hdsyb1:100,hive:hdsyb2:100,hive:hdsyb3:100", "hive:hdreporter", 10)
 	call(t, &ct, hdC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:hdreporter", 10, true)
 
-	whale := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdwhale", 11, true)
-	s1 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb1", 11, true)
-	s2 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb2", 11, true)
-	s3 := call(t, &ct, hdC3, "claim", `{"channel":"author","epoch":"0"}`, "hive:hdsyb3", 11, true)
+	whale := call(t, &ct, hdC3, "claim", bk1.claimFor(t, "author", "0", "hive:hdwhale"), "hive:hdwhale", 11, true)
+	s1 := call(t, &ct, hdC3, "claim", bk1.claimFor(t, "author", "0", "hive:hdsyb1"), "hive:hdsyb1", 11, true)
+	s2 := call(t, &ct, hdC3, "claim", bk1.claimFor(t, "author", "0", "hive:hdsyb2"), "hive:hdsyb2", 11, true)
+	s3 := call(t, &ct, hdC3, "claim", bk1.claimFor(t, "author", "0", "hive:hdsyb3"), "hive:hdsyb3", 11, true)
 
 	w := new(big.Int)
 	w.SetString(pickJSON(whale.Ret, "claimed"), 10)

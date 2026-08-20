@@ -3,6 +3,7 @@ package itest_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"magi_token/reporter/sharecore"
 )
 
 // The devnet suites live under testdata/, which Go ignores by construction: they are
@@ -37,6 +40,11 @@ var (
 	// exists in *some* contract let `claimed|` (written by the distributor) satisfy a
 	// read against C1, which writes `y_claimed|`. That cost a 20-minute devnet run.
 	reKeyedRead = regexp.MustCompile(`\b(c[1-7]ID|distID)\b[^\n]{0,120}?"([a-z][A-Za-z0-9_]*)\|`)
+	// Unscoped keys — no separator at all. These were invisible to reKeyedRead,
+	// which required a trailing "|", so a suite could read a key that simply does
+	// not exist and see "" forever. That is how magi_rogue_reporter waited on
+	// "unallocated" while the contract writes "unalloc|<channel>".
+	reFlatRead = regexp.MustCompile(`\b(c[1-7]ID|distID)\b\s*,\s*"([a-z][a-z0-9_]{3,})"`)
 )
 
 func devnetSources(t *testing.T) map[string]string {
@@ -140,6 +148,22 @@ func TestDevnetDrift_EveryReferencedStateKeyExists(t *testing.T) {
 				continue // an id this guard cannot attribute; not worth a false alarm
 			}
 			if strings.Contains(src, `"`+k+`|`) {
+				continue
+			}
+			missing[name] = append(missing[name], idVar+" -> "+k)
+		}
+		// unscoped reads: the token after a contract id that is not an action
+		for _, m := range reFlatRead.FindAllStringSubmatch(src, -1) {
+			idVar, k := m[1], m[2]
+			if ignore[k] || exportedActions(t)[k] {
+				continue // it is an action being called, not a key being read
+			}
+			csrc, ok := perContract[contractOfVar(idVar)]
+			if !ok {
+				continue
+			}
+			// accept it as a key if the contract builds it either flat or scoped
+			if strings.Contains(csrc, `"`+k+`"`) || strings.Contains(csrc, `"`+k+`|`) {
 				continue
 			}
 			missing[name] = append(missing[name], idVar+" -> "+k)
@@ -512,6 +536,12 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 	reAnyAction := regexp.MustCompile(`"(\w+)"\s*,`)
 	checkedCalls, checkedKeys := 0, 0
 
+	// Payload builders shared across suites live in their own file, so helpers are
+	// resolved against every devnet source rather than only the calling one.
+	allSrc := ""
+	for _, raw := range devnetSources(t) {
+		allSrc += stripLineComments(raw) + "\n"
+	}
 	for name, rawSrc := range devnetSources(t) {
 		// Comments describe bugs as often as they contain them: the note explaining
 		// why claimed|0|hive: was wrong itself contains the string claimed|0|hive:.
@@ -544,7 +574,11 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 				continue
 			}
 			checkedCalls++
-			tail := src[s.payloadAt:min(s.payloadAt+400, len(src))]
+			// Bound the scan to THIS call or table row. A fixed-width window walks
+			// into the next row, and then a claimYield row's {"epoch":"0"} gets read
+			// as the payload of the claim above it — the guard condemns a correct
+			// line and, worse, would clear a wrong one that sits next to a right one.
+			tail := enclosingArgs(src, s.payloadAt)
 			payload := ""
 			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
 				payload = bt[1]
@@ -559,6 +593,20 @@ func TestDevnetDrift_ChannelScopedCallsAndKeysCarryAChannel(t *testing.T) {
 				}
 			}
 			if payload == "" {
+				// payload built by a helper — judge the helper's body instead, so a
+				// suite that moved its payloads behind a function is still covered
+				if fm := regexp.MustCompile(`^\s*,\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
+					body, ok := helperBody(allSrc, fm[1])
+					if !ok {
+						bad = append(bad, act+" payload helper "+fm[1]+" is not defined in this suite")
+						continue
+					}
+					_ = body
+					if why := helperWritesField(t, allSrc, fm[1], "channel", map[string]string{}); why != "" {
+						bad = append(bad, act+" payload comes from "+fm[1]+", which "+why)
+					}
+					continue
+				}
 				continue // could not resolve; the key check below still covers this suite
 			}
 			if !strings.Contains(payload, `"channel"`) {
@@ -833,4 +881,564 @@ func TestDevnetDrift_ActionsExistOnTheContractTheyAreSentTo(t *testing.T) {
 		}
 	}
 	assert.NotZero(t, checked, "attributed no calls to a contract — this guard is vacuous")
+}
+
+// ---------------------------------------------------------------------------
+// The reporter BINARY must be newer than the reporter's sources.
+//
+// Three devnet suites run the real compiled binary rather than the library, so a
+// stale one is not a slightly-old build — it is a different program. Renaming a
+// config key is the case that bites: the suites write the NEW key, the old binary
+// decodes with DisallowUnknownFields and refuses to start, and the run dies at the
+// reporter phase with `unknown field "tags"` after twenty minutes of setup.
+//
+// This was one attentive moment away from happening: source.tag became source.tags
+// and the binary on disk predated the change.
+func TestDevnetDrift_ReporterBinaryIsNewerThanItsSources(t *testing.T) {
+	bin, err := os.Stat(filepath.Join("..", "reporter", "bin", "reporter"))
+	if err != nil {
+		t.Skipf("reporter binary not built: %v — devnet suites that run it will fail", err)
+	}
+
+	newest, newestPath := int64(0), ""
+	walkErr := filepath.WalkDir(filepath.Join("..", "reporter"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		// tests do not go into the binary
+		if strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		st, serr := d.Info()
+		if serr != nil {
+			return nil
+		}
+		if m := st.ModTime().Unix(); m > newest {
+			newest, newestPath = m, p
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk reporter sources: %v", walkErr)
+	}
+	assert.NotZero(t, newest, "found no reporter sources — the scan is broken, not the binary")
+
+	if bin.ModTime().Unix() < newest {
+		t.Errorf("reporter/bin/reporter is OLDER than %s — the devnet suites run this binary, "+
+			"so they would exercise the previous program. A renamed config key makes it refuse "+
+			"to start mid-run. Rebuild with:\n"+
+			"  GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter",
+			newestPath)
+	}
+}
+
+// enclosingArgs returns the source from pos to the end of the call or composite
+// literal that encloses it — the closing paren or brace that pos sits inside.
+// Bounding matters: the guards below look for the payload nearest an action name,
+// and a fixed-width window silently reads the NEXT table row when a row builds its
+// payload with a helper instead of a literal.
+func enclosingArgs(src string, pos int) string {
+	depth, inStr := 0, byte(0)
+	for i := pos; i < len(src); i++ {
+		c := src[i]
+		if inStr != 0 {
+			if c == '\\' && inStr != '`' {
+				i++
+			} else if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			inStr = c
+		case '(', '{', '[':
+			depth++
+		case ')', '}', ']':
+			if depth == 0 {
+				return src[pos:i]
+			}
+			depth--
+		}
+	}
+	return src[pos:]
+}
+
+// helperBody returns the body of a func literal assigned to name — the shape the
+// devnet suites use for payload builders (name := func(...) string { ... }).
+func helperBody(src, name string) (string, bool) {
+	// Three shapes, because the suites use all three: a func literal assigned to a
+	// name, a plain function declaration, and a METHOD on a helper type. Matching
+	// only the first is how this resolver came to skip every call site after the
+	// payload builders moved onto a shared type — the guard kept passing while
+	// checking nothing at all.
+	for _, pat := range []string{
+		`\b` + regexp.QuoteMeta(name) + `\s*:?=\s*func\b[^{]*\{`,
+		`func\s+` + regexp.QuoteMeta(name) + `\s*\([^{]*\{`,
+		`func\s+\([^)]*\)\s*` + regexp.QuoteMeta(name) + `\s*\([^{]*\{`,
+	} {
+		if m := regexp.MustCompile(pat).FindStringIndex(src); m != nil {
+			return enclosingArgs(src, m[1]), true
+		}
+	}
+	return "", false
+}
+
+// helperWritesChannel reports why a payload builder fails to scope its payload to a
+// channel, or "" if it does. Three ways it can: write the field itself, delegate to
+// another builder in the same suite, or take the payload the reporter emits — and the
+// last is checked against the reporter's own source, not waived.
+func helperWritesField(t *testing.T, src, name, field string, memo map[string]string) string {
+	t.Helper()
+	// Memoise the ANSWER, not the visit. Returning "" for an already-seen helper
+	// silently clears the whole chain the moment a builder calls the same helper
+	// twice — which is how this guard passed a suite whose payload had no channel
+	// at all. In-progress entries are held as a failure so a cycle cannot pass either.
+	if why, done := memo[name]; done {
+		return why
+	}
+	memo[name] = "is part of a call cycle the guard cannot resolve"
+	answer := ""
+	defer func() { memo[name] = answer }()
+	body, ok := helperBody(src, name)
+	if !ok {
+		answer = "is not defined in this suite"
+		return answer
+	}
+	// Struct tags are NOT payload fields. A builder that unmarshals into
+	// `Proof []string ` + "`" + `json:"proof"` + "`" + ` carries the string "proof"
+	// in its body while writing no proof into the payload at all — which is how a
+	// helper that dropped the proof entirely still satisfied this check.
+	body = stripStructTags(body)
+	if strings.Contains(body, `"`+field+`"`) {
+		answer = ""
+		return answer
+	}
+	if strings.Contains(body, "ClaimPayload") || strings.Contains(body, "claim_payload") {
+		repb, err := os.ReadFile(filepath.Join("..", "reporter", "cmd", "reporter", "main.go"))
+		if err != nil {
+			t.Fatalf("read reporter main.go: %v", err)
+		}
+		rep := string(repb)
+		m := regexp.MustCompile("\"claim_payload\":[^`]*`([^`]*)`").FindStringSubmatch(rep)
+		if m == nil {
+			answer = "takes the reporter's claim_payload, which no longer exists"
+			return answer
+		}
+		if !strings.Contains(m[1], `"`+field+`"`) {
+			answer = `takes the reporter's claim_payload, which stopped writing "` + field + `"`
+			return answer
+		}
+		answer = ""
+		return answer
+	}
+	// delegation: follow every builder it calls
+	for _, c := range regexp.MustCompile(`\b(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindAllStringSubmatch(body, -1) {
+		if _, isHelper := helperBody(src, c[1]); !isHelper || c[1] == name {
+			continue
+		}
+		if why := helperWritesField(t, src, c[1], field, memo); why == "" {
+			answer = ""
+			return answer
+		}
+	}
+	answer = `never writes "` + field + `"`
+	return answer
+}
+
+// The contract's entry rules cannot be imported (tinygo wasm, no shared packages),
+// so sharecore.ParseEntries is a hand-written mirror of applyEntries. This compares
+// the two directly. It exists because the mirror had already drifted: the contract
+// accepts a system: payout destination and `reporter root` did not, so a system:
+// entry was counted on chain and left out of the root committed for it — nothing
+// reported that, and the account simply could never prove a claim.
+func TestDevnetDrift_LedgerDomainsMatchTheContract(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "c3-distributor", "contract", "main.go"))
+	if err != nil {
+		t.Fatalf("read distributor: %v", err)
+	}
+	src := stripLineComments(string(b))
+
+	fn := regexp.MustCompile(`func isLedgerAddr\(a string\) bool \{`).FindStringIndex(src)
+	if fn == nil {
+		t.Fatal("isLedgerAddr is gone from the distributor — this guard is now blind")
+	}
+	onChain := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"([a-z]+:)"`).FindAllStringSubmatch(
+		enclosingArgs(src, fn[1]), -1) {
+		onChain[m[1]] = true
+	}
+	if len(onChain) == 0 {
+		t.Fatal("parsed no domains out of isLedgerAddr — this guard is now blind")
+	}
+
+	offChain := map[string]bool{}
+	for _, d := range []string{"hive:", "contract:", "did:", "system:", "eth:", "sol:", "btc:"} {
+		if sharecore.IsLedgerAddr(d + "x") {
+			offChain[d] = true
+		}
+	}
+	for d := range onChain {
+		if !offChain[d] {
+			t.Errorf("the contract counts %q but sharecore skips it: such an entry is funded "+
+				"on chain and missing from the root, so that account can never prove a claim", d)
+		}
+	}
+	for d := range offChain {
+		if !onChain[d] {
+			t.Errorf("sharecore counts %q but the contract skips it: the root would carry a leaf "+
+				"the chain never funded, inflating the denominator against everyone else", d)
+		}
+	}
+}
+
+// Every reporter subcommand a devnet suite invokes must accept -config.
+//
+// The devnet harness passes -config to the binary uniformly, so a subcommand that
+// does not define the flag dies on it — and it dies where the suite calls it, which
+// for `root` was 17 minutes into a run, after the whole chain had been stood up,
+// funded and reported. The flag need not DO anything (`root` is pure arithmetic
+// over the list it is given); it only has to be accepted.
+func TestDevnetDrift_EveryReporterSubcommandTheSuitesUseAcceptsConfig(t *testing.T) {
+	bin := filepath.Join("..", "reporter", "bin", "reporter")
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("reporter binary not built: %v", err)
+	}
+	subs := map[string]bool{}
+	for name, raw := range devnetSources(t) {
+		_ = name
+		for _, m := range regexp.MustCompile(`runReporter\w*\(\s*"(\w+)"`).
+			FindAllStringSubmatch(stripLineComments(raw), -1) {
+			subs[m[1]] = true
+		}
+	}
+	if len(subs) == 0 {
+		t.Fatal("found no reporter subcommands in the devnet suites — this guard is now blind")
+	}
+	for sub := range subs {
+		out, _ := exec.Command(bin, sub, "-config", "/dev/null").CombinedOutput()
+		// Any other failure is fine and expected here — missing -entries, no
+		// network, an empty config. The ONLY thing under test is that the flag
+		// itself is not rejected.
+		if strings.Contains(string(out), "flag provided but not defined: -config") {
+			t.Errorf("`reporter %s` rejects -config, which the devnet harness always passes: "+
+				"every suite calling it dies at that call, after standing up the chain\n  %s",
+				sub, trunc(string(out), 200))
+		}
+	}
+}
+
+// Under the merkle commitment a claim carries the claimant's share and a proof of
+// it. A payload with neither is refused on chain — "share must be positive" — so a
+// suite still sending the pre-merkle payload fails at its first claim, which is
+// after the whole chain has been stood up, funded and reported.
+//
+// This is the guard that was missing when three suites were called "migrated"
+// while still claiming with {"channel":..,"epoch":..} and nothing else.
+func TestDevnetDrift_EveryClaimCarriesAShareAndProof(t *testing.T) {
+	reClaim := regexp.MustCompile(`\b(c3ID|c5ID|distID)\s*,\s*"(claim)"`)
+	checked := 0
+	// Helpers are resolved against EVERY devnet source, not just the calling file:
+	// the shared payload builders live in their own file, and resolving per-file
+	// silently found nothing and reported success.
+	all := ""
+	for _, raw := range devnetSources(t) {
+		all += stripLineComments(raw) + "\n"
+	}
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		bad := []string{}
+		for _, m := range reClaim.FindAllStringSubmatchIndex(src, -1) {
+			checked++
+			tail := enclosingArgs(src, m[1])
+			// A claim that is SUPPOSED to be refused for having no share is a
+			// deliberate negative test, and must say so in its own description.
+			// Requiring the words rather than inferring them keeps an actually
+			// broken call from hiding among the attacks: silence is not a
+			// declaration of intent.
+			if lower := strings.ToLower(tail); strings.Contains(lower, "no share") ||
+				strings.Contains(lower, "no proof") {
+				continue
+			}
+			payload := ""
+			if bt := regexp.MustCompile("`([^`]*)`").FindStringSubmatch(tail); bt != nil {
+				payload = bt[1]
+			}
+			for _, field := range []string{"share", "proof"} {
+				if payload != "" {
+					if !strings.Contains(payload, `"`+field+`"`) {
+						bad = append(bad, fmt.Sprintf("claim payload has no %q: %s", field, trunc(payload, 70)))
+					}
+					continue
+				}
+				if fm := regexp.MustCompile(`^\s*,\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\(`).FindStringSubmatch(tail); fm != nil {
+					if why := helperWritesField(t, all, fm[1], field, map[string]string{}); why != "" {
+						bad = append(bad, fmt.Sprintf("claim payload comes from %s, which %s", fm[1], why))
+					}
+				}
+			}
+		}
+		if len(bad) > 0 {
+			sort.Strings(bad)
+			t.Errorf("%s claims without a merkle proof: %v\n"+
+				"  the contract aborts these — a claim needs the share the indexer holds\n"+
+				"  and a path proving it against the epoch's committed root",
+				name, uniqStrings(bad))
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no distributor claims in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d claim call sites", checked)
+}
+
+// stripStructTags removes Go struct tags from a body so field-presence checks read
+// what a helper WRITES, not what it merely unmarshals. A tag is a backtick literal
+// that declares an encoding key and contains no JSON object, which distinguishes it
+// from the payload literals those helpers also carry.
+func stripStructTags(body string) string {
+	return regexp.MustCompile("`[^`]*`").ReplaceAllStringFunc(body, func(lit string) string {
+		if strings.Contains(lit, "{") {
+			return lit // a payload literal — this is exactly what we want to read
+		}
+		if regexp.MustCompile(`\b(json|yaml|xml|db|graphql):"`).MatchString(lit) {
+			return ""
+		}
+		return lit
+	})
+}
+
+// `claimed|<ch>|<ep>|<acct>` records THAT an account claimed, not what it earned.
+// The contract writes the literal "1" there, and only after a successful claim.
+//
+// Two devnet suites have now computed an expected payout from it — a leftover from
+// when share|<ch>|<ep>|<acct> held the real number and was deleted by the merkle
+// migration. Both failed in the same confusing way, reporting that every account
+// "earned no on-chain share" long after the chain had paid them, and both cost a
+// full devnet run to discover.
+//
+// So: a claimed| key may be tested for PRESENCE, never parsed as a number.
+func TestDevnetDrift_ClaimedKeyIsNeverReadAsAShare(t *testing.T) {
+	// numeric parses of a variable that was assigned from a claimed| lookup
+	reParse := regexp.MustCompile(`(?:SetString|ParseInt|ParseUint|Atoi)\(\s*(\w+)`)
+	// ...and the other half of the same mistake: comparing the value to something
+	// that is not the presence marker. waitValue(id, "claimed|...", share, ...)
+	// reads as a share assertion and is not a numeric parse at all, so the parse
+	// scan above missed it entirely — that cost devnet run 34.
+	reValueCmp := regexp.MustCompile(`(?s)"claimed\|[^"]*"(?:\s*\+[^,)]*)?\s*,\s*([^,)]+)`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		for _, m := range regexp.MustCompile(`"claimed\|`).FindAllStringIndex(src, -1) {
+			checked++
+			// look at the statements around the lookup: within one screen, does a
+			// numeric parse consume something derived from it?
+			from := m[0]
+			to := min(from+700, len(src))
+			window := src[from:to]
+			// a compared-against value that is not "1" (or a presence check) means
+			// the caller believes this key holds a quantity
+			if m2 := reValueCmp.FindStringSubmatch(src[from:min(from+220, len(src))]); m2 != nil {
+				want := strings.TrimSpace(m2[1])
+				// the argument after the key is a TIMEOUT in the presence helpers,
+				// not an expected value — judging those would condemn every correct
+				// waitStateKeyPresent call in the tree
+				if strings.Contains(want, "time.") || strings.Contains(want, "Duration") {
+					want = ""
+				}
+				isPresence := want == "" || want == `"1"` ||
+					strings.HasPrefix(want, `"`) && strings.Contains(want, "claim")
+				looksNumeric := regexp.MustCompile(`^"?\d`).MatchString(want)
+				if !isPresence && (looksNumeric || regexp.MustCompile(`^(share|amount|total|owed|expected)\b`).MatchString(want)) {
+					t.Errorf("%s compares a claimed| value against %s: that key holds \"1\" and is "+
+						"written only AFTER a claim, so this asserts a quantity against a presence "+
+						"flag\n  near: %s", name, want,
+						trunc(strings.TrimSpace(src[from:min(from+140, len(src))]), 140))
+					continue
+				}
+			}
+			if !reParse.MatchString(window) {
+				continue
+			}
+			// a presence check that happens to sit near unrelated arithmetic is
+			// fine; what is not fine is parsing the value the lookup produced
+			if regexp.MustCompile(`(?s)st\[\w+\].*?(SetString|ParseInt|ParseUint|Atoi)\(`).MatchString(window) ||
+				regexp.MustCompile(`(?s)(SetString|ParseInt|ParseUint|Atoi)\(\s*raw\b`).MatchString(window) {
+				t.Errorf("%s parses a claimed| value as a number: that key holds \"1\" and is "+
+					"written only AFTER a claim, so the arithmetic reads a presence flag as a "+
+					"share and every account looks like it earned nothing\n  near: %s",
+					name, trunc(strings.TrimSpace(window), 160))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no claimed| lookups in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d claimed| lookups", checked)
+}
+
+// exportedActions returns every //go:wasmexport name across the contracts, so the
+// unscoped-key scan can tell "this is an action being called" from "this is a state
+// key being read" — both appear as the first string after a contract id.
+func exportedActions(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, src := range contractSourcesByName(t) {
+		for _, m := range regexp.MustCompile(`//go:wasmexport (\w+)`).FindAllStringSubmatch(src, -1) {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// A suite that reads totalShares| must be able to reach it.
+//
+// submitShares stopped writing totalShares when applyEntries stopped accumulating:
+// it now lands only with submitRoot. A suite that publishes pages and reads
+// totalShares therefore waits on a key nothing will write. That is not a visible
+// failure — the 1-of-2 assertion in magi_cosigned ("nothing was applied") would
+// have held vacuously forever, and only its success case timed out.
+//
+// The key is reachable two ways: the suite submits a root itself, or it drives the
+// reporter, whose plan emits submitRoot after the pages.
+func TestDevnetDrift_TotalSharesIsOnlyReadWhereARootIsSubmitted(t *testing.T) {
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		if !strings.Contains(src, "totalShares|") {
+			continue
+		}
+		checked++
+		submitsRoot := strings.Contains(src, `"submitRoot"`) || strings.Contains(src, "RootPayload(")
+		drivesReporter := regexp.MustCompile(`runReporter\w*\(\s*"(run|plan)"|run\(\s*"run"`).MatchString(src)
+		if !submitsRoot && !drivesReporter {
+			t.Errorf("%s reads totalShares| but never submits a root, directly or via the "+
+				"reporter's plan: submitShares does not write that key any more, so the read "+
+				"returns \"\" forever — an 'applied nothing' assertion passes vacuously and an "+
+				"'applied' assertion times out", name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no suite reads totalShares| — this guard is now blind")
+	}
+	t.Logf("checked %d suites that read totalShares|", checked)
+}
+
+// Every channel's bucket must be one the funder actually declares.
+//
+// addChannel cross-calls the funder's bucketTarget and aborts when the funder has
+// no bucket by that name. The abort is invisible from the outside — the channel
+// key is simply never written, and the suite waits on it until it times out with
+// no indication of why. magi_cosigned declared its C2 bucket as "c" and then asked
+// for a channel funded by "author"; it had been failing that way since the
+// per-channel bucket refactor, and cost a devnet run to find.
+func TestDevnetDrift_ChannelBucketsAreDeclaredByTheFunder(t *testing.T) {
+	reBuckets := regexp.MustCompile(`"buckets":"([^"]*)"`)
+	reChanBucket := regexp.MustCompile(`"channel":"(\w+)","bucket":"(\w+)"`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		declared := map[string]bool{}
+		for _, m := range reBuckets.FindAllStringSubmatch(src, -1) {
+			// "name:target:bps,name:target:bps" — the name is up to the first colon
+			for _, entry := range strings.Split(m[1], ",") {
+				if cut := strings.Index(entry, ":"); cut > 0 {
+					declared[entry[:cut]] = true
+				}
+			}
+		}
+		if len(declared) == 0 {
+			continue // this suite does not stand up a funder of its own
+		}
+		for _, m := range reChanBucket.FindAllStringSubmatch(src, -1) {
+			checked++
+			ch, bucket := m[1], m[2]
+			// %s-substituted names cannot be resolved statically; skip rather than
+			// guess, so the guard never invents a failure it cannot justify
+			if strings.Contains(bucket, "%") {
+				continue
+			}
+			if !declared[bucket] {
+				keys := make([]string, 0, len(declared))
+				for k := range declared {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				t.Errorf("%s: channel %q asks for bucket %q, but the funder declares %v\n"+
+					"  addChannel aborts on this, the channel key is never written, and the "+
+					"suite waits on it until it times out with no reason given",
+					name, ch, bucket, keys)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no channel/bucket pairs in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d channel/bucket pairs", checked)
+}
+
+// Bucket-keyed state uses the bucket's NAME, never its target.
+//
+// C2 declares buckets as "name:target:bps", and keys owed| and bkt| by the name.
+// A suite that builds owed|<target>|<ep> reads "" forever: the emission it is
+// waiting for was recorded all along, under a key it never looks at. magi_refill
+// did exactly that — "content:hive:<treasury>:10000" declared, owed|hive:<treasury>
+// read — and it cost a devnet run to see, because a key that is merely absent
+// produces a timeout rather than an error.
+//
+// EveryReferencedStateKeyExists cannot catch this: the PREFIX owed| does exist in
+// the contract. It is the component after it that is wrong.
+func TestDevnetDrift_BucketKeyedStateUsesTheBucketName(t *testing.T) {
+	reBuckets := regexp.MustCompile(`"buckets":"([^"]*)"`)
+	reBucketKey := regexp.MustCompile(`"(owed|bkt)\|([^"|%]*)`)
+	checked := 0
+	for name, rawSrc := range devnetSources(t) {
+		src := stripLineComments(rawSrc)
+		names, targets := map[string]bool{}, map[string]bool{}
+		for _, m := range reBuckets.FindAllStringSubmatch(src, -1) {
+			for _, entry := range strings.Split(m[1], ",") {
+				parts := strings.SplitN(entry, ":", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				names[parts[0]] = true
+				// the target is everything up to the trailing :bps
+				if cut := strings.LastIndex(parts[1], ":"); cut > 0 {
+					targets[parts[1][:cut]] = true
+				}
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		for _, m := range reBucketKey.FindAllStringSubmatch(src, -1) {
+			prefix, comp := m[1], strings.TrimSuffix(m[2], "|")
+			if comp == "" {
+				continue // built by substitution; not resolvable here
+			}
+			checked++
+			if names[comp] {
+				continue
+			}
+			// naming the TARGET is the specific mistake worth reporting loudly
+			for tgt := range targets {
+				if comp == tgt || strings.HasPrefix(tgt, comp) {
+					keys := make([]string, 0, len(names))
+					for k := range names {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					t.Errorf("%s reads %s|%s — that is what the bucket PAYS, not its name. "+
+						"The contract keys this by name (%v), so the read returns \"\" forever "+
+						"and the suite times out waiting for state that was written all along",
+						name, prefix, comp, keys)
+					break
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no bucket-keyed reads in the devnet suites — this guard is now blind")
+	}
+	t.Logf("checked %d bucket-keyed reads", checked)
 }

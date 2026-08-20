@@ -107,7 +107,7 @@ func TestSec_StaleEpochRescuable(t *testing.T) {
 	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 2, false)
 	// ...but after the staleness window the guardian can rescue + sweep to treasury
 	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 9999, true)
-	s := call(t, &ct, rgC3, "sweepUnallocated", `{"channel":"author","nonce":"1"}`, "hive:guardian", 9999, true)
+	s := call(t, &ct, rgC3, "sweepUnallocated", `{"channel":"author","nonce":"1","amount":"100000"}`, "hive:guardian", 9999, true)
 	assert.Contains(t, s.Ret, `"100000"`)
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:treasury"}`, "hive:x", 9999, true)
 	assert.Contains(t, b.Ret, `"100000"`, "rescued funds must land in the PINNED treasury")
@@ -181,7 +181,8 @@ func TestSec_StaleRescueCannotDivertLiveEpoch(t *testing.T) {
 	// the old (buggy) 1000-blocks-after-pullFunding threshold
 	call(t, &ct, rgC3, "cancelEpoch", `{"channel":"author","epoch":"0"}`, "hive:guardian", 1050, false)
 	// the reporter can still do its job on the live epoch
-	call(t, &ct, rgC3, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:1"}`, "hive:reporter", 1050, true)
+	rgBook := publishEntries(t, &ct, rgC3, "author", "0", "hive:alice:1", "hive:reporter", 1050)
+	_ = rgBook
 	call(t, &ct, rgC3, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1050, true)
 }
 

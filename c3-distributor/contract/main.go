@@ -5,8 +5,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"magi_token/adapter"
 	"magi_token/auth"
+	"magi_token/events"
 	"magi_token/sdk"
 	"math/big"
 	"strconv"
@@ -33,6 +35,19 @@ func Init(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only owner can init")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and init pins the funder, the treasury, the guardian set and the stake target, once.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
 	validateAddr(f(payload, "token"))
 	validateAddr(f(payload, "funder"))
 	set("cfg_token", f(payload, "token"))
@@ -76,9 +91,44 @@ func Init(payload *string) *string {
 	}
 	set("cfg_genesis", sg)
 	set("cfg_epochLen", se)
+	// STAKED PAYOUTS. A pool may deliver part of every claim as stake rather than
+	// liquid tokens — SCOT's staked_reward_percentage — which ties earners to the
+	// token instead of handing them something sellable the moment it lands.
+	//
+	// Capability follows config: with no stakeContract there is no split and claim
+	// pays entirely liquid, exactly as before. Both are pinned here and immutable,
+	// because a redirectable stake target is a redirectable payout.
+	if sc := f(payload, "stakeContract"); sc != "" {
+		validateAddr(sc)
+		bpsStr := f(payload, "stakedBps")
+		bps, berr := strconv.ParseUint(bpsStr, 10, 64)
+		if berr != nil || bps == 0 || bps > 10000 {
+			sdk.Abort("stakedBps must be 1..10000 when stakeContract is set")
+		}
+		// The staking contract must agree about the asset, or a claim would credit
+		// stake denominated in something the claimant never earned.
+		si := sdk.ContractCall(sc, "scheduleInfo", "", nil)
+		if tok := pickField(si, "token"); tok != "" && tok != f(payload, "token") {
+			sdk.Abort("stakeContract holds a different token than this distributor")
+		}
+		set("cfg_stakeContract", sc)
+		set("cfg_stakedBps", bpsStr)
+	}
 	// Reward channels are added afterwards with addChannel, because verifying each
 	// one's bucket requires calling the funder and a deployment may carry several.
 	set(kInit, "1")
+	// Discovery anchor for the indexer — see the note on c2_init.
+	events.New("c3_init").
+		Str("token", f(payload, "token")).
+		Str("owner", *owner).
+		Str("funder", f(payload, "funder")).
+		Str("treasury", tre).
+		Str("genesis", sg).
+		Str("epoch_len", se).
+		Str("guardian_mode", f(payload, "guardianMode")).
+		Str("guardian_auth", f(payload, "guardianAuth")).
+		Str("guardian_threshold", f(payload, "guardianThreshold")).
+		Emit()
 	return ok()
 }
 
@@ -101,6 +151,14 @@ func PullFunding(payload *string) *string {
 	if !present("fundedAt|" + ch + "|" + ep) {
 		set("fundedAt|"+ch+"|"+ep, strconv.FormatUint(blockHeight(), 10)) // MED-2 staleness clock
 	}
+	pinPolicy(ch, ep)
+	events.New("pull").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Big("received", got).
+		Big("cumulative", getBig(k)).
+		U64("funded_at", getU("fundedAt|"+ch+"|"+ep)).
+		Emit()
 	return str(`{"funded":"` + getBig(k).String() + `"}`)
 }
 
@@ -128,16 +186,151 @@ func SubmitShares(payload *string) *string {
 			sdk.Abort("page already applied")
 		}
 		set(ak, "1")
-		applyEntries(ch, ep, entries)
+		applyEntries(ch, ep, page, entries)
 	}
 	return str(`{"applied":` + boolStr(committed) + `}`)
 }
 
-func applyEntries(ch, ep, entries string) {
-	total := getBig("totalShares|" + ch + "|" + ep)
+// submitRoot — the commitment for one epoch's share book.
+//
+// {"channel","epoch","root":<64 hex>,"totalShares","accounts"}
+//
+// The root is what makes the logged share list authoritative: anyone can rebuild the
+// tree from the indexer's copy and check it against this. `totalShares` is the
+// payout denominator and is DECLARED by the reporter rather than summed on chain —
+// the contract no longer holds the leaves and cannot add them up. That is not a new
+// trust assumption: a reporter able to declare a wrong total was already able to
+// submit wrong shares, and the challenge window plus the guardian is the containment
+// for both.
+//
+// Once only, and before finalize. Immutable afterwards: a re-pointable root would
+// let a finalized epoch be re-aimed at a different share book.
+//
+//go:wasmexport submitRoot
+func SubmitRoot(payload *string) *string {
+	assertInit()
+	ch := mustChannel(payload)
+	ep := mustEpoch(payload)
+	if statusOf(ch, ep) != "" {
+		sdk.Abort("epoch not open")
+	}
+	rk := "root|" + ch + "|" + ep
+	if present(rk) {
+		sdk.Abort("root already submitted for this epoch")
+	}
+	root := f(payload, "root")
+	if _, ok := hexToBytes(root); !ok {
+		sdk.Abort("root must be 64 hex characters")
+	}
+	// LOWERCASE, because that is the only form the verifier can ever match.
+	//
+	// hexToBytes accepts A-F (hexNibble), but the root is stored VERBATIM and
+	// verifyProof ends with `bytesToHex(h) == root` — a plain string compare against
+	// output built from the constant "0123456789abcdef". So a root carrying any
+	// uppercase digit passed here, passed finalizeEpoch (which only checks presence),
+	// and then failed every claim no matter how correct the proof was. The root is
+	// immutable by design and cancelEpoch refuses once the window elapses, so the
+	// epoch's whole funding became unreachable.
+	//
+	// Refused rather than lowercased on the way in: silently rewriting a caller's
+	// commitment would mean the value they signed is not the value stored, and a
+	// reporter comparing the two would see a mismatch it could not explain. The
+	// reference reporter already emits lowercase (hex.EncodeToString) and
+	// PlanOpts.Validate rejects anything else, so this only ever fires for a
+	// hand-submitted root or a re-implemented reporter — exactly the callers with no
+	// other guard.
+	for i := 0; i < len(root); i++ {
+		if root[i] >= 'A' && root[i] <= 'F' {
+			sdk.Abort("root must be lowercase hex — an upper-case root is accepted by the " +
+				"parser but can never equal the verifier's own lowercase rendering, so every " +
+				"claim against it would fail and the epoch's funding would be stranded")
+		}
+	}
+	ts := parseBig(f(payload, "totalShares"))
+	if ts.Sign() <= 0 {
+		sdk.Abort("totalShares must be positive")
+	}
+	// Defence in depth on the policy digest. The reporter checks its own config
+	// against policy|<ch>|<ep> before it computes anything, and that check is what
+	// actually prevents the divergence — it refuses before spending any RC and names
+	// the offending field. This catches the reporter that skipped the check, and it
+	// does so at the root, which is the single point that authorises money: pages are
+	// only logged now, so a wrong root is the thing that could pay the wrong people.
+	//
+	// Pin FIRST, so the check below cannot be skipped by arriving before pullFunding.
+	//
+	// The pin used to be written only by pullFunding, and the reporter's own plan
+	// emits submitRoot BEFORE pullFunding — so on the shipped call order the pin was
+	// always empty here and this whole check was dead code. The itest fixture pulled
+	// funding during setup, which is the opposite order from production, so nothing
+	// noticed. Whichever call touches the epoch first now establishes the pin, and
+	// there is no order in which the digest goes unchecked.
+	pinPolicy(ch, ep)
+	// Enforced only when the epoch HAS a pinned policy, which keeps single-reporter
+	// channels that never declared one working exactly as before.
+	if want := getStr("policy|" + ch + "|" + ep); want != "" {
+		if f(payload, "policy") != want {
+			sdk.Abort("policy digest does not match the one pinned for this epoch — this " +
+				"reporter is scoring different rules than the epoch was funded under")
+		}
+	}
+	// Same authority and the same M-of-N semantics as a share page: the root IS the
+	// report now, so it needs at least the protection the pages had. The attested
+	// payload binds root and total together — attesting to a root while disagreeing
+	// about the denominator would be worthless.
+	actionKey := "sr:" + ch + ":" + ep
+	committed := auth.Authorize(reporterCfg(ch), "rep", actionKey,
+		root+":"+ts.String(), mustCaller(), reqAuths())
+	if committed {
+		set(rk, root)
+		setBig("totalShares|"+ch+"|"+ep, ts)
+		if a := f(payload, "accounts"); a != "" {
+			set("accounts|"+ch+"|"+ep, a)
+		}
+		events.New("root").
+			Str("channel", ch).
+			Str("epoch", ep).
+			Str("root", root).
+			Big("total_shares", ts).
+			Str("accounts", f(payload, "accounts")).
+			Emit()
+	}
+	return str(`{"applied":` + boolStr(committed) + `}`)
+}
+
+// emitSkip records an entry that submitShares silently dropped.
+//
+// This is the most valuable log this contract emits. A skipped entry is a no-op
+// inside a transaction that SUCCEEDS: the page is marked applied, totalShares
+// looks correct, and the earner is simply never paid. Nothing in the return value
+// or the state records that the entry was ever present, so a reporter shipping
+// one typo'd account produced an invisible loss. Logs survive only successful
+// transactions — which is precisely this case.
+func emitSkip(ch, ep, page, raw, reason string) {
+	events.New("skip").
+		Str("scope", "shares").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("page", page).
+		Str("raw_entry", raw).
+		Str("reason", reason).
+		Emit()
+}
+
+// applyEntries validates and PUBLISHES a page of the share book.
+//
+// It writes no per-account state. The entries go into a log, which the indexer
+// ingests and serves; `submitRoot` supplies the commitment that makes that list
+// authoritative. Validation is unchanged and still matters: a malformed entry is
+// skipped and NAMED in a skip log, so the published book and the tree agree about
+// exactly which entries count.
+func applyEntries(ch, ep, page, entries string) {
+	counted := 0
+	pageTotal := new(big.Int)
 	for _, e := range splitComma(entries) {
 		acct, sh := split2(e)
 		if acct == "" {
+			emitSkip(ch, ep, page, e, "no account")
 			continue
 		}
 		validateAddr(acct)
@@ -148,17 +341,88 @@ func applyEntries(ch, ep, entries string) {
 		// finds nothing — so it silently diluted everyone else and stranded that
 		// slice of the funding permanently.
 		if !isLedgerAddr(acct) {
+			emitSkip(ch, ep, page, e, "not a ledger address")
 			continue
 		}
 		s := parseBig(sh)
 		if s.Sign() <= 0 {
+			emitSkip(ch, ep, page, e, "shares not positive")
 			continue
 		}
-		sk := "share|" + ch + "|" + ep + "|" + acct
-		setBig(sk, new(big.Int).Add(getBig(sk), s))
-		total.Add(total, s)
+		// NO per-account state write. The share book lives in the log, and the root
+		// submitted separately is what makes it authoritative — see the merkle
+		// section at the bottom of this file. This is the ~92% of an epoch's cost
+		// that the commitment removes.
+		counted++
+		pageTotal.Add(pageTotal, s)
 	}
-	setBig("totalShares|"+ch+"|"+ep, total)
+	// Accumulate what the chain ACTUALLY saw, so finalizeEpoch can hold the reporter's
+	// declared totalShares to it.
+	//
+	// The merkle migration moved the share book off chain and made totalShares a
+	// DECLARED number rather than one the contract added up. claim already refuses the
+	// under-declared direction (paid| accumulates and a payout past `funded` aborts),
+	// but over-declaring shrinks every payout and leaves the difference in
+	// funded|<ch>|<ep>, where nothing can reach it: cancelEpoch refuses a finalized
+	// epoch past its window, sweepUnallocated only moves unalloc|, and no one can
+	// claim twice. Half an epoch could be lost to one wrong number.
+	//
+	// This is the cheap half of the invariant the migration gave up. The per-entry
+	// sum was already being computed for the page log and thrown away; keeping a
+	// running total costs one small write per page against ~1,871 RC for the page.
+	//
+	// It sums only the entries that COUNTED. That is deliberate: a skipped entry is
+	// one the reporter put in its tree and the chain refused, so the two books
+	// disagree, and the mismatch surfacing at finalize is the point rather than a
+	// side effect — that divergence used to dilute everyone else silently.
+	sk := "pagesum|" + ch + "|" + ep
+	newSum := new(big.Int).Add(getBig(sk), pageTotal)
+	// A page may still land AFTER the root: submitShares gates only on status, and in
+	// attest mode a page can still be gathering votes when the root commits. Landing
+	// UNDER the committed total is therefore normal and must keep working.
+	//
+	// Landing OVER it is terminal, and that is the asymmetry to catch here. pagesum
+	// only accumulates and the root is write-once, so once the sum exceeds the total
+	// nothing can restore equality — the total cannot be raised and the sum cannot be
+	// lowered — and finalizeEpoch's check can never pass again. The epoch's whole
+	// funding then reaches the treasury through a guardian stale-cancel instead of the
+	// earners it belongs to.
+	//
+	// (finalizeEpoch's own comment used to claim its refusal was "self-healing". That
+	// holds only BELOW the total, where the fix is to submit the missing page.)
+	//
+	// Refusing the overshooting page is recoverable by construction: it simply does
+	// not apply, everything already published stays valid, and the epoch still
+	// finalizes. The refused entries were never in the committed tree, so their
+	// earners could not have claimed against this root in any case.
+	if ts := getBig("totalShares|" + ch + "|" + ep); ts.Sign() > 0 && newSum.Cmp(ts) > 0 {
+		sdk.Abort("this page carries shares beyond the committed total for the epoch (" +
+			newSum.String() + " would exceed the declared " + ts.String() + ") — applying it " +
+			"would make the epoch permanently unfinalizable, because the total cannot be " +
+			"raised and the published sum cannot be lowered")
+	}
+	setBig(sk, newSum)
+	// ONE log per page carrying the submitted entries verbatim, rather than one log
+	// per entry.
+	//
+	// Both shapes reconstruct the share book exactly — applied = submitted minus
+	// whatever the skip logs above named — but the per-entry shape cost 229 RC an
+	// entry against 91 before, taking a 60-entry page from 5,942 RC to 14,127 and a
+	// 500-earner epoch from ~44,000 to ~127,000. submitShares is the single
+	// most-repeated privileged call in the system and the reporter is its heaviest
+	// RC consumer, so the page-level form is the right default: it holds the same
+	// information for a fraction of the spend.
+	//
+	// The entries string is bounded by the 4,096-byte payload cap that already binds
+	// before RC does, so this log cannot grow unboundedly either.
+	events.New("shares").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("page", page).
+		Int("entries", counted).
+		Big("page_total", pageTotal).
+		Str("submitted", entries).
+		Emit()
 }
 
 // finalizeEpoch — reporter freezes the epoch and opens the challenge window.
@@ -178,6 +442,13 @@ func FinalizeEpoch(payload *string) *string {
 	}
 	// An empty report would freeze the epoch (every claim aborts "no shares"),
 	// so reject finalizing with nothing to distribute (MED-5).
+	//
+	// The commitment is the report now: without a root no claim can ever verify, so
+	// finalizing without one locks the epoch's funding away exactly as an empty
+	// share book used to.
+	if !present("root|" + ch + "|" + ep) {
+		sdk.Abort("no share-book root submitted for epoch")
+	}
 	if getBig("totalShares|"+ch+"|"+ep).Sign() <= 0 {
 		sdk.Abort("no shares submitted for epoch")
 	}
@@ -199,8 +470,56 @@ func FinalizeEpoch(payload *string) *string {
 	if !auth.Authorize(reporterCfg(ch), "rep", "fin:"+ch+":"+ep, "fin:"+ch+":"+ep, mustCaller(), reqAuths()) {
 		return str(`{"finalized":false}`) // pending more attestations
 	}
+	// The declared denominator must equal what the pages actually published.
+	//
+	// AFTER the auth gate, deliberately. Attest votes are cast at different moments
+	// and pages keep landing between them — that is the whole point of the constant
+	// payload above — so checking before the gate would refuse a below-threshold vote
+	// merely because the last page had not arrived yet, and reintroduce the
+	// unfinalizable epoch that binding to totalShares used to cause. Here it fires
+	// only on the call that would actually commit.
+	//
+	// Aborting here reverts the committing attestation along with everything else, so
+	// no vote is recorded and the same authority can vote again once the pages are
+	// complete. That heals the BELOW case — submit the missing page. It cannot heal
+	// the above case, where the published sum already exceeds the committed total:
+	// nothing decrements pagesum and the root is write-once. applyEntries therefore
+	// refuses the page that would overshoot, so this check only ever sees a shortfall.
+	//
+	// Catches three things that all ended the same way, with funding no call could
+	// reach:
+	//
+	//   - totalShares declared HIGHER than the book sums to. Every payout shrinks and
+	//     the difference is stranded. Nothing else refuses it: claim's paid|<=funded
+	//     check only bounds the other direction.
+	//   - a root committed with pages MISSING (or none at all). The leaves were never
+	//     logged, so nobody could build a proof against the root, and finalizing would
+	//     lock the whole epoch away.
+	//   - an entry the chain SKIPPED — a malformed address, a non-positive share.
+	//     The reporter's tree counted it and the chain did not, so every other earner
+	//     was being diluted by a slice that could never be claimed.
+	//
+	// An epoch stopped here is not stuck: status stays open, so the guardian's stale
+	// rescue can still cancel it and roll the funding back to unalloc|, which is
+	// recoverable. That is strictly better than finalizing into a residue that
+	// nothing can move.
+	if ps, ts := getBig("pagesum|"+ch+"|"+ep), getBig("totalShares|"+ch+"|"+ep); ps.Cmp(ts) != 0 {
+		sdk.Abort("declared totalShares does not equal the shares the pages published (" +
+			ts.String() + " declared, " + ps.String() + " published) — finalizing would " +
+			"strand the difference where no call can reach it")
+	}
 	set("status|"+ch+"|"+ep, "finalized")
-	set("chal|"+ch+"|"+ep, strconv.FormatUint(blockHeight()+getU("ch_window|"+ch), 10))
+	chal := blockHeight() + getU("ch_window|"+ch)
+	set("chal|"+ch+"|"+ep, strconv.FormatUint(chal, 10))
+	events.New("epoch_status").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("status", "finalized").
+		U64("challenge_height", chal).
+		Big("total_shares", getBig("totalShares|"+ch+"|"+ep)).
+		Big("funded", getBig("funded|"+ch+"|"+ep)).
+		Big("rolled_amount", new(big.Int)).
+		Emit()
 	return ok()
 }
 
@@ -259,12 +578,88 @@ func CancelEpoch(payload *string) *string {
 	// Roll the pulled funding forward into the unallocated pool (M-B/R11) so it
 	// is not stranded — recoverable via sweepUnallocated.
 	fk := "funded|" + ch + "|" + ep
+	rolled := new(big.Int)
 	if amt := getBig(fk); amt.Sign() > 0 {
-		setBig("unalloc|" + ch, new(big.Int).Add(getBig("unalloc|" + ch), amt))
+		setBig("unalloc|"+ch, new(big.Int).Add(getBig("unalloc|"+ch), amt))
 		setBig(fk, new(big.Int))
+		rolled = amt
 	}
+	events.New("epoch_status").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("status", "cancelled").
+		U64("challenge_height", getU("chal|"+ch+"|"+ep)).
+		Big("total_shares", getBig("totalShares|"+ch+"|"+ep)).
+		Big("funded", new(big.Int)).
+		Big("rolled_amount", rolled).
+		Emit()
 	return ok()
 }
+
+// releaseStaleAttest — free the working state of an attestation round that stalled.
+//
+// {"role":"rep"|"grd","channel":<for rep>,"action":<the action key>}
+//
+// Attest mode stores each attested payload — up to 4,096 bytes, a whole share page
+// for submitShares — until the round commits. A coalition that never reaches its
+// threshold leaves those blobs with nothing able to remove them: two of three
+// attest, the third never arrives, the epoch is re-run under a different page
+// number, and the abandoned round's payloads sit in state for the life of the
+// deployment.
+//
+// PERMISSIONLESS, and deliberately so. There is nothing to gain by calling it: a
+// committed action is refused, and a round in progress is protected until
+// staleAttestBlocks have passed. Restricting it to the authorities would be worse,
+// because an authority losing a vote could then clear the tally and re-run it.
+//
+//go:wasmexport releaseStaleAttest
+func ReleaseStaleAttest(payload *string) *string {
+	assertInit()
+	action := f(payload, "action")
+	if action == "" {
+		sdk.Abort("action required — the action key whose round should be released")
+	}
+	var cfg auth.Config
+	role := f(payload, "role")
+	switch role {
+	case "rep":
+		ch := mustChannel(payload)
+		// The action must BELONG to the channel whose authorities will be used.
+		//
+		// The authority set comes from the caller's channel while `action` is a
+		// separate free-form string, so naming a different channel used to clear the
+		// round with the wrong authority list: clearRound deletes
+		// rep|aseen|<action>|<auth> per authority, so the real voters kept their
+		// markers while the round's astart and ahashes were deleted underneath them.
+		//
+		// That is terminal and it is permissionless. The real voters then get "caller
+		// already attested this action" forever, and a corrective release gets "no
+		// attestation round in progress" because the start stamp is gone. For an
+		// `sr:` action the epoch never receives a root and can never be finalized.
+		assertActionInChannel(action, ch)
+		cfg = reporterCfg(ch)
+	case "grd":
+		cfg = guardianCfg()
+	default:
+		sdk.Abort("role must be \"rep\" or \"grd\"")
+	}
+	if cfg.Mode != auth.ModeAttest {
+		sdk.Abort("that role is not in attest mode — no round state exists to release")
+	}
+	n := auth.SweepStale(cfg, role, action, staleAttestBlocks)
+	events.New("attest_released").
+		Str("role", role).
+		Str("action", action).
+		Int("payloads", n).
+		Emit()
+	return str(`{"released":"` + strconv.Itoa(n) + `"}`)
+}
+
+// staleAttestBlocks is how long an unresolved round is protected before anyone may
+// release it. Long enough that no honest coalition is ever cut short — an epoch's
+// pages are minutes apart, not days — and short enough that abandoned state does
+// not outlive the epoch that produced it by much.
+const staleAttestBlocks = 28800 // ~24h at 3s blocks
 
 // sweepUnallocated — guardian moves the rolled-forward (cancelled-epoch) pool to
 // a target. {"to","nonce"} — nonce (numeric) makes it repeatable in Attest mode.
@@ -278,20 +673,50 @@ func SweepUnallocated(payload *string) *string {
 		sdk.Abort("no treasury configured")
 	}
 	nonce := canon(f(payload, "nonce"), "nonce")
-	amt := getBig("unalloc|" + ch)
-	// Bind the attestation to the AMOUNT — otherwise a co-signer approving a sweep
-	// of 0 could be reused weeks later to move a large balance (MED). Authorize
-	// BEFORE the emptiness check so a replayed nonce still reports "already
-	// committed" rather than masking it behind an empty pool.
+	// The DECLARED amount, not the live pool.
+	//
+	// Binding the attestation to an amount is right — a co-signer approving a sweep of
+	// 0 must not have that vote reused weeks later to move a large balance (MED). But
+	// it used to bind to `unalloc|<ch>` read live, and cancelEpoch ADDS to that key.
+	// So in attest mode a guardian voting before a cancellation and one voting after
+	// attested different payloads, landing in different tallies; anti-equivocation
+	// gives each authority one vote per ACTION, so both burned theirs and the
+	// threshold became unreachable — the same deadlock finalizeEpoch had when it bound
+	// to totalShares, and for the same reason.
+	//
+	// A declared amount does not move while the vote is open, so honest guardians
+	// converge. The live pool is then checked at the moment it commits, so the
+	// approval is still an approval OF AN AMOUNT rather than a blank cheque.
+	amtStr := f(payload, "amount")
+	if amtStr == "" {
+		sdk.Abort("amount required — the guardians must attest to a specific amount, not to " +
+			"whatever the pool happens to hold when the last vote lands")
+	}
+	declared := parseBig(amtStr)
+	if declared.Sign() <= 0 {
+		sdk.Abort("amount must be positive")
+	}
 	ak := "sweep:" + ch + ":" + nonce
-	if !auth.Authorize(guardianCfg(), "grd", ak, amt.String(), mustCaller(), reqAuths()) {
+	if !auth.Authorize(guardianCfg(), "grd", ak, declared.String(), mustCaller(), reqAuths()) {
 		return str(`{"swept":false}`)
 	}
-	if amt.Sign() <= 0 {
-		sdk.Abort("nothing to sweep")
+	amt := getBig("unalloc|" + ch)
+	if amt.Cmp(declared) != 0 {
+		sdk.Abort("the unallocated pool no longer holds the amount this sweep was approved " +
+			"for (approved " + declared.String() + ", pool holds " + amt.String() + ") — " +
+			"re-propose under a new nonce for the current amount")
 	}
-	setBig("unalloc|" + ch, new(big.Int)) // CEI before transfer
+	// No "nothing to sweep" branch: `declared` must be positive and `amt` must equal
+	// it, so an empty pool is already refused above with a message that says which
+	// amount was approved and what the pool actually holds.
+	setBig("unalloc|"+ch, new(big.Int)) // CEI before transfer
 	adapter.Transfer(asset(), to, amt)
+	events.New("sweep_unallocated").
+		Str("channel", ch).
+		Big("amount", amt).
+		Str("to", to).
+		Str("nonce", nonce).
+		Emit()
 	return str(`{"swept":"` + amt.String() + `"}`)
 }
 
@@ -322,31 +747,135 @@ func Claim(payload *string) *string {
 	if ts.Sign() <= 0 {
 		sdk.Abort("no shares")
 	}
-	share := getBig("share|" + ch + "|" + ep + "|" + c)
+	// PROVE the share rather than read it. The chain holds a root, not a share book:
+	// the claimant supplies the amount and the sibling path, and the leaf binds the
+	// two together so a proof cannot be replayed under another name or inflated.
+	shareStr := f(payload, "share")
+	share := parseBig(shareStr)
 	if share.Sign() <= 0 {
-		sdk.Abort("no share for caller")
+		sdk.Abort("share must be positive — pass the amount the indexer holds for you")
+	}
+	root := getStr("root|" + ch + "|" + ep)
+	if root == "" {
+		sdk.Abort("no share-book root for this epoch")
+	}
+	// The leaf is built from the CALLER, never from a payload field, so a valid proof
+	// for someone else is useless: msg.caller is not something the claimant chooses.
+	if !verifyProof(c, shareStr, f(payload, "proof"), root) {
+		sdk.Abort("merkle proof does not verify against this epoch's root")
 	}
 	payout := new(big.Int).Mul(funded, share)
 	payout.Div(payout, ts)
 	if payout.Sign() <= 0 {
 		sdk.Abort("payout rounds to zero")
 	}
-	// CEI: mark claimed before external transfer
+	// Σclaims ≤ funded, enforced rather than assumed.
+	//
+	// This used to hold by construction: totalShares was ACCUMULATED by the contract
+	// from the pages it stored, so the shares it divided by were exactly the shares it
+	// had recorded. Under the merkle book totalShares is DECLARED by the reporter and
+	// the leaves live off chain, so a total declared lower than the leaves actually sum
+	// to makes every payout too large.
+	//
+	// Without this the overspend is not even contained to its own epoch: the token
+	// balance is shared across every epoch and channel this contract serves, so epoch
+	// 0 paying double drains funding that belongs to epoch 1 — and the first sign of it
+	// is a later claimant's transfer failing for reasons that have nothing to do with
+	// them. Refuse here, where the cause is still visible.
+	pk := "paid|" + ch + "|" + ep
+	paid := new(big.Int).Add(getBig(pk), payout)
+	if paid.Cmp(funded) > 0 {
+		sdk.Abort("payout would exceed this epoch's funding — the declared totalShares " +
+			"is smaller than the share book actually sums to")
+	}
+	// CEI: mark claimed before any external call
 	set(ck, "1")
-	adapter.Transfer(asset(), c, payout)
-	return str(`{"claimed":"` + payout.String() + `"}`)
+	setBig(pk, paid)
+	staked := stakedPart(payout)
+	liquid := new(big.Int).Sub(payout, staked)
+	if liquid.Sign() > 0 {
+		adapter.Transfer(asset(), c, liquid)
+	}
+	if staked.Sign() > 0 {
+		creditStake(c, staked)
+	}
+	// share and total_shares travel with the payout so funded*share/totalShares can
+	// be re-derived off-chain — an amount on its own cannot be checked by anyone.
+	// The liquid/staked split travels too, because the two are not interchangeable
+	// to the recipient and a single total hides which they got.
+	events.New("claim").
+		Str("channel", ch).
+		Str("epoch", ep).
+		Str("acct", c).
+		Big("payout", payout).
+		Big("liquid", liquid).
+		Big("staked", staked).
+		Big("share", share).
+		Big("total_shares", ts).
+		Big("funded", funded).
+		Emit()
+	return str(`{"claimed":"` + payout.String() +
+		`","liquid":"` + liquid.String() +
+		`","staked":"` + staked.String() + `"}`)
+}
+
+// stakedPart is how much of a payout is delivered as stake. Zero unless the pool
+// configured a stake contract.
+//
+// Rounding goes to the LIQUID side by floor division. Both directions are
+// defensible; this one is chosen because the liquid part is what the claimant can
+// act on, and a dust unit locked into a cooldown is worth less to them than a dust
+// unit in hand.
+func stakedPart(payout *big.Int) *big.Int {
+	if !present("cfg_stakeContract") {
+		return new(big.Int)
+	}
+	bps := getU("cfg_stakedBps")
+	if bps == 0 {
+		return new(big.Int)
+	}
+	out := new(big.Int).Mul(payout, big.NewInt(int64(bps)))
+	return out.Div(out, big.NewInt(10000))
+}
+
+// creditStake hands `amt` to the staking contract as stake held FOR acct.
+//
+// Approve-then-stakeFor rather than a plain transfer: a transfer would move the
+// tokens and leave the staking contract with no idea whose they are. stakeFor PULLS
+// exactly what it was told about, so the amount credited and the amount moved are
+// the same number by construction rather than by trust — and the allowance granted
+// is exactly this payout, never standing.
+//
+// This contract must appear in the staking contract's stakeFor allowlist, which is
+// fixed at ITS init. That is the authorisation: a contract caller carries no key and
+// so can never satisfy the active-authority check.
+func creditStake(acct string, amt *big.Int) {
+	sc := getStr("cfg_stakeContract")
+	adapter.Approve(asset(), "contract:"+sc, amt)
+	sdk.ContractCall(sc, "stakeFor",
+		`{"acct":"`+acct+`","amount":"`+amt.String()+`"}`, nil)
 }
 
 // ---- queries -------------------------------------------------------------
 
 //go:wasmexport shareOf
+// epochOf reports what the CHAIN knows about an epoch: the commitment, the
+// denominator, the funding and the status.
+//
+// It deliberately does NOT report a per-account share, because the chain no longer
+// holds one. Returning zero for every account would be the worst possible answer — a
+// wallet would show "you earned nothing" and be believed — so the account-level
+// question is not answerable here at all. Ask the indexer for the share and the
+// proof, and check them against `root` below.
 func ShareOf(payload *string) *string {
 	assertInit()
 	ch := mustChannel(payload)
 	ep := mustEpoch(payload)
-	return str(`{"share":"` + getBig("share|"+ch+"|"+ep+"|"+f(payload, "account")).String() +
+	return str(`{"root":"` + getStr("root|"+ch+"|"+ep) +
 		`","totalShares":"` + getBig("totalShares|"+ch+"|"+ep).String() +
 		`","funded":"` + getBig("funded|"+ch+"|"+ep).String() +
+		`","paid":"` + getBig("paid|"+ch+"|"+ep).String() +
+		`","accounts":"` + getStr("accounts|"+ch+"|"+ep) +
 		`","status":"` + statusOf(ch, ep) + `"}`)
 }
 
@@ -382,9 +911,22 @@ func canon(s, name string) string {
 func statusOf(ch, ep string) string { return getStr("status|" + ch + "|" + ep) }
 
 // epochEnd: last block of the given epoch, from the funder's schedule.
+//
+// `ep` is caller-supplied and canon() only bounds it to 19 digits, so g + (n+1)*el can
+// wrap uint64. A wrapped end is SMALL, which would make cancelEpoch's stale-rescue
+// anchor tiny and open the guardian's rescue window immediately for an epoch that does
+// not exist. Nothing can reach it — the rescue path requires funded > 0 first, and
+// funding only exists for epochs C2 distributed — but that is a precondition
+// elsewhere, not a check here, and C1 carries the same guard in epochBounds.
 func epochEnd(ep string) uint64 {
 	g, el := getU("cfg_genesis"), getU("cfg_epochLen")
 	n, _ := strconv.ParseUint(ep, 10, 64)
+	if el == 0 {
+		sdk.Abort("no schedule adopted")
+	}
+	if n+1 < n || n+1 > (^uint64(0)-g)/el {
+		sdk.Abort("epoch out of range")
+	}
 	return g + (n+1)*el - 1
 }
 
@@ -666,7 +1208,8 @@ func selfAddr() string {
 // flight.
 
 // addChannel: {"channel","bucket","window","reporterMode","reporterAuth",
-//              "reporterThreshold","role"} — owner-only, once per name.
+//
+//	"reporterThreshold","role"} — owner-only, once per name.
 //
 //go:wasmexport addChannel
 func AddChannel(payload *string) *string {
@@ -675,6 +1218,19 @@ func AddChannel(payload *string) *string {
 	if ownerK == nil || mustCaller() != *ownerK {
 		sdk.Abort("only owner can add a channel")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and addChannel fixes a channel's reporter authority permanently — channels are append-only — so it decides who may publish share books.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(mustCaller(), reqAuths())
 	ch := f(payload, "channel")
 	if ch == "" {
 		sdk.Abort("channel required")
@@ -748,9 +1304,93 @@ func AddChannel(payload *string) *string {
 		}
 		set("ch_role|"+ch, role)
 	}
+	// The reporter policy digest — what the reporters must agree they are scoring.
+	//
+	// sharecore guarantees the same input yields the same bytes, but nothing forced
+	// two reporters to feed the same input: tags, the dust cutoff, the reward curves
+	// and the vote-mana budget were local config compared against nothing. Two HONEST
+	// reporters differing in one of them produce different books forever, and in
+	// Attest mode that is a DEADLOCK rather than a wrong payout — the tally is per
+	// payload hash and each authority gets one vote per action, so both burn their
+	// vote in a different bucket and the page can never reach threshold.
+	//
+	// REQUIRED for Attest mode, because that is the mode with something to deadlock.
+	// Optional elsewhere: a single reporter has nobody to disagree with, and cosigned
+	// reporters sign one transaction so a disagreement never reaches the chain.
+	if p := f(payload, "policy"); p != "" {
+		if _, ok := hexToBytes(p); !ok {
+			sdk.Abort("policy must be 64 hex characters")
+		}
+		set("ch_policy|"+ch, p)
+	} else if f(payload, "reporterMode") == "2" {
+		sdk.Abort("policy required for attest mode — without it two honest reporters can " +
+			"deadlock an epoch and nothing on chain can tell them apart")
+	}
 	set("ch_window|"+ch, w)
 	set("ch_forbucket|"+bucket, ch)
 	set("ch_bucket|"+ch, bucket) // written LAST: it is what mustChannel tests
+	events.New("channel").
+		Str("channel", ch).
+		Str("bucket", bucket).
+		Str("window", w).
+		Str("role", getStr("ch_role|"+ch)).
+		Str("reporter_mode", f(payload, "reporterMode")).
+		Str("reporter_auth", f(payload, "reporterAuth")).
+		Str("reporter_threshold", f(payload, "reporterThreshold")).
+		Str("policy", getStr("ch_policy|"+ch)).
+		Emit()
+	return ok()
+}
+
+// setPolicy — governance changes what the reporters are scoring.
+//
+// {"channel","policy":<64 hex>} — owner-only.
+//
+// Policy legitimately changes: a community lowers its dust cutoff or adds a tag.
+// This is the ONLY channel field that may change after addChannel, and it is safe
+// where the others are not because it does not rewrite a live epoch: pullFunding
+// snapshots the digest in force into policy|<ch>|<ep> when the epoch is funded, and
+// that snapshot is what the epoch is scored and verified against for the rest of its
+// life. Changing it here affects epochs funded FROM NOW ON.
+//
+// Which also means a change landing between two reporters' restarts splits the
+// quorum until they all reload — so change it while no epoch is mid-report, and
+// expect the laggards to REFUSE rather than to disagree quietly. Refusing is the
+// designed outcome: a reporter that cannot prove it is scoring the declared policy
+// must not submit.
+//
+//go:wasmexport setPolicy
+func SetPolicy(payload *string) *string {
+	assertInit()
+	ownerK := sdk.GetEnvKey("contract.owner")
+	if ownerK == nil || mustCaller() != *ownerK {
+		sdk.Abort("only owner can set policy")
+	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and setPolicy changes what every reporter on the channel is scored against.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(mustCaller(), reqAuths())
+	ch := mustChannel(payload)
+	p := f(payload, "policy")
+	if _, ok := hexToBytes(p); !ok {
+		sdk.Abort("policy must be 64 hex characters")
+	}
+	prev := getStr("ch_policy|" + ch)
+	set("ch_policy|"+ch, p)
+	events.New("policy").
+		Str("channel", ch).
+		Str("policy", p).
+		Str("previous", prev).
+		Emit()
 	return ok()
 }
 
@@ -779,4 +1419,162 @@ func ChannelInfo(payload *string) *string {
 		`","role":"` + getStr("ch_role|"+ch) +
 		`","genesis":"` + getStr("cfg_genesis") +
 		`","epochLen":"` + getStr("cfg_epochLen") + `"}`)
+}
+
+// ---- merkle share book ---------------------------------------------------
+//
+// The chain holds a 32-byte commitment instead of one state entry per earner, and a
+// claimant supplies the proof. Writing a share book cost ~311 RC per account against
+// ~1 RC per byte of log, so at 500 earners the per-account writes were ~92% of an
+// epoch's cost; this removes them. The leaf list is still LOGGED, so the indexer
+// holds the whole share book and anyone can rebuild the tree and check it against
+// the root.
+//
+// The consequence, deliberately accepted: `share|<ch>|<ep>|<acct>` no longer exists.
+// Nothing can read what an account earned from chain state alone — that is what the
+// indexer is for, and the root is what proves its answer was not invented.
+//
+// The construction MUST match reporter/sharecore/merkle.go exactly:
+//
+//	leaf     = sha256( 0x00 || "acct|share" )
+//	internal = sha256( 0x01 || min(a,b) || max(a,b) )
+//
+// Tags keep leaf and node preimages disjoint (an internal node's preimage must never
+// be presentable as a leaf); pairs are sorted so a proof carries no direction bits;
+// an odd node is promoted rather than duplicated, or [A,B,C] and [A,B,C,C] would
+// share a root (CVE-2012-2459).
+
+// hexToBytes decodes a 64-character hex string into 32 bytes. Returns false on any
+// malformed input — a proof element that is not exactly 32 bytes is not a hash, and
+// accepting a short one would let a claimant walk a shorter path than the tree has.
+func hexToBytes(s string) ([32]byte, bool) {
+	var out [32]byte
+	if len(s) != 64 {
+		return out, false
+	}
+	for i := 0; i < 32; i++ {
+		hi, ok1 := hexNibble(s[i*2])
+		lo, ok2 := hexNibble(s[i*2+1])
+		if !ok1 || !ok2 {
+			return out, false
+		}
+		out[i] = hi<<4 | lo
+	}
+	return out, true
+}
+
+func hexNibble(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+func bytesToHex(b [32]byte) string {
+	const hexd = "0123456789abcdef"
+	out := make([]byte, 64)
+	for i, v := range b {
+		out[i*2] = hexd[v>>4]
+		out[i*2+1] = hexd[v&0x0f]
+	}
+	return string(out)
+}
+
+func leafHash(acct, share string) [32]byte {
+	b := make([]byte, 0, 1+len(acct)+1+len(share))
+	b = append(b, 0x00)
+	b = append(b, acct...)
+	b = append(b, '|')
+	b = append(b, share...)
+	return sha256.Sum256(b)
+}
+
+func nodeHashC(a, b [32]byte) [32]byte {
+	buf := make([]byte, 0, 65)
+	buf = append(buf, 0x01)
+	if lessHashC(a, b) {
+		buf = append(buf, a[:]...)
+		buf = append(buf, b[:]...)
+	} else {
+		buf = append(buf, b[:]...)
+		buf = append(buf, a[:]...)
+	}
+	return sha256.Sum256(buf)
+}
+
+func lessHashC(a, b [32]byte) bool {
+	for i := 0; i < 32; i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
+
+// verifyProof recomputes the root from a leaf and its sibling path.
+func verifyProof(acct, share, proofCSV, root string) bool {
+	h := leafHash(acct, share)
+	if proofCSV != "" {
+		for _, p := range splitComma(proofCSV) {
+			sib, ok := hexToBytes(p)
+			if !ok {
+				return false
+			}
+			h = nodeHashC(h, sib)
+		}
+	}
+	return bytesToHex(h) == root
+}
+
+// assertActionInChannel refuses an attest action key that does not belong to `ch`.
+//
+// Every reporter-role action key this contract builds embeds its channel as the
+// component after the prefix: submitShares uses "ss:<ch>:<ep>:<page>", submitRoot
+// "sr:<ch>:<ep>", finalizeEpoch "fin:<ch>:<ep>". Channel names are validated at
+// addChannel to contain none of | : or , so the component is unambiguous.
+//
+// Anything else is refused rather than guessed at. An action key nobody here builds
+// has no authority set that could be the right one, so there is no safe default.
+func assertActionInChannel(action, ch string) {
+	for _, prefix := range []string{"ss:", "sr:", "fin:"} {
+		if len(action) < len(prefix) || action[:len(prefix)] != prefix {
+			continue
+		}
+		rest := action[len(prefix):]
+		// rest must begin with ch followed by ':' — the channel is never the last
+		// component of a reporter action key.
+		if len(rest) > len(ch) && rest[:len(ch)] == ch && rest[len(ch)] == ':' {
+			return
+		}
+		sdk.Abort("action does not belong to channel \"" + ch + "\" — releasing it with " +
+			"this channel's authorities would clear the wrong votes and strand the round")
+	}
+	sdk.Abort("unrecognised reporter action key — expected ss:/sr:/fin: for a channel")
+}
+
+// pinPolicy binds an epoch to the channel policy in force, once, at the first call
+// that touches it.
+//
+// Snapshotting rather than reading ch_policy live is what lets governance change
+// policy without rewriting an epoch already being reported: an epoch is forever
+// scored, verified and re-derivable against the digest it was pinned under.
+//
+// Called by BOTH pullFunding and submitRoot because either may arrive first — the
+// reporter's plan emits submitRoot before pullFunding, and when only pullFunding
+// pinned, submitRoot's own check read an empty pin and never fired. Not-present
+// guarded, so the second caller finds the pin already set and is held to it rather
+// than moving it.
+func pinPolicy(ch, ep string) {
+	k := "policy|" + ch + "|" + ep
+	if present(k) {
+		return
+	}
+	if p := getStr("ch_policy|" + ch); p != "" {
+		set(k, p)
+	}
 }

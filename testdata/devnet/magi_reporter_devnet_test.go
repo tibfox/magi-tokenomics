@@ -379,7 +379,7 @@ func TestDevnetMagiReporter(t *testing.T) {
 		"contracts": map[string]any{"distributor": c3ID, "channel": "author", "funder": c2ID, "stake": ""},
 		"epoch":     map[string]any{"genesis": genesis, "len": epochLen},
 		"source": map[string]any{
-			"tag": "magitribe", "limit": 100,
+			"tags": []string{"magitribe"}, "limit": 100,
 			"weight": "hive_rshares", "exclude": []string{},
 		},
 		"shares": map[string]any{
@@ -428,6 +428,28 @@ func TestDevnetMagiReporter(t *testing.T) {
 	}
 	if pages < 2 {
 		t.Fatalf("wanted a multi-page report to exercise paging, got %d pages", pages)
+	}
+	// The commitment has to be IN the plan, after the pages and before finalize.
+	// Without it finalizeEpoch refuses the epoch and no claim can verify against
+	// anything — a plan missing it fails only at the very last call.
+	rootAt, finalizeAt, lastPageAt := -1, -1, -1
+	for i, c := range plan.Calls {
+		switch c.Action {
+		case "submitShares":
+			lastPageAt = i
+		case "submitRoot":
+			rootAt = i
+		case "finalizeEpoch":
+			finalizeAt = i
+		}
+	}
+	if rootAt < 0 {
+		t.Fatalf("the plan publishes %d pages of shares and never commits a root: %s", pages, planJSON)
+	}
+	if rootAt < lastPageAt || (finalizeAt >= 0 && rootAt > finalizeAt) {
+		t.Fatalf("submitRoot is at %d, pages end at %d, finalize at %d — the root must "+
+			"commit to leaves already published, and finalize refuses an epoch without it",
+			rootAt, lastPageAt, finalizeAt)
 	}
 	t.Logf("reporter planned epoch %s: %d calls (%d share pages)", plan.Epoch, len(plan.Calls), pages)
 
@@ -487,13 +509,13 @@ func TestDevnetMagiReporter(t *testing.T) {
 		computeAfter.TotalShares, computeAfter.Accounts)
 
 	// the post-payout vote must never have reached the chain
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:toolate"}); st != nil {
-		if v, ok := st["share|author|0|hive:toolate"]; ok && v != nil && v != "" {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"claimed|author|0|hive:toolate"}); st != nil {
+		if v, ok := st["claimed|author|0|hive:toolate"]; ok && v != nil && v != "" {
 			t.Fatalf("a vote cast AFTER payout earned shares on-chain: %v", v)
 		}
 	}
-	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"share|author|0|hive:flagger"}); st != nil {
-		if v, ok := st["share|author|0|hive:flagger"]; ok && v != nil && v != "" {
+	if st, _ := d.GetStateByKeys(ctx, 1, c3ID, []string{"claimed|author|0|hive:flagger"}); st != nil {
+		if v, ok := st["claimed|author|0|hive:flagger"]; ok && v != nil && v != "" {
 			t.Fatalf("a downvoter earned shares on-chain: %v", v)
 		}
 	}
@@ -511,15 +533,32 @@ func TestDevnetMagiReporter(t *testing.T) {
 		node int
 		acct string
 	}{{1, owner}, {2, w2}} {
-		key := "share|author|0|hive:" + cl.acct
-		st, err := d.GetStateByKeys(ctx, 1, c3ID, []string{key})
-		if err != nil {
-			t.Fatalf("read %s: %v", key, err)
+		// The share comes from the PROOF, because the chain no longer stores it.
+		// This used to read claimed|author|0|<acct> as though it held a share — a
+		// key the contract writes only AFTER a successful claim, and whose value is
+		// "1". Before the merkle migration there was a share| key holding the real
+		// number; the rename kept the arithmetic pointing at a key that could not
+		// answer it, so every account looked like it "earned no on-chain share".
+		var pf struct {
+			Share        string `json:"share"`
+			ClaimPayload string `json:"claim_payload"`
 		}
-		raw := fmt.Sprintf("%v", st[key])
-		share, good := new(big.Int).SetString(raw, 10)
+		pfOut := runReporter("proof", "-epoch", plan.Epoch, "-account", "hive:"+cl.acct, "-json")
+		if err := json.Unmarshal(pfOut, &pf); err != nil {
+			t.Fatalf("reporter proof for %s is not json: %v\n%s", cl.acct, err, pfOut)
+		}
+		share, good := new(big.Int).SetString(pf.Share, 10)
 		if !good || share.Sign() <= 0 {
-			t.Fatalf("%s earned no on-chain share (%q) — the fixture should have paid them", cl.acct, raw)
+			t.Fatalf("%s has no share in the reporter's book (%q) — the fixture should have paid them",
+				cl.acct, pf.Share)
+		}
+		// It must not have claimed yet: the guard below measures a payout delta, and
+		// a pre-existing claim would make that delta zero and read as a payout bug.
+		ck := "claimed|author|0|hive:" + cl.acct
+		if st, err := d.GetStateByKeys(ctx, 1, c3ID, []string{ck}); err == nil {
+			if v := fmt.Sprintf("%v", st[ck]); v != "" && v != "<nil>" {
+				t.Fatalf("%s had already claimed before this test claimed for them (%s=%q)", cl.acct, ck, v)
+			}
 		}
 		want := new(big.Int).Div(new(big.Int).Mul(fundedN, share), totalN)
 		t.Logf("hive:%s share=%s -> expected payout %s", cl.acct, share, want)
@@ -532,7 +571,9 @@ func TestDevnetMagiReporter(t *testing.T) {
 		// either way.
 		before := stateBigHex(t, d, d.GQLEndpoint(1), tokenID, "bal|hive:"+cl.acct)
 
-		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", `{"channel":"author","epoch":"0"}`); err != nil {
+		// The same proof drives the claim — the path a real claimant uses when they
+		// do not want to trust an indexer.
+		if _, err := d.CallContract(ctx, cl.node, c3ID, "claim", pf.ClaimPayload); err != nil {
 			t.Fatalf("claim for %s failed to broadcast: %v", cl.acct, err)
 		}
 		if !waitStateKeyPresent(t, d, ctx, 1, c3ID, "claimed|author|0|hive:"+cl.acct, 3*time.Minute) {

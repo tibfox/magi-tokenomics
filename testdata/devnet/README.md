@@ -9,6 +9,63 @@ internals (`d.cfg`, `d.witnessAccount`, …), so they must sit *inside* that pac
 `testdata/` is ignored by the Go tool, so keeping them here preserves them under
 version control without breaking `go build ./...`.
 
+## These runs are namespaced — keep it that way
+
+`magiDevnetConfig()` sets `cfg.ProjectName = "tokdevnet-<rand>"`. The harness would
+otherwise default to `devnet-test-<rand>`, which is the same namespace every other
+go-vsc-node checkout on a machine uses — including a second agent session running the
+market contracts' devnet concurrently.
+
+Clean up by matching **that prefix and nothing else**:
+
+```sh
+# 1. LIST first, and read it.
+docker ps -a --filter "label=com.docker.compose.project" \
+  --format '{{.Label "com.docker.compose.project"}} {{.Names}}' \
+  | awk '$1 ~ /^tokdevnet-/ {print $2}'
+
+# 2. Only then remove, by piping the SAME command into rm.
+docker ps -a --filter "label=com.docker.compose.project" \
+  --format '{{.Label "com.docker.compose.project"}} {{.Names}}' \
+  | awk '$1 ~ /^tokdevnet-/ {print $2}' | xargs -r docker rm -f
+```
+
+**Do not put `-q` on that `docker ps`.** `-aq` silently overrides `--format`
+(`WARNING: Ignoring custom format, because both --format and --quiet are set`) and
+emits bare container IDs. The project label the awk pattern tests is then gone, so
+`$1` is a hex ID, `/^tokdevnet-/` matches nothing, `{print $2}` prints nothing, and
+`xargs -r` runs nothing at all. This snippet had that bug and was therefore a silent
+no-op: it never removed anything, and a devnet was found still running eleven hours
+after its `go test` had exited. It failed *safe* — an over-broad selector is the far
+worse failure, and this one could never have reached production containers — but a
+cleanup command that quietly cleans nothing still costs a host full of orphans.
+
+Two rules learned the hard way, both from real damage on this host:
+
+- **Never select containers by name substring.** `--filter name=magi-` matches
+  `magi-deployer-contractdeploy-*` — the production contract deployers — and removed
+  them. The prefix here deliberately contains no "magi" for that reason.
+- **Never select by the `devnet-test-` prefix either.** That is the shared default,
+  so it matches other people's concurrent runs.
+- **List the selector before you pass it to `rm`.** Run it with
+  `--format '{{.Names}}'` and read the output first. Both mistakes above were caught
+  that way, one of them before it did any harm.
+
+## Before you run them: two things that are not in this directory
+
+**`waitStateKeyPresent` was missing until 2026-08-18.** Eleven suites call it and it
+was never versioned here — it existed only inside one go-vsc-node checkout, so a
+clean copy of this directory failed `go vet` with "undefined: waitStateKeyPresent".
+That is why these went unrun long enough for seven of them to rot. It now lives in
+`magi_merkle_helper_test.go`. If you add a helper, add it *here*, not to your
+checkout.
+
+**`magi_upgrade_devnet_test.go` needs a go-vsc-node with contract-update support**
+in its devnet harness — `Devnet.UpdateContract`, `ContractUpdateOpts` and
+`Devnet.PendingUpdates`, which are on the `feat/contract-update-timelock` branch, not
+on main. Against a checkout without them the whole `devnet` package fails to compile,
+so move that one file aside if you are running the others.
+
 ## Running them
 
 ```sh
@@ -33,20 +90,22 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/
 Both env vars have defaults pointing at the original development machine; set them
 to your own paths.
 
-## The ten suites
+## The twelve suites
 
 | test | covers | ~time |
 |---|---|---|
 | `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
 | `magi_stake_lp_airdrop_devnet_test.go` | staking + yield + airdrop (C1) and an LP channel, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 7 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
+| `magi_full_devnet_test.go` | **all 4 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
 | `magi_lp_multiepoch_devnet_test.go` | **LP rewards**: 3 epochs via the real reporter in `lp` mode against a faked indexer | 24 min |
-| `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast | 12 min |
+| `magi_realbroadcast_devnet_test.go` | **the reporter signs and submits its own epoch** — the only suite where the harness does not broadcast — then re-runs it to prove a resume broadcasts nothing | 16 min |
 | `magi_cosigned_devnet_test.go` | **auth mode 1 (Cosigned)**: 2-of-2 in ONE transaction, and one authority applying nothing | 13 min |
+| `magi_scale_devnet_test.go` | **volume + cost**: 500 users, 200 posts, 10,000 votes in one epoch — what an epoch COSTS and whether anyone is silently dropped across 9 share pages | 20 min |
+| `magi_upgrade_devnet_test.go` | contract-update timelock — **does not compile against a stock go-vsc-node**; see the note above and move it aside | — |
 
 `magi_full_devnet_test.go` is the one to run if you only run one. It proves a single
 emission splitting three ways into three *different* distributor mechanisms at once,
@@ -127,18 +186,39 @@ Keep this table honest as the code moves: a suite that stops funding a pool now 
 nothing and fails several minutes later with a misleading message, so a stale "yes"
 is worse than no entry at all.
 
-| suite | run green on devnet | runtime |
-|---|---|---|
-| `magi_full_devnet_test.go` | yes | 2433s |
-| `magi_multiepoch_devnet_test.go` | yes | 2025s |
-| `magi_rogue_reporter_devnet_test.go` | yes | 1620s |
-| `magi_tokenomics_devnet_test.go` | yes | 591s |
-| `magi_stake_lp_airdrop_devnet_test.go` | pending re-run on the merged layout | — |
-| `magi_refill_devnet_test.go` | yes | 1006s |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s |
-| `magi_reporter_devnet_test.go` | yes | 721s |
-| `magi_realbroadcast_devnet_test.go` | yes | 692s |
-| `magi_cosigned_devnet_test.go` | yes | 755s |
+**Record the DATE, not just the runtime.** A bare number cannot be checked against
+the code it ran on, which is how this table silently went stale: its runtimes were
+written on 2026-07-31, the six-into-three merge landed on 2026-08-04, and nothing in
+the table said so. A reader saw ten green rows for a layout none of them had run.
+
+| suite | run green on devnet | runtime | last verified |
+|---|---|---|---|
+| `magi_full_devnet_test.go` | yes | 2433s | 2026-08-19 sweep |
+| `magi_multiepoch_devnet_test.go` | yes | 2030s | 2026-08-19 sweep |
+| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | 2026-08-19 sweep |
+| `magi_tokenomics_devnet_test.go` | yes | 591s | 2026-08-19 sweep |
+| `magi_stake_lp_airdrop_devnet_test.go` | yes | 999s | **2026-08-20** |
+| `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s | 2026-08-19 sweep |
+| `magi_reporter_devnet_test.go` | yes | 721s | 2026-08-19 sweep |
+| `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
+| `magi_cosigned_devnet_test.go` | yes | 755s | 2026-08-19 sweep |
+| `magi_scale_devnet_test.go` | yes | — | the run behind `docs/rc-costs.md` |
+| `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
+
+Two rows carry a date because they were run on 2026-08-20 and timed directly:
+`magi_stake_lp_airdrop` (998.59s) and `magi_realbroadcast` (939.34s). The rows marked
+"2026-08-19 sweep" are from that sweep's record rather than a run timed here — treat
+their runtimes as indicative. `magi_stake_lp_airdrop` had been sitting at "pending
+re-run on the merged layout" since 2026-08-04; it now passes on the merged layout,
+with all 13 outsider attacks broadcast and rejected on chain and C5/C6/C7 state
+unchanged afterwards.
+
+Note its log labels still say C5/C6/C7. They are variable names that outlived the
+merge: `c5ID` is the `c3-distributor` wasm, and every `c6.*`/`c7.*` call is sent to
+`c1ID`, which absorbed the airdrop and the yield. The suite deploys FOUR wasm — token,
+c1-staking, c2-emission, c3-distributor — so it is on the current layout despite
+reading otherwise.
 
 **Do not mark a suite verified by reasoning about its source. Run it.**
 
@@ -295,3 +375,36 @@ way; ignoring them wastes 10–25 minutes per run.
   do not exist yet. `pullFunding` refuses until it has run.
 - **`addChannel` per reward stream**, after `C2.init` — registering a channel verifies
   its bucket against the funder, so it cannot happen earlier.
+
+## The drift guards, and why they exist
+
+A devnet run costs 11–40 minutes and stands up a five-node chain, a Hive replica and
+an indexer before it can tell you that a test read the wrong state key. Every guard in
+`itest/devnet_drift_test.go` exists because a specific run was spent discovering
+something a few milliseconds of parsing could have found. They run with the ordinary
+`go test ./itest/`, need no docker, and each one names the run it came from.
+
+| Guard | The run it cost |
+|---|---|
+| `EveryReferencedActionExists` | an action renamed in the contract |
+| `ActionsExistOnTheContractTheyAreSentTo` | `claim` sent to C1, which does not export it |
+| `EveryReferencedStateKeyExists` | a renamed key read as `""` forever — extended after `magi_rogue_reporter` waited on `unallocated` while the contract writes `unalloc\|<ch>` |
+| `EveryLookupMatchesAKeyThatWasRead` | an assertion comparing `""` to `""` |
+| `OwnerOnlyActionsAreCalledFromTheOwnerNode` | an owner-only call sent from the wrong node |
+| `ChannelScopedCallsAndKeysCarryAChannel` | channel-less claims and keys after the merge |
+| `ReporterConfigKeysExist` / `ReporterBinaryIsNewerThanItsSources` | a stale binary reporting yesterday's behaviour |
+| `ArtifactsAreNewerThanSources` | a run against a `.wasm` older than its `main.go` |
+| `LedgerDomainsMatchTheContract` | `system:` counted on chain, dropped from the root |
+| `EveryReporterSubcommandTheSuitesUseAcceptsConfig` | `reporter root` rejecting `-config`, 17 minutes in |
+| `EveryClaimCarriesAShareAndProof` | six suites still claiming with the pre-merkle payload |
+| `ClaimedKeyIsNeverReadAsAShare` | two suites computing a payout from a presence flag |
+| `TotalSharesIsOnlyReadWhereARootIsSubmitted` | `magi_cosigned` asserting against a key nothing would write |
+
+**Mutate a guard before trusting it.** Four times now a guard here has passed against
+a file that contained the exact defect it claimed to catch — a fixed-width scan that
+read the next table row, a resolver blind to method calls, a cycle guard that memoised
+the visit instead of the answer, and a field check satisfied by a struct tag. A guard
+is only evidence once you have reverted the fix and watched it fail. The same applies
+to the suites themselves: `magi_cosigned`'s central assertion — that one authority of a
+2-of-2 pair applies nothing — held whether the threshold worked or was bypassed
+entirely, because it read a key that would never be written either way.

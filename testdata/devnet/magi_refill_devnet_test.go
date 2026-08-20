@@ -200,7 +200,13 @@ func TestDevnetMagiRefill(t *testing.T) {
 	t.Logf("genesis=%d epochLen=%d emission=%d/epoch; pool holds exactly 1 epoch",
 		genesis, epochLen, emission)
 
-	owedKey := func(ep int) string { return fmt.Sprintf("owed|hive:%s|%d", treasury, ep) }
+	// owed| is keyed by the bucket NAME, not by what the bucket pays.
+	//
+	// The bucket is declared as "content:hive:<treasury>:10000" — name "content",
+	// target "hive:<treasury>" — and this built the key from the target, so it read
+	// "" forever and the suite timed out waiting for an emission that had in fact
+	// been recorded under owed|content|<ep> all along.
+	owedKey := func(ep int) string { return fmt.Sprintf("owed|content|%d", ep) }
 	waitEpochClosed := func(ep uint64) {
 		t.Logf("waiting for epoch %d to close (block %d)...", ep, genesis+(ep+1)*epochLen)
 		time.Sleep(time.Duration(epochLen+6) * 3 * time.Second)

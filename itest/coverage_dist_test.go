@@ -160,10 +160,22 @@ func covBalance(t *testing.T, ct *test_utils.ContractTest, account string, heigh
 func covShareOf(t *testing.T, ct *test_utils.ContractTest, distID, epoch, account string, height uint64) (string, string, string, string) {
 	t.Helper()
 	r := call(t, ct, distID, "shareOf", fmt.Sprintf(`{"channel":"share","epoch":"%s","account":"%s"}`, epoch, account), "hive:covquery", height, true)
-	return covJSONField(t, r.Ret, "share"),
+	// The first value used to be the caller's SHARE. The chain does not hold one any
+	// more — it holds the commitment — so this returns the root instead. Callers that
+	// only wanted the denominator, the funding or the status are unaffected.
+	return covJSONField(t, r.Ret, "root"),
 		covJSONField(t, r.Ret, "totalShares"),
 		covJSONField(t, r.Ret, "funded"),
 		covJSONField(t, r.Ret, "status")
+}
+
+// covRoot commits a share book's root, which finalize now requires.
+func covRoot(t *testing.T, ct *test_utils.ContractTest, distID, reporter, epoch string,
+	shares map[string]int64, height uint64) *book {
+	t.Helper()
+	b := shareBook(shares)
+	b.submitRoot(t, ct, distID, covCh, epoch, reporter, height)
+	return b
 }
 
 func covSubmit(t *testing.T, ct *test_utils.ContractTest, distID, reporter, epoch, page, entries string, height uint64, expectOK bool) {
@@ -185,17 +197,15 @@ func TestCovDist_MultiPageSharesAccumulate(t *testing.T) {
 	covFundEpoch(t, ct, covC3ID, "0", 1)
 
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60", 1, true)
-	_, ts, _, _ := covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "60", ts, "after page 0")
-
 	covSubmit(t, ct, covC3ID, covReporter, "0", "1", "hive:covb:30", 1, true)
-	_, ts, _, _ = covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "90", ts, "after page 1")
-
 	covSubmit(t, ct, covC3ID, covReporter, "0", "2", "hive:covc:10", 1, true)
-	sh, ts, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "60", sh)
-	assert.Equal(t, "100", ts, "3 pages must accumulate")
+
+	// Pages PUBLISH the leaves; the root DECLARES the total. Nothing accumulates on
+	// chain any more, so the assertion is that the commitment is what sets it.
+	bk := covRoot(t, ct, covC3ID, covReporter, "0",
+		map[string]int64{"hive:cova": 60, "hive:covb": 30, "hive:covc": 10}, 1)
+	_, ts, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
+	assert.Equal(t, "100", ts, "the root sets the denominator")
 	assert.Equal(t, "100000", funded, "shareOf must report the on-chain funding")
 	assert.Equal(t, "", status, "epoch still open")
 
@@ -205,7 +215,7 @@ func TestCovDist_MultiPageSharesAccumulate(t *testing.T) {
 	// non-canonical page ids must not open a second slot for page 1
 	covSubmit(t, ct, covC3ID, covReporter, "0", "01", "hive:covb:999", 1, false)
 	_, ts, _, _ = covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "100", ts, "rejected re-submissions must not mutate totalShares")
+	assert.Equal(t, "100", ts, "rejected re-submissions must not mutate the denominator")
 
 	// a non-reporter cannot push a page at all
 	covSubmit(t, ct, covC3ID, "hive:coveve", "0", "3", "hive:coveve:1000", 1, false)
@@ -214,9 +224,9 @@ func TestCovDist_MultiPageSharesAccumulate(t *testing.T) {
 
 	// ...and no further page may be added once the epoch is frozen
 	covSubmit(t, ct, covC3ID, covReporter, "0", "3", "hive:covd:1000", 1, false)
-	sh, ts, funded, status = covShareOf(t, ct, covC3ID, "0", "hive:covc", 1)
-	assert.Equal(t, "10", sh)
+	_, ts, funded, status = covShareOf(t, ct, covC3ID, "0", "hive:covc", 1)
 	assert.Equal(t, "100", ts, "totalShares frozen at finalize")
+	_ = bk
 	assert.Equal(t, "100000", funded)
 	assert.Equal(t, "finalized", status)
 }
@@ -233,31 +243,30 @@ func TestCovDist_MalformedEntriesSkipped(t *testing.T) {
 	entries := "hive:cova:10,:5,hive:covb:0,hive:covc:-5,nocolonentry,hive:covd:7,hive:cove:"
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", entries, 1, true)
 
-	sh, ts, _, _ := covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "10", sh)
+	// Only the well-formed entries enter the book the reporter commits to; the rest
+	// are named in skip logs. A malformed entry that reached the tree would be
+	// unclaimable forever, which is the failure this guards.
+	mBook := covRoot(t, ct, covC3ID, covReporter, "0",
+		map[string]int64{"hive:cova": 10, "hive:covd": 7}, 1)
+	_, ts, _, _ := covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
 	assert.Equal(t, "17", ts, "only well-formed positive entries may count")
-	for _, bad := range []string{"hive:covb", "hive:covc", "hive:cove", "nocolonentry", ""} {
-		s, _, _, _ := covShareOf(t, ct, covC3ID, "0", bad, 1)
-		assert.Equal(t, "0", s, "malformed entry must not create a share for %q", bad)
-	}
-	s, _, _, _ := covShareOf(t, ct, covC3ID, "0", "hive:covd", 1)
-	assert.Equal(t, "7", s)
 
 	// a page consisting solely of junk applies (consuming its page id) but adds nothing
 	covSubmit(t, ct, covC3ID, covReporter, "0", "1", ":1,badentry,hive:covz:0,hive:covy:-1", 1, true)
 	_, ts, _, _ = covShareOf(t, ct, covC3ID, "0", "hive:cova", 1)
-	assert.Equal(t, "17", ts, "junk-only page must not change totalShares")
+	assert.Equal(t, "17", ts, "a junk-only page must not change the denominator")
 
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// the surviving shares still pay out proportionally (10/17, 7/17 of 100000)
-	ra := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cova", 2, true)
-	rd := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covd", 2, true)
+	ra := call(t, ct, covC3ID, "claim", mBook.claimFor(t, covCh, "0", "hive:cova"), "hive:cova", 2, true)
+	rd := call(t, ct, covC3ID, "claim", mBook.claimFor(t, covCh, "0", "hive:covd"), "hive:covd", 2, true)
 	assert.Equal(t, "58823", covJSONField(t, ra.Ret, "claimed"))
 	assert.Equal(t, "41176", covJSONField(t, rd.Ret, "claimed"))
 	// accounts that only appeared in malformed entries cannot claim
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covb", 2, false)
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cove", 2, false)
+	// they are not in the tree, so no proof exists for them at all
+	call(t, ct, covC3ID, "claim", mBook.claimForged(t, covCh, "0", "hive:cova", "10"), "hive:covb", 2, false)
+	call(t, ct, covC3ID, "claim", mBook.claimForged(t, covCh, "0", "hive:cova", "10"), "hive:cove", 2, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,17 +282,18 @@ func TestCovDist_RoundingDustAndConservation(t *testing.T) {
 	covFundEpoch(t, ct, covC3ID, "0", 1)
 
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:covr1:1,hive:covr2:1,hive:covr3:1", 1, true)
+	rBook := covRoot(t, ct, covC3ID, covReporter, "0", map[string]int64{"hive:covr1": 1, "hive:covr2": 1, "hive:covr3": 1}, 1)
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// finalize at h=1 with window=5 → claims open at h=6
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 2, false)
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 5, false)
+	call(t, ct, covC3ID, "claim", rBook.claimFor(t, covCh, "0", "hive:covr1"), "hive:covr1", 2, false)
+	call(t, ct, covC3ID, "claim", rBook.claimFor(t, covCh, "0", "hive:covr1"), "hive:covr1", 5, false)
 
 	funded := big.NewInt(covEpochFunding)
 	total := big.NewInt(3)
 	sum := new(big.Int)
 	for _, acct := range []string{"hive:covr1", "hive:covr2", "hive:covr3"} {
-		r := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, acct, 6, true)
+		r := call(t, ct, covC3ID, "claim", rBook.claimFor(t, covCh, "0", acct), acct, 6, true)
 		paid := covBig(t, covJSONField(t, r.Ret, "claimed"))
 		want := new(big.Int).Div(new(big.Int).Mul(funded, big.NewInt(1)), total) // floor
 		assert.Equal(t, want.String(), paid.String(), "payout for %s must be floor(funded*share/total)", acct)
@@ -300,8 +310,8 @@ func TestCovDist_RoundingDustAndConservation(t *testing.T) {
 		"undistributed dust must remain in the distributor")
 
 	// double claim and no-share claim must both be refused
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covr1", 6, false)
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covnobody", 6, false)
+	call(t, ct, covC3ID, "claim", rBook.claimFor(t, covCh, "0", "hive:covr1"), "hive:covr1", 6, false)
+	call(t, ct, covC3ID, "claim", rBook.claimForged(t, covCh, "0", "hive:covr1", "1"), "hive:covnobody", 6, false)
 	assert.Equal(t, "0", covBalance(t, ct, "hive:covnobody", 6).String())
 	// ...and the paid accounts' balances did not move on the failed second claim
 	assert.Equal(t, "33333", covBalance(t, ct, "hive:covr1", 6).String())
@@ -320,6 +330,7 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 	ct := covBoot(t, covC3Wasm, covC3ID, "10", covReporter)
 	covFundEpoch(t, ct, covC3ID, "0", 1)
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60,hive:covb:40", 1, true)
+	vBook := covRoot(t, ct, covC3ID, covReporter, "0", map[string]int64{"hive:cova": 60, "hive:covb": 40}, 1)
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 
 	// only the guardian may veto (reporter/random/owner may not)
@@ -329,24 +340,24 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 
 	// guardian veto inside the window (finalized at h=1, window 10 → open until h=11)
 	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"0"}`, covGuardian, 2, true)
-	sh, ts, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2)
-	assert.Equal(t, "60", sh, "shares are retained, the funding is what moves")
+	root, ts, funded, status := covShareOf(t, ct, covC3ID, "0", "hive:cova", 2)
+	assert.NotEmpty(t, root, "the commitment is retained, the funding is what moves")
 	assert.Equal(t, "100", ts)
 	assert.Equal(t, "0", funded, "funded must be zeroed into `unallocated`")
 	assert.Equal(t, "cancelled", status)
 
 	// every claim is dead, before and after the (now irrelevant) window
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:cova", 3, false)
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covb", 20, false)
+	call(t, ct, covC3ID, "claim", vBook.claimFor(t, covCh, "0", "hive:cova"), "hive:cova", 3, false)
+	call(t, ct, covC3ID, "claim", vBook.claimFor(t, covCh, "0", "hive:covb"), "hive:covb", 20, false)
 	assert.Equal(t, "0", covBalance(t, ct, "hive:cova", 20).String())
 
 	// a non-guardian cannot sweep
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, "hive:coveve", 20, false)
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1"}`, covReporter, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000"}`, "hive:coveve", 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000"}`, covReporter, 20, false)
 
 	// the guardian sweeps — and a `to` field in the payload is IGNORED: the only
 	// destination is the treasury pinned at init (H2).
-	s := call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	s := call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String(),
 		"cancelled funding must land in the PINNED treasury")
@@ -356,16 +367,17 @@ func TestCovDist_VetoCancelAndPinnedSweep(t *testing.T) {
 		"the whole cancelled epoch must have left the distributor")
 
 	// a second sweep (fresh nonce, so auth is not the blocker) has nothing to move
-	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC3ID, "sweepUnallocated", `{"channel":"share","nonce":"2","amount":"100000"}`, covGuardian, 20, false)
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 
 	// ---- and the veto EXPIRES: a second epoch, cancelled after its window ----
 	covFundEpoch(t, ct, covC3ID, "1", 25)
 	covSubmit(t, ct, covC3ID, covReporter, "1", "0", "hive:cova:1", 25, true)
+	sBook := covRoot(t, ct, covC3ID, covReporter, "1", map[string]int64{"hive:cova": 1}, 25)
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"1"}`, covReporter, 25, true)
 	// finalized at h=25, window 10 → challenge window elapsed at h=35
 	call(t, ct, covC3ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, covGuardian, 40, false)
-	call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"1"}`, "hive:cova", 40, true)
+	call(t, ct, covC3ID, "claim", sBook.claimFor(t, covCh, "1", "hive:cova"), "hive:cova", 40, true)
 	assert.Equal(t, "100000", covBalance(t, ct, "hive:cova", 40).String(),
 		"an epoch past its challenge window must be payable, not vetoable")
 }
@@ -440,34 +452,38 @@ func TestCovDist_C5PagesRoundingAndVetoParity(t *testing.T) {
 	covSubmit(t, ct, covC5ID, lpReporter, "0", "1", "hive:covlp2:1", 1, true)
 	covSubmit(t, ct, covC5ID, lpReporter, "0", "2", "hive:covlp3:1", 1, true)
 	covSubmit(t, ct, covC5ID, lpReporter, "0", "1", "hive:covlp2:1", 1, false) // page replay
+	lpBook := shareBook(map[string]int64{"hive:covlp1": 1, "hive:covlp2": 1, "hive:covlp3": 1})
+	lpBook.submitRoot(t, ct, covC5ID, covCh, "0", lpReporter, 1)
 	_, ts, _, _ := covShareOf(t, ct, covC5ID, "0", "hive:covlp1", 1)
 	assert.Equal(t, "3", ts)
 
 	call(t, ct, covC5ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, lpReporter, 1, true)
-	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covlp1", 3, false) // window not elapsed
+	call(t, ct, covC5ID, "claim", lpBook.claimFor(t, covCh, "0", "hive:covlp1"), "hive:covlp1", 3, false) // window not elapsed
 
 	sum := new(big.Int)
 	for _, acct := range []string{"hive:covlp1", "hive:covlp2", "hive:covlp3"} {
-		r := call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, acct, 6, true)
+		r := call(t, ct, covC5ID, "claim", lpBook.claimFor(t, covCh, "0", acct), acct, 6, true)
 		assert.Equal(t, "33333", covJSONField(t, r.Ret, "claimed"))
 		sum.Add(sum, covBig(t, covJSONField(t, r.Ret, "claimed")))
 	}
 	assert.True(t, sum.Cmp(big.NewInt(covEpochFunding)) <= 0, "Σ(payouts) must be <= funded")
-	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covlp1", 6, false)    // double claim
-	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"0"}`, "hive:covnobody", 6, false) // no share
+	call(t, ct, covC5ID, "claim", lpBook.claimFor(t, covCh, "0", "hive:covlp1"), "hive:covlp1", 6, false)    // double claim
+	call(t, ct, covC5ID, "claim", lpBook.claimForged(t, covCh, "0", "hive:covlp1", "1"), "hive:covnobody", 6, false) // no share
 
 	// veto path on a second epoch: cancel → sweep to the pinned treasury
 	covFundEpoch(t, ct, covC5ID, "1", 10)
 	covSubmit(t, ct, covC5ID, lpReporter, "1", "0", "hive:covlp1:1", 10, true)
+	lpBook2 := shareBook(map[string]int64{"hive:covlp1": 1})
+	lpBook2.submitRoot(t, ct, covC5ID, covCh, "1", lpReporter, 10)
 	call(t, ct, covC5ID, "finalizeEpoch", `{"channel":"share","epoch":"1"}`, lpReporter, 10, true)
 	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, "hive:coveve", 11, false)
 	call(t, ct, covC5ID, "cancelEpoch", `{"channel":"share","epoch":"1"}`, covGuardian, 11, true)
 	call(t, ct, covC5ID, "claim", `{"channel":"share","epoch":"1"}`, "hive:covlp1", 20, false)
-	s := call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"1","to":"hive:coveve"}`, covGuardian, 20, true)
+	s := call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"1","amount":"100000","to":"hive:coveve"}`, covGuardian, 20, true)
 	assert.Equal(t, "100000", covJSONField(t, s.Ret, "swept"))
 	assert.Equal(t, "100000", covBalance(t, ct, covTreasury, 20).String())
 	assert.Equal(t, "0", covBalance(t, ct, "hive:coveve", 20).String())
-	call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"2"}`, covGuardian, 20, false)
+	call(t, ct, covC5ID, "sweepUnallocated", `{"channel":"share","nonce":"2","amount":"100000"}`, covGuardian, 20, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +648,7 @@ func TestCovDist_StaleRescueAnchorsOnFundedAtNotEpochEnd(t *testing.T) {
 
 	// The reporter has time to do its job inside that window.
 	covSubmit(t, ct, covC3ID, covReporter, "0", "0", "hive:cova:60,hive:covb:40", 2100, true)
+	covRoot(t, ct, covC3ID, covReporter, "0", map[string]int64{"hive:cova": 60, "hive:covb": 40}, 2100)
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 2100, true)
 	_, _, _, status = covShareOf(t, ct, covC3ID, "0", "hive:cova", 2100)
 	assert.Equal(t, "finalized", status)
@@ -812,6 +829,15 @@ func TestCovDist_FiveHundredEarnersAcrossNinePages(t *testing.T) {
 	}
 	t.Logf("submitted %d earners across %d pages, totalShares should be %d", total, page, wantTotal)
 
+	// The commitment over the whole book — at this scale it is the entire reason the
+	// merkle form exists: nine pages of leaves cost ~1,871 RC each to LOG, against
+	// ~15,309 each when every account was written to state.
+	bigShares := make(map[string]int64, len(earners))
+	for _, e := range earners {
+		bigShares[e.acct] = int64(e.share)
+	}
+	bigBook := covRoot(t, ct, covC3ID, covReporter, "0", bigShares, 1)
+
 	call(t, ct, covC3ID, "finalizeEpoch", `{"channel":"share","epoch":"0"}`, covReporter, 1, true)
 	_, ts, funded, status := covShareOf(t, ct, covC3ID, "0", earners[0].acct, 2)
 	assert.Equal(t, "finalized", status)
@@ -830,7 +856,7 @@ func TestCovDist_FiveHundredEarnersAcrossNinePages(t *testing.T) {
 			t.Fatalf("%s started with a balance of %s", e.acct, before)
 		}
 		expect := fundedN * e.share / wantTotal
-		r := call(t, ct, covC3ID, "claim", `{"channel":"share","epoch":"0"}`, e.acct, 3, expect > 0)
+		r := call(t, ct, covC3ID, "claim", bigBook.claimFor(t, covCh, "0", e.acct), e.acct, 3, expect > 0)
 		_ = r
 		got := covBalance(t, ct, e.acct, 3)
 		if got.String() != strconv.Itoa(expect) {

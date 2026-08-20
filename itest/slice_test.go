@@ -91,10 +91,10 @@ func TestVerticalSlice(t *testing.T) {
 
 	// C3 pulls funding, reporter submits shares + finalizes, alice/bob claim
 	call(t, &ct, c3ID, "pullFunding", `{"channel":"author","epoch":"0"}`, "hive:anyone", 1, true)
-	call(t, &ct, c3ID, "submitShares", `{"channel":"author","epoch":"0","page":"0","entries":"hive:alice:60,hive:bob:40"}`, "hive:reporter", 1, true)
+	bk1 := publishEntries(t, &ct, c3ID, "author", "0", "hive:alice:60,hive:bob:40", "hive:reporter", 1)
 	call(t, &ct, c3ID, "finalizeEpoch", `{"channel":"author","epoch":"0"}`, "hive:reporter", 1, true)
-	call(t, &ct, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:alice", 2, true)
-	call(t, &ct, c3ID, "claim", `{"channel":"author","epoch":"0"}`, "hive:bob", 2, true)
+	call(t, &ct, c3ID, "claim", bk1.claimFor(t, "author", "0", "hive:alice"), "hive:alice", 2, true)
+	call(t, &ct, c3ID, "claim", bk1.claimFor(t, "author", "0", "hive:bob"), "hive:bob", 2, true)
 
 	a := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:alice"}`, "hive:x", 2, true)
 	b := call(t, &ct, tokenID, "balanceOf", `{"account":"hive:bob"}`, "hive:x", 2, true)

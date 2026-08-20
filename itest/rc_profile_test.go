@@ -96,8 +96,20 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 		fmt.Sprintf(`{"acct":"%s","amount":"500"}`, bob), owner, 2, true))
 	record("C1 staking", "unstake", "queues a cooldown entry", call(t, &ct, pC1, "unstake",
 		`{"amount":"200"}`, alice, 3, true))
-	record("C1 staking", "claimUnstaked", "after cooldown", call(t, &ct, pC1, "claimUnstaked",
+	record("C1 staking", "claimUnstaked", "after cooldown, 1 entry", call(t, &ct, pC1, "claimUnstaked",
 		``, alice, 40, true))
+	// A SECOND claimUnstaked row, with several matured entries, because the
+	// single-entry figure above cannot show what the batching is worth: every
+	// matured entry used to cost its own token transfer, and they all pay the same
+	// recipient. bob queues five, then claims them in one call.
+	record("C0 token", "approve", "owner->C1 for bob's stake",
+		call(t, &ct, pTok, "approve", fmt.Sprintf(`{"spender":"contract:%s","amount":"5000"}`, pC1), owner, 40, true))
+	call(t, &ct, pC1, "stakeFor", fmt.Sprintf(`{"acct":"%s","amount":"500"}`, bob), owner, 40, true)
+	for i := 0; i < 5; i++ {
+		call(t, &ct, pC1, "unstake", `{"amount":"50"}`, bob, uint64(41+i), true)
+	}
+	record("C1 staking", "claimUnstaked", "after cooldown, 5 entries", call(t, &ct, pC1, "claimUnstaked",
+		``, bob, 80, true))
 	record("C1 staking", "stakeOf", "query", call(t, &ct, pC1, "stakeOf",
 		fmt.Sprintf(`{"account":"%s"}`, alice), alice, 40, true))
 	record("C1 staking", "stakeAtHeight", "query, historical", call(t, &ct, pC1, "stakeAtHeight",
@@ -149,26 +161,53 @@ func TestRC_ProfileAllFunctions(t *testing.T) {
 		`{"epoch":"0"}`, "hive:keeper", 46, true))
 
 	// submitShares is the one that scales with input — measure the curve.
+	//
+	// Account names are the MAXIMUM a Hive account can be (`hive:` + 16 characters).
+	// The cost scales with the bytes a page writes and logs, not just its entry count,
+	// so the shorter synthetic ids this fixture used before understated a real page by
+	// about 5% at 30 entries — and these figures are what the reporter's rc_limit check
+	// is sized from, where understating is the direction that breaks things.
+	// Accumulated as the pages go out, because finalizeEpoch now requires the declared
+	// totalShares to equal what the pages actually published — an over-declared
+	// denominator used to strand the difference where no call could reach it. The same
+	// account appears on several pages here, and duplicate entries SUM, exactly as
+	// sharecore treats them.
+	published := map[string]int64{}
 	for _, n := range []int{1, 10, 30, 60} {
 		parts := make([]string, n)
 		for i := 0; i < n; i++ {
-			parts[i] = fmt.Sprintf("hive:rcshare%03d:%d", i, 100+i)
+			acct := fmt.Sprintf("hive:rcsharemaxlen%03d", i)
+			parts[i] = fmt.Sprintf("%s:%d", acct, 100+i)
+			published[acct] += int64(100 + i)
 		}
 		record("distributor", "submitShares", fmt.Sprintf("%d entries (1 page)", n),
 			call(t, &ct, pC3, "submitShares", fmt.Sprintf(
 				`{"channel":"content","epoch":"0","page":"%d","entries":"%s"}`, n, strings.Join(parts, ",")), owner, 46, true))
 	}
+	publishedTotal := int64(0)
+	for _, v := range published {
+		publishedTotal += v
+	}
 	record("distributor", "shareOf", "query", call(t, &ct, pC3, "shareOf",
-		`{"channel":"content","epoch":"0","account":"hive:rcshare000"}`, "hive:any", 46, true))
+		`{"channel":"content","epoch":"0","account":"hive:rcsharemaxlen000"}`, "hive:any", 46, true))
+	// The commitment: one call for the whole epoch, whatever the earner count.
+	pBook := shareBook(published)
+	record("distributor", "submitRoot", "commitment for the epoch",
+		call(t, &ct, pC3, "submitRoot", fmt.Sprintf(
+			`{"channel":"content","epoch":"0","root":"%s","totalShares":"%d","accounts":"%d"}`,
+			pBook.tree.Root(), publishedTotal, len(published)), owner, 46, true))
 	record("distributor", "finalizeEpoch", "", call(t, &ct, pC3, "finalizeEpoch",
 		`{"channel":"content","epoch":"0"}`, owner, 46, true))
-	record("distributor", "claim", "transfers the payout", call(t, &ct, pC3, "claim",
-		`{"channel":"content","epoch":"0"}`, "hive:rcshare000", 60, true))
+	record("distributor", "claim", "with a merkle proof", call(t, &ct, pC3, "claim",
+		pBook.claimFor(t, "content", "0", "hive:rcsharemaxlen000"), "hive:rcsharemaxlen000", 60, true))
 
 	record("distributor", "submitShares", "lp channel, 2 entries", call(t, &ct, pC3, "submitShares",
 		fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"%s:70,%s:30"}`, alice, bob), owner, 46, true))
+	lpBook := shareBook(map[string]int64{alice: 70, bob: 30})
+	lpBook.submitRoot(t, &ct, pC3, "lp", "0", owner, 46)
 	record("distributor", "finalizeEpoch", "lp channel", call(t, &ct, pC3, "finalizeEpoch", `{"channel":"lp","epoch":"0"}`, owner, 46, true))
-	record("distributor", "claim", "lp channel", call(t, &ct, pC3, "claim", `{"channel":"lp","epoch":"0"}`, alice, 60, true))
+	record("distributor", "claim", "lp channel", call(t, &ct, pC3, "claim",
+		lpBook.claimFor(t, "lp", "0", alice), alice, 60, true))
 
 	record("C1 staking", "claimYield", "local stake history", call(t, &ct, pC1, "claimYield",
 		`{"epoch":"0"}`, alice, 60, true))

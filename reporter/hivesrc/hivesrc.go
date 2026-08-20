@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"magi_token/reporter/sharecore"
@@ -118,10 +119,116 @@ type RawPost struct {
 	Stats *struct {
 		IsPinned bool `json:"is_pinned"`
 	} `json:"stats"`
+
+	// MaxAcceptedPayout is how an author declines their payout: they set it to
+	// "0.000 HBD". Hive has no boolean for this, so the amount IS the flag.
+	MaxAcceptedPayout string `json:"max_accepted_payout"`
+
+	// JSONMetadata carries the post's tags and the app that published it. It is a
+	// STRING containing JSON, not nested JSON, and it is author-controlled — a
+	// malformed blob is normal and must never fail an epoch.
+	JSONMetadata string `json:"json_metadata"`
 }
 
 // pinned reports whether the community has pinned this post to the top of its feed.
 func (p RawPost) pinned() bool { return p.Stats != nil && p.Stats.IsPinned }
+
+// declined reports that the author refused their Hive payout by zeroing
+// max_accepted_payout. Anything unparseable or absent counts as NOT declined: the
+// field is often omitted by lighter API shapes, and defaulting to "declined" there
+// would silently stop paying everyone.
+func (p RawPost) declined() bool {
+	s := strings.TrimSpace(p.MaxAcceptedPayout)
+	if s == "" {
+		return false
+	}
+	amount := s
+	if i := strings.IndexByte(amount, ' '); i >= 0 {
+		amount = amount[:i]
+	}
+	for _, r := range amount {
+		if r >= '1' && r <= '9' {
+			return false // any non-zero digit means a payout is still accepted
+		}
+	}
+	return true
+}
+
+// meta is the parsed json_metadata. Author-controlled, so every field is optional
+// and a parse failure yields the zero value rather than an error.
+type meta struct {
+	Tags []string `json:"tags"`
+	App  string   `json:"app"`
+}
+
+// parseMeta decodes json_metadata defensively.
+//
+// `app` is usually a string ("peakd/2023.1") but some clients write an object or an
+// array, and `tags` is occasionally a bare string rather than a list. Both are
+// decoded leniently because this is untrusted author input on a path that must not
+// fail an epoch.
+func (p RawPost) parseMeta() meta {
+	var m meta
+	if p.JSONMetadata == "" {
+		return m
+	}
+	var loose struct {
+		Tags any `json:"tags"`
+		App  any `json:"app"`
+	}
+	if err := json.Unmarshal([]byte(p.JSONMetadata), &loose); err != nil {
+		return m
+	}
+	switch t := loose.Tags.(type) {
+	case string:
+		m.Tags = []string{t}
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				m.Tags = append(m.Tags, s)
+			}
+		}
+	}
+	switch a := loose.App.(type) {
+	case string:
+		m.App = a
+	case map[string]any:
+		// {"name":"peakd","version":"..."} — seen in the wild
+		if s, ok := a["name"].(string); ok {
+			m.App = s
+		}
+	}
+	return m
+}
+
+// tagSet is every tag this post can be matched on: its category (which carries the
+// community for a community post) plus its declared tags, lowercased.
+func (p RawPost) tagSet() map[string]bool {
+	out := map[string]bool{}
+	if c := strings.ToLower(strings.TrimSpace(p.Category)); c != "" {
+		out[c] = true
+	}
+	for _, t := range p.parseMeta().Tags {
+		if t = strings.ToLower(strings.TrimSpace(t)); t != "" {
+			out[t] = true
+		}
+	}
+	return out
+}
+
+// hasAnyTag reports whether the post carries any of the given tags.
+func (p RawPost) hasAnyTag(tags []string) bool {
+	if len(tags) == 0 {
+		return false
+	}
+	set := p.tagSet()
+	for _, t := range tags {
+		if set[strings.ToLower(strings.TrimSpace(t))] {
+			return true
+		}
+	}
+	return false
+}
 
 // RawVote is the subset of get_active_votes we use.
 type RawVote struct {
@@ -133,13 +240,36 @@ type RawVote struct {
 
 // Options configures one epoch's collection.
 type Options struct {
-	Tag            string     // tribe tag, e.g. "mytribe"
+	// Tags are the tribe tags or communities to walk. Each is a separate feed
+	// request; a post appearing under several is collected ONCE.
+	Tags           []string
 	Limit          int        // max posts to consider
 	Mode           WeightMode // where vote weight comes from
 	SnapshotHeight uint64     // for WeightTokenStake
 	Stake          StakeReader
 	// ExcludeAccounts are dropped entirely (SCOT muting / app filters).
 	ExcludeAccounts []string
+	// ExcludedTags drop a post that carries any of them, applied AFTER the Tags
+	// walk. Matched against the post's category and its json_metadata tags.
+	ExcludedTags []string
+	// PayoutWindow is how long voting stays open before a post pays. Zero means
+	// Hive's own DefaultPayoutPeriod.
+	PayoutWindow time.Duration
+	// IgnoreDeclinedPayout pays authors who declined their Hive payout. Default
+	// false honours the decline.
+	IgnoreDeclinedPayout bool
+	// DisableDownvotes drops negative votes instead of letting them net off.
+	DisableDownvotes bool
+	// Mana is the token_stake vote budget. Nil disables it, which is correct for
+	// hive_rshares, where the rshares already carry Hive's own mana.
+	Mana *ManaPolicy
+	// AppTax, when non-nil, marks posts published outside the designated apps so
+	// the share computation can skim them.
+	AppTax *AppTaxPolicy
+	// ManaScale is filled in by Collect after it has seen the whole epoch: mana is
+	// spent across every post a voter touched, so it cannot be computed one post at
+	// a time. Nil means full power for every vote.
+	ManaScale map[string]int64
 
 	// Since/Until bound the CREATION-time window used to walk the feed. The caller
 	// shifts this back by the payout period, because the feed can only be paged by
@@ -166,8 +296,72 @@ type Options struct {
 // The cost is that rewards lag one payout period behind posting, exactly as they do
 // natively on Hive.
 
-// PayoutPeriod is how long Hive keeps voting open on a post.
-const PayoutPeriod = 7 * 24 * time.Hour
+// DefaultPayoutPeriod is how long Hive itself keeps voting open on a post. A pool
+// may shorten or lengthen its own window via Options.PayoutWindow; this is what it
+// gets when it does not.
+const DefaultPayoutPeriod = 7 * 24 * time.Hour
+
+// payoutWindow resolves the configured window, falling back to Hive's.
+func (o Options) payoutWindow() time.Duration {
+	if o.PayoutWindow > 0 {
+		return o.PayoutWindow
+	}
+	return DefaultPayoutPeriod
+}
+
+// ManaPolicy is the token_stake vote budget: a regenerating allowance that makes a
+// vote cost something.
+//
+// Without it, weighing a vote by staked balance lets one account vote every post in
+// the epoch at full weight, because nothing is consumed. SCOT's numbers are mirrored
+// directly: Consumption is in HUNDREDTHS OF A PERCENT of full power, so 200 = 2% per
+// full vote = 50 votes to empty, and RegenDays is how long 0 -> 100% takes.
+//
+// ★ SCOPE OF THE SIMULATION, which is a real limitation and not a rounding detail.
+// SCOT keeps mana in its own persistent state, carried across epochs forever. The
+// reporter holds no state between runs by design — chain state decides what still
+// needs doing — so mana here is replayed WITHIN the epoch's own vote set, every
+// voter starting at full power. An account that exhausted itself in the previous
+// epoch therefore starts fresh in this one.
+//
+// That is deterministic, which is what Attest and the challenge window require, and
+// it prices voting WITHIN an epoch correctly. It does not price it ACROSS epochs.
+// Making it continuous would mean either reporter-side state (which two Attest
+// machines could disagree about) or mana in contract state (a write per vote), and
+// neither is worth it until an epoch is short enough for cross-epoch carryover to
+// matter.
+type ManaPolicy struct {
+	RegenDays            int
+	Consumption          int // hundredths of a percent per full vote
+	DownvoteRegenDays    int
+	DownvoteConsumption  int
+}
+
+// AppTaxPolicy skims from posts published outside a designated app.
+//
+// The `app` is self-declared in json_metadata, so this is an incentive aimed at
+// ordinary clients, never an enforcement mechanism — anyone posting via the API can
+// claim any app they like.
+type AppTaxPolicy struct {
+	Bps         int
+	Apps        []string // matched on the part before "/", so "peakd/2023.1" matches "peakd"
+	Beneficiary string
+}
+
+// designated reports whether a post's declared app is one of the blessed ones.
+func (p *AppTaxPolicy) designated(app string) bool {
+	name := app
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name = name[:i]
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, a := range p.Apps {
+		if strings.ToLower(strings.TrimSpace(a)) == name {
+			return true
+		}
+	}
+	return false
+}
 
 // Collect fetches the epoch's posts and votes and maps them to sharecore input.
 // The returned slice is sorted so downstream determinism does not depend on the
@@ -183,8 +377,22 @@ func Collect(tr Transport, opt Options) ([]sharecore.Post, error) {
 	}
 
 	out := make([]sharecore.Post, 0, len(raw))
+	kept := make([]postVotes, 0, len(raw))
 	for _, p := range raw {
 		if p.Author == "" || p.Permlink == "" || excl["hive:"+p.Author] {
+			continue
+		}
+		// Exclusion beats inclusion: a post reached through an indexed tag is still
+		// dropped if it carries an excluded one.
+		if p.hasAnyTag(opt.ExcludedTags) {
+			continue
+		}
+		// An author who zeroed max_accepted_payout declined their Hive payout, and by
+		// default this pool honours that. Skipping the post entirely rather than
+		// zeroing only the author's cut is deliberate: paying curators to farm a post
+		// whose author wanted no payout is the loophole that makes the setting
+		// pointless.
+		if !opt.IgnoreDeclinedPayout && p.declined() {
 			continue
 		}
 		// The whole point of payout attribution is that voting has CLOSED, so a post
@@ -202,10 +410,28 @@ func Collect(tr Transport, opt Options) ([]sharecore.Post, error) {
 			[]any{p.Author, p.Permlink}, &votes); err != nil {
 			return nil, fmt.Errorf("votes for @%s/%s: %w", p.Author, p.Permlink, err)
 		}
-		post, err := MapPost(p, votes, opt, excl)
+		kept = append(kept, postVotes{p, votes})
+	}
+
+	// Mana is spent across EVERY post a voter touched this epoch, so it can only be
+	// replayed once the whole epoch's votes are in hand. This is why collection is
+	// two passes rather than mapping each post as it arrives.
+	if opt.Mana != nil {
+		scales, err := replayMana(kept, opt, excl)
 		if err != nil {
 			return nil, err
 		}
+		opt.ManaScale = scales
+	}
+
+	for _, pv := range kept {
+		post, err := MapPost(pv.post, pv.votes, opt, excl)
+		if err != nil {
+			return nil, err
+		}
+		// A post with no positive votes can still be a rewardable item once
+		// downvotes exist — but with nothing to divide it earns nothing either way,
+		// so it is dropped here rather than carried as an empty entry.
 		if len(post.Votes) > 0 {
 			out = append(out, post)
 		}
@@ -233,12 +459,46 @@ func Collect(tr Transport, opt Options) ([]sharecore.Post, error) {
 //     implementation — therefore returns nothing at all for any community that
 //     pins anything. Pinned posts are excluded from the ordering decision (they
 //     are still scored if they happen to fall inside the window).
+// FetchPosts walks every configured tag and returns the union.
+//
+// One feed request per tag: bridge.get_ranked_posts takes a single tag, so five tags
+// is five walks. A post carried by several tags is collected ONCE — `collected`
+// spans the tags for exactly that reason, while each walk keeps its own `seen` for
+// cursor-repeat protection so one tag's dedupe cannot end another tag's walk early.
 func FetchPosts(tr Transport, opt Options) ([]RawPost, error) {
-	const pageMax = 20 // hard node limit; verified against api.hive.blog
 	limit := opt.Limit
 	if limit <= 0 {
 		limit = 1000
 	}
+	collected := map[string]bool{}
+	var out []RawPost
+	for _, tag := range opt.Tags {
+		got, err := fetchTag(tr, opt, tag, limit, collected)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
+	}
+	// Canonical order BEFORE any truncation: with several tags merged, ordering by
+	// arrival would make the result depend on tag order in the config, and two
+	// Attest machines with the same tags listed differently would disagree.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Created != out[j].Created {
+			return out[i].Created < out[j].Created
+		}
+		if out[i].Author != out[j].Author {
+			return out[i].Author < out[j].Author
+		}
+		return out[i].Permlink < out[j].Permlink
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func fetchTag(tr Transport, opt Options, tag string, limit int, collected map[string]bool) ([]RawPost, error) {
+	const pageMax = 20 // hard node limit; verified against api.hive.blog
 
 	var (
 		out                        []RawPost
@@ -246,7 +506,7 @@ func FetchPosts(tr Transport, opt Options) ([]RawPost, error) {
 		seen                       = map[string]bool{}
 	)
 	for len(out) < limit {
-		req := map[string]any{"sort": "created", "tag": opt.Tag, "limit": pageMax}
+		req := map[string]any{"sort": "created", "tag": tag, "limit": pageMax}
 		if startAuthor != "" {
 			req["start_author"] = startAuthor
 			req["start_permlink"] = startPermlink
@@ -305,6 +565,11 @@ func FetchPosts(tr Transport, opt Options) ([]RawPost, error) {
 					continue
 				}
 			}
+			// already collected under an earlier tag — indexed once, paid once
+			if collected[key] {
+				continue
+			}
+			collected[key] = true
 			out = append(out, p)
 			if len(out) >= limit {
 				break
@@ -384,20 +649,59 @@ func MapPost(p RawPost, votes []RawVote, opt Options, excl map[string]bool) (sha
 		return ordered[i].Voter < ordered[j].Voter
 	})
 
-	post := sharecore.Post{Author: "hive:" + p.Author, Permlink: p.Permlink}
+	post := sharecore.Post{
+		Author:     "hive:" + p.Author,
+		Permlink:   p.Permlink,
+		Downweight: new(big.Int),
+	}
+	// A post published outside the designated apps is marked here; the skim itself
+	// happens in sharecore, which owns the arithmetic.
+	if opt.AppTax != nil && !opt.AppTax.designated(p.parseMeta().App) {
+		post.TaxBps = opt.AppTax.Bps
+	}
+
 	for i, v := range ordered {
 		w, err := voteWeight(v, opt)
 		if err != nil {
 			return post, err
 		}
-		if w == nil || w.Sign() <= 0 {
-			continue // downvotes and zero-weight votes contribute nothing
+		if w == nil || w.Sign() == 0 {
+			continue // zero-weight vote: no stake, or a 0% vote
+		}
+		w = applyMana(w, opt.manaScaleFor(p, v))
+
+		if w.Sign() < 0 {
+			// Downvote. It nets off the post's total but never joins Votes, so it
+			// cannot draw curation rewards — see sharecore.Post.Downweight.
+			if opt.DisableDownvotes {
+				continue
+			}
+			post.Downweight.Add(post.Downweight, new(big.Int).Neg(w))
+			continue
 		}
 		post.Votes = append(post.Votes, sharecore.Vote{
 			Voter: "hive:" + v.Voter, Weight: w, Order: i,
 		})
 	}
 	return post, nil
+}
+
+// manaScaleFor returns the voter's remaining power for this vote, or full power when
+// no mana policy is in force.
+func (o Options) manaScaleFor(p RawPost, v RawVote) int64 {
+	if o.ManaScale == nil {
+		return manaFull
+	}
+	if s, ok := o.ManaScale[manaKey(v.Voter, p.Author, p.Permlink)]; ok {
+		return s
+	}
+	return manaFull
+}
+
+// manaKey identifies one vote. A voter votes a given post at most once, so the
+// triple is unique within an epoch.
+func manaKey(voter, author, permlink string) string {
+	return voter + "|" + author + "|" + permlink
 }
 
 func voteWeight(v RawVote, opt Options) (*big.Int, error) {
@@ -410,20 +714,25 @@ func voteWeight(v RawVote, opt Options) (*big.Int, error) {
 		if err != nil {
 			return nil, err
 		}
-		if st == nil || st.Sign() <= 0 || v.Percent <= 0 {
+		if st == nil || st.Sign() <= 0 || v.Percent == 0 {
 			return new(big.Int), nil
 		}
-		// stake * percent / 10000  (Hive vote percent is in hundredths of a %)
+		// stake * percent / 10000  (Hive vote percent is in hundredths of a %).
+		// A negative percent is a downvote and keeps its sign: MapPost decides
+		// whether that nets off the post or is discarded.
 		w := new(big.Int).Mul(st, big.NewInt(int64(v.Percent)))
-		return w.Div(w, big.NewInt(10000)), nil
+		return w.Quo(w, big.NewInt(10000)), nil
 	default: // WeightHiveRshares
 		return parseRshares(v.Rshares), nil
 	}
 }
 
-// parseRshares accepts the string or numeric form nodes may return. Negative
-// (downvote) rshares clamp to zero: the contract cannot take shares away, and
-// downvote policy is applied by producing NET non-negative shares.
+// parseRshares accepts the string or numeric form nodes may return.
+//
+// The sign is PRESERVED. Downvote policy is decided in MapPost — dropped when
+// downvotes are disabled, netted against the post's total when they are not — and a
+// clamp here would take that choice away by making every downvote invisible. The
+// post's final weight still floors at zero: the contract cannot take shares away.
 func parseRshares(v any) *big.Int {
 	n := new(big.Int)
 	switch t := v.(type) {
@@ -440,8 +749,51 @@ func parseRshares(v any) *big.Int {
 	default:
 		return new(big.Int)
 	}
-	if n.Sign() < 0 {
-		return new(big.Int)
-	}
 	return n
+}
+
+// postVotes pairs a fetched post with its votes between Collect's two passes.
+type postVotes struct {
+	post  RawPost
+	votes []RawVote
+}
+
+// replayMana builds the per-vote power scale for the whole epoch.
+//
+// Only votes that would actually count are replayed: excluded accounts and votes
+// cast after the cutoff spend nothing, because they earn nothing. Including them
+// would let a muted account drain a voter's budget.
+func replayMana(kept []postVotes, opt Options, excl map[string]bool) (map[string]int64, error) {
+	var all []manaVote
+	for _, pv := range kept {
+		cutoff, err := VoteCutoff(pv.post, opt)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range pv.votes {
+			if v.Voter == "" || excl["hive:"+v.Voter] || v.Percent == 0 {
+				continue
+			}
+			down := v.Percent < 0
+			if down && opt.DisableDownvotes {
+				continue // a discarded downvote costs nothing
+			}
+			cast, terr := ParseHiveTime(v.Time)
+			if terr != nil {
+				return nil, fmt.Errorf("@%s/%s: vote by %s has an unusable time %q: %w",
+					pv.post.Author, pv.post.Permlink, v.Voter, v.Time, terr)
+			}
+			if !cutoff.IsZero() && cast.After(cutoff) {
+				continue
+			}
+			all = append(all, manaVote{
+				voter:   v.Voter,
+				when:    cast,
+				percent: v.Percent,
+				down:    down,
+				key:     manaKey(v.Voter, pv.post.Author, pv.post.Permlink),
+			})
+		}
+	}
+	return manaScales(all, *opt.Mana), nil
 }

@@ -31,6 +31,7 @@ package main
 import (
 	"magi_token/adapter"
 	"magi_token/auth"
+	"magi_token/events"
 	"magi_token/sdk"
 	"math/big"
 	"strconv"
@@ -59,7 +60,22 @@ const (
 	// kYieldOutstanding is yield pulled from C2 but not yet claimed or swept. Tracked
 	// incrementally because deriving it would mean summing every epoch ever funded.
 	kYieldOutstanding = "yield_outstanding"
-	maxClaim          = 20 // bound RC per claimUnstaked call
+	// kUnstakeOutstanding is principal that has left total_staked but not yet left the
+	// contract: unstaked, queued, serving its cooldown.
+	//
+	// `unstake` has to drop total_staked immediately or an account on its way out keeps
+	// earning weight, but it moves no tokens — they sit in custody until claimUnstaked.
+	// Without this term the envelope counts that money as free float for the whole
+	// cooldown, which init requires to exceed a full epoch, and both spenders of float
+	// (airdropBatch, sweepUnobligated) will send a staker's principal elsewhere. That
+	// is not hypothetical: sweepUnobligated returned {"swept":"1000"} against a queued
+	// withdrawal and the staker's own claimUnstaked then failed on "Insufficient
+	// balance". See itest/unstake_envelope_test.go.
+	//
+	// Tracked incrementally for the same reason as yield above: deriving it would mean
+	// walking every account's us| queue.
+	kUnstakeOutstanding = "unstake_outstanding"
+	maxClaim            = 20 // bound RC per claimUnstaked call
 )
 
 func assertInit() {
@@ -96,6 +112,19 @@ func Init(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only contract owner can init")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and init pins the token, treasury, guardian set and stakeFor allowlist, once.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
 	tok := field(payload, "token")
 	if tok == "" {
 		sdk.Abort("token required")
@@ -216,8 +245,23 @@ func Init(payload *string) *string {
 
 	setBig(kTotal, new(big.Int))
 	setBig(kYieldOutstanding, new(big.Int))
+	setBig(kUnstakeOutstanding, new(big.Int))
 	sdk.StateSetObject(kCkptN, "0")
 	sdk.StateSetObject(kInit, "1")
+	// Discovery anchor for the indexer — see the note on c2_init. Emitted last so it
+	// only ever describes a deployment that fully initialised.
+	events.New("c1_init").
+		Str("token", tok).
+		Str("owner", *owner).
+		Str("cooldown", cd).
+		Str("epoch_len", field(payload, "epochLen")).
+		Str("funder", getStr(kFunder)).
+		Str("genesis", getStr(kGenesis)).
+		Str("treasury", getStr(kTreasury)).
+		Str("max_airdrop", getStr(kMaxAir)).
+		Bool("airdrop_staked", getStr(kAirStake) == "1").
+		Str("allow", field(payload, "allow")).
+		Emit()
 	return ok()
 }
 
@@ -250,12 +294,29 @@ func StakeFor(payload *string) *string {
 	if !present("allow|" + c) {
 		sdk.Abort("caller not in stakeFor allowlist")
 	}
-	auth.RequireActive(c, reqAuths()) // CRIT-2
+	// UnlessContract, not RequireActive. The check exists to stop a posting key
+	// standing in for an active one, and a CONTRACT caller has no key at all — the
+	// runtime supplies "contract:<id>", which can never appear in required_auths.
+	// Insisting on it here would make stakeFor unreachable from another contract,
+	// which is precisely how a distributor pays a reward straight into stake. The
+	// allowlist above is what authorises a contract, and it is immutable after init.
+	auth.RequireActiveUnlessContract(c, reqAuths()) // CRIT-2
 	acct := field(payload, "acct")
 	if acct == "" {
 		sdk.Abort("acct required")
 	}
 	validateAddr(acct)
+	// A ledger DOMAIN, not just a well-formed string. msg.caller is always
+	// domain-qualified, so stake credited to a bare "alice" can never be unstaked by
+	// anyone — and it still enters total_staked, which is the yield denominator, so it
+	// dilutes every other staker for the life of the deployment by a share nobody can
+	// claim. airdropBatch, the treasury check at init, and C3's applyEntries all
+	// enforce this; stakeFor was the one path that did not.
+	if !isLedgerAddr(acct) {
+		sdk.Abort("acct must be a ledger address (hive:/contract:/did:/system:) — stake " +
+			"credited to a bare name can never be unstaked and would dilute every other " +
+			"staker's yield permanently")
+	}
 	amt := mustAmount(payload)
 	creditFor(c, acct, amt)
 	return ok()
@@ -289,11 +350,23 @@ func Unstake(payload *string) *string {
 	noteDrawdown(c, cur, newStake, h) // BEFORE appendHist — see the function doc
 	appendHist(c, h, newStake)
 	appendCkpt(h, total)
-	// queue withdrawal
+	// queue withdrawal. The amount leaves total_staked above but NOT the contract, so
+	// it moves from one obligation to another rather than becoming free float.
+	setBig(kUnstakeOutstanding, new(big.Int).Add(getBig(kUnstakeOutstanding), amt))
 	tail := idx("us_tail|" + c)
+	ready := h + cooldown()
 	sdk.StateSetObject("us|"+c+"|"+strconv.FormatUint(tail, 10),
-		amt.String()+":"+strconv.FormatUint(h+cooldown(), 10))
+		amt.String()+":"+strconv.FormatUint(ready, 10))
 	sdk.StateSetObject("us_tail|"+c, strconv.FormatUint(tail+1, 10))
+	events.New("unstake").
+		Str("acct", c).
+		Big("amount", amt).
+		Big("new_stake", newStake).
+		Big("new_total", total).
+		U64("height", h).
+		U64("ready_height", ready).
+		U64("queue_idx", tail).
+		Emit()
 	return ok()
 }
 
@@ -316,7 +389,14 @@ func ClaimUnstaked(_ *string) *string {
 	tail := idx("us_tail|" + c)
 	paid := new(big.Int)
 	n := 0
-	for head < tail && n < maxClaim {
+	// maxClaim bounds ITERATIONS, not payments. It used to bound `n`, which only
+	// increments when an entry is actually paid — so the defensive branch below for a
+	// missing queue entry advanced the head and continued without counting, and a run
+	// of empty slots would have iterated unbounded in one call. No gap can form (an
+	// entry is deleted only as it is paid, and the head advances past it in the same
+	// transaction), so this was a bound held by an invariant rather than by the guard
+	// that appears to enforce it. Now the guard holds it.
+	for steps := 0; head < tail && steps < maxClaim; steps++ {
 		key := "us|" + c + "|" + strconv.FormatUint(head, 10)
 		v := sdk.StateGetObject(key)
 		if v == nil || *v == "" {
@@ -333,10 +413,30 @@ func ClaimUnstaked(_ *string) *string {
 		sdk.StateDeleteObject(key)
 		head++
 		n++
-		adapter.Transfer(asset(), c, amt)
 		paid.Add(paid, amt)
 	}
 	sdk.StateSetObject("us_head|"+c, strconv.FormatUint(head, 10))
+	// ONE transfer for the whole batch rather than one per matured entry. Every
+	// iteration paid the SAME recipient the SAME asset and differed only in amount,
+	// so up to maxClaim(20) cross-contract calls were doing one call's work — about
+	// 4,000 RC on a full claim at the token's measured per-transfer cost.
+	//
+	// CEI is unaffected, and in fact strengthened: every delete and the head advance
+	// now complete before anything external is touched, rather than interleaving.
+	if paid.Sign() > 0 {
+		// Release the obligation BEFORE the transfer, with the deletes and the head
+		// advance above — the money is about to stop being owed because it is about to
+		// be handed over. Leaving it counted would ratchet the reserve up forever and
+		// make genuinely free float permanently unsweepable.
+		setBig(kUnstakeOutstanding, new(big.Int).Sub(getBig(kUnstakeOutstanding), paid))
+		adapter.Transfer(asset(), c, paid)
+		events.New("unstake_claim").
+			Str("acct", c).
+			Big("amount", paid).
+			Int("entries", n).
+			U64("new_head", head).
+			Emit()
+	}
 	return str(`{"claimed":"` + paid.String() + `"}`)
 }
 
@@ -357,8 +457,19 @@ func ScheduleInfo(_ *string) *string {
 	// instance actually means.
 	// `genesis` is empty until adoptSchedule runs. C7 reads it to confirm this C1 is
 	// actually accumulating drawdowns before it agrees to pay against them.
+	// `token` is here so a distributor naming this contract as its stake target can
+	// check they hold the SAME asset. c3-distributor's init has always contained that
+	// comparison — `if tok := pickField(si, "token"); tok != "" && tok != ...` — but
+	// this response carried no token field, so pickField returned "" and the guard
+	// could never fire.
+	//
+	// It matters because cfg_stakeContract is pinned at init and immutable, and a
+	// claim's staked half goes out as approve-then-stakeFor, which pulls THIS
+	// contract's asset from the distributor. Mismatched tokens mean that pull finds
+	// nothing and every claim carrying a staked portion aborts, permanently, with no
+	// way to repoint the target.
 	return str(`{"epochLen":"` + getStr(kEpochLen) + `","cooldown":"` + getStr(kCooldown) +
-		`","genesis":"` + getStr(kGenesis) + `"}`)
+		`","genesis":"` + getStr(kGenesis) + `","token":"` + getStr(kToken) + `"}`)
 }
 
 //go:wasmexport stakeOf
@@ -410,7 +521,36 @@ func AdoptSchedule(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only contract owner can adopt the schedule")
 	}
-	if present(kGenesis) {
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and adoptSchedule is one-shot, so reaching it spends the only chance to configure yield.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
+	// The genesis anchor is immutable — but that is ALL this guard may protect.
+	//
+	// It used to refuse the whole call whenever cfg_genesis was set, and init's
+	// `funder` shortcut sets it. adoptSchedule is the only writer of cfg_bucket, so
+	// the shortcut permanently refused the one call that arms the yield bucket:
+	// pullFunding then aborted on "no yield bucket adopted" forever while C2 kept
+	// accruing owed|yield|<ep> that only this contract may claim. Measured at five
+	// epochs: C2 holding 500,000, C1 holding 0, unrecoverable without redeploying
+	// BOTH contracts, since C2's bucket table is immutable and pinned to the dead C1.
+	//
+	// The abort text always said the danger was RE-ANCHORING, which is about the
+	// genesis and the drawdowns recorded against it — not about naming a bucket. So
+	// an already-anchored instance may still adopt its bucket, provided it re-states
+	// the SAME funder and that funder still reports the SAME genesis. Nothing about
+	// the anchor moves; the bucket stays one-shot on its own guard below.
+	anchored := present(kGenesis)
+	if anchored && present(kBucket) {
 		sdk.Abort("schedule already adopted (immutable: re-anchoring would invalidate every drawdown already recorded)")
 	}
 	fu := field(payload, "funder")
@@ -431,6 +571,23 @@ func AdoptSchedule(payload *string) *string {
 	if _, err := strconv.ParseUint(sg, 10, 64); err != nil {
 		sdk.Abort("funder genesis is not a uint")
 	}
+	// An instance already anchored by init's shortcut may only fill in its bucket. It
+	// must name the SAME funder reporting the SAME genesis, so nothing that a drawdown
+	// was recorded against can move underneath it. A different funder, or one whose
+	// genesis has changed, is the re-anchoring the guard above exists to refuse.
+	if anchored {
+		if fu != getStr(kFunder) {
+			sdk.Abort("schedule already anchored to a different funder — re-anchoring would " +
+				"invalidate every drawdown already recorded")
+		}
+		if sg != getStr(kGenesis) {
+			sdk.Abort("that funder now reports a different genesis than this contract is " +
+				"anchored to — re-anchoring would invalidate every drawdown already recorded")
+		}
+		if field(payload, "bucket") == "" {
+			sdk.Abort("schedule already adopted — supply the bucket this call is here to adopt")
+		}
+	}
 	sdk.StateSetObject(kGenesis, sg)
 	sdk.StateSetObject(kFunder, fu)
 	// The yield bucket is adopted here for the same reason as the genesis: it names a
@@ -449,6 +606,12 @@ func AdoptSchedule(payload *string) *string {
 		}
 		sdk.StateSetObject(kBucket, bucket)
 	}
+	events.New("schedule_adopted").
+		Str("funder", fu).
+		Str("genesis", sg).
+		Str("epoch_len", se).
+		Str("bucket", getStr(kBucket)).
+		Emit()
 	return ok()
 }
 
@@ -466,29 +629,51 @@ func MinStakeSum(payload *string) *string {
 	if el == 0 || !present(kGenesis) {
 		return str(`{"total":""}`)
 	}
-	g := idx(kGenesis)
 	ep, err := strconv.ParseUint(field(payload, "epoch"), 10, 64)
 	if err != nil {
 		sdk.Abort("epoch required")
 	}
-	// `epoch` is caller-supplied, so g+ep*el must not be allowed to wrap: a wrapped
-	// start height lands on a real checkpoint and would report a confident, wrong
-	// denominator for an epoch that does not exist.
-	if ep > (^uint64(0)-g)/el {
+	return str(`{"total":"` + minStakeSumAt(ep).String() + `"}`)
+}
+
+// epochBounds returns the first and last block of `ep`, and is the ONLY place this
+// contract turns an epoch index into heights.
+//
+// It exists because the wrap guard used to live in exactly one place — the read-only
+// minStakeSum query — while claimYield, sweepEmptyEpoch and minStakeSumAt did the same
+// `g + ep*el` arithmetic on the same caller-supplied index with no check at all. The
+// guard was on the path that moves nothing and absent from the three that move tokens.
+//
+// A wrapped end height is small, so `end >= blockHeight()` passes and an epoch that
+// does not exist looks fully elapsed; ckptAt/histAt then binary-search to a REAL
+// checkpoint at that wrapped height and return a confident, wrong number. Nothing could
+// reach it — every caller is gated behind funded > 0 for that epoch, and funding only
+// exists for epochs C2 actually distributed — but that is a precondition in another
+// contract, not a check where the arithmetic happens.
+//
+// The bound is stricter than the old one because it covers what the callers actually
+// compute: g + (ep+1)*el - 1, not just g + ep*el. It can only refuse epoch indices near
+// 2^64, which no elapsed-block count can produce.
+func epochBounds(ep uint64) (uint64, uint64) {
+	g, el := idx(kGenesis), idx(kEpochLen)
+	if el == 0 {
+		sdk.Abort("no schedule adopted")
+	}
+	if ep+1 < ep || ep+1 > (^uint64(0)-g)/el {
 		sdk.Abort("epoch out of range")
 	}
-	return str(`{"total":"` + minStakeSumAt(ep).String() + `"}`)
+	start := g + ep*el
+	return start, g + (ep+1)*el - 1
 }
 
 // minStakeSumAt is the exact Σᵢ min(aᵢ,bᵢ) for a CLOSED epoch: the epoch-start total
 // less everything that dropped below its starting level. Shared by the query above
 // and by claimYield, so an external verifier and the payout can never disagree.
 func minStakeSumAt(ep uint64) *big.Int {
-	g, el := idx(kGenesis), idx(kEpochLen)
-	start := g + ep*el
+	start, end := epochBounds(ep)
 	// Refuse while the epoch is still open: the drawdown is still moving, so an
 	// answer now could exceed the final one and over-pay whoever claimed early.
-	if start+el-1 >= blockHeight() {
+	if end >= blockHeight() {
 		sdk.Abort("epoch not fully elapsed")
 	}
 	v := new(big.Int).Sub(ckptAt(start), getBig("dd|"+strconv.FormatUint(ep, 10)))
@@ -502,15 +687,19 @@ func minStakeSumAt(ep uint64) *big.Int {
 
 func credit(acct string, amt *big.Int) {
 	adapter.PullFrom(asset(), acct, amt) // pull from acct (must have approved us)
-	applyCredit(acct, amt)
+	applyCredit(acct, amt, "stake")
 }
 
 func creditFor(from, acct string, amt *big.Int) {
 	adapter.PullFrom(asset(), from, amt) // pull from the allowlisted caller
-	applyCredit(acct, amt)
+	applyCredit(acct, amt, "stakeFor")
 }
 
-func applyCredit(acct string, amt *big.Int) {
+// applyCredit records a stake increase. `via` names the entrypoint that caused it
+// — stake, stakeFor or airdrop — because all three land here and an indexer
+// reading only the resulting balance cannot tell a purchase from a migration
+// credit, which are very different things to a tenant reading their own numbers.
+func applyCredit(acct string, amt *big.Int, via string) {
 	old := getBig("stake|" + acct)
 	newStake := new(big.Int).Add(old, amt)
 	setBig("stake|"+acct, newStake)
@@ -520,20 +709,63 @@ func applyCredit(acct string, amt *big.Int) {
 	noteDrawdown(acct, old, newStake, h) // BEFORE appendHist — see the function doc
 	appendHist(acct, h, newStake)
 	appendCkpt(h, total)
+	events.New("stake").
+		Str("acct", acct).
+		Str("via", via).
+		Big("amount", amt).
+		Big("new_stake", newStake).
+		Big("new_total", total).
+		U64("height", h).
+		Emit()
 }
 
+// SAME-HEIGHT ENTRIES COLLAPSE. Several mutations inside one block used to append
+// several entries all carrying that block's height, and `searchVal` — which returns
+// the RIGHTMOST entry with height <= target — can only ever reach the last of them.
+// The earlier ones were paid for and then unreachable.
+//
+// It shows worst on `airdropBatch` with `airdropStaked=1`, where every recipient runs
+// through applyCredit in ONE transaction: a 25-holder batch appended 25 global
+// checkpoints where 1 was needed, and a 1,000-holder migration 1,000 — permanently,
+// since these arrays are never pruned and every later stakeAtHeight / claimYield /
+// minStakeSum binary-searches them at one host read per probe.
+//
+// Overwriting the last entry instead is exactly equivalent: the collapsed entry holds
+// the same value the search would have returned. The trade is one read for one write
+// per collision, and the read is skipped entirely when there is no previous entry —
+// which is every recipient of a migration, since each is a new account with no history.
 func appendCkpt(h uint64, total *big.Int) {
 	n := idx(kCkptN)
-	sdk.StateSetObject("ckpt|"+strconv.FormatUint(n, 10),
-		strconv.FormatUint(h, 10)+":"+total.String())
+	hs := strconv.FormatUint(h, 10)
+	rec := hs + ":" + total.String()
+	if n > 0 {
+		k := "ckpt|" + strconv.FormatUint(n-1, 10)
+		if prev := sdk.StateGetObject(k); prev != nil && *prev != "" {
+			if ph, _ := splitColon(*prev); ph == hs {
+				sdk.StateSetObject(k, rec)
+				return
+			}
+		}
+	}
+	sdk.StateSetObject("ckpt|"+strconv.FormatUint(n, 10), rec)
 	sdk.StateSetObject(kCkptN, strconv.FormatUint(n+1, 10))
 }
 
 func appendHist(acct string, h uint64, stake *big.Int) {
 	nk := "hist_n|" + acct
 	n := idx(nk)
-	sdk.StateSetObject("hist|"+acct+"|"+strconv.FormatUint(n, 10),
-		strconv.FormatUint(h, 10)+":"+stake.String())
+	hs := strconv.FormatUint(h, 10)
+	rec := hs + ":" + stake.String()
+	if n > 0 {
+		k := "hist|" + acct + "|" + strconv.FormatUint(n-1, 10)
+		if prev := sdk.StateGetObject(k); prev != nil && *prev != "" {
+			if ph, _ := splitColon(*prev); ph == hs {
+				sdk.StateSetObject(k, rec)
+				return
+			}
+		}
+	}
+	sdk.StateSetObject("hist|"+acct+"|"+strconv.FormatUint(n, 10), rec)
 	sdk.StateSetObject(nk, strconv.FormatUint(n+1, 10))
 }
 
@@ -609,6 +841,17 @@ func noteDrawdown(acct string, oldS, newS *big.Int, h uint64) {
 		d = new(big.Int) // defensive: a sum of non-negatives can never be negative
 	}
 	setBig(k, d)
+	// The accumulator is the one piece of C1's state that CANNOT be recomputed from
+	// the outside: it telescopes across every mutation in the epoch, so an observer
+	// replaying stake events alone would have to re-derive each account's
+	// epoch-start baseline to get the same number. Emitting the delta and the
+	// running value makes claimYield's denominator auditable.
+	events.New("drawdown").
+		U64("epoch", ep).
+		Str("acct", acct).
+		Big("delta", new(big.Int).Sub(newC, oldC)).
+		Big("new_dd", d).
+		Emit()
 }
 
 // drawdownOf = max(0, a-s): how far below its epoch-start level a stake now sits.
@@ -877,10 +1120,16 @@ func indexOf(s, sub string) int {
 // which is the single worst thing this file could do, so the check is explicit and
 // not inferred from balances.
 
-// obligations = principal + yield that has been funded but not yet claimed.
+// obligations = principal + yield funded but not yet claimed + principal that is
+// unstaked, queued and still serving its cooldown.
+//
+// That third term is easy to forget precisely because unstake already decremented
+// total_staked: the money looks accounted for and is not. It stays owed to the staker
+// until claimUnstaked hands it over.
 func obligations() *big.Int {
 	o := new(big.Int).Set(getBig(kTotal))
-	return o.Add(o, getBig(kYieldOutstanding))
+	o.Add(o, getBig(kYieldOutstanding))
+	return o.Add(o, getBig(kUnstakeOutstanding))
 }
 
 // pullFunding — pull this epoch's yield slice from C2 (permissionless).
@@ -892,6 +1141,28 @@ func PullFunding(payload *string) *string {
 		sdk.Abort("no yield bucket adopted — call adoptSchedule({funder,bucket}) after C2 is initialised")
 	}
 	ep := mustEpoch(payload)
+	// FUNDING IS FINAL ONCE ANYONE HAS BEEN PAID.
+	//
+	// y_funded accumulates (`+= got`), which reads as though several tranches per
+	// epoch were expected — but claimYield divides by whatever it happens to hold at
+	// the moment of the claim. A second tranche landing after the first claim would
+	// permanently underpay everyone who claimed early against everyone who claimed
+	// late, out of one pool, with no abort and no imbalance the contract could detect.
+	//
+	// That could not happen, but only because of how a DIFFERENT contract behaves:
+	// C2.claimBucket deletes `owed|bucket|epoch` before transferring and can never
+	// re-add it, since epochs only advance through its monotonic cfg_lastEpoch_v — so a
+	// second pull aborts inside C2 and reverts. The distributor has the equivalent
+	// protection locally (its pullFunding refuses once status is set); this contract
+	// had none, leaving the guarantee to a neighbour's delete semantics and to the
+	// `vsc.update_contract` upgrade path that the README already flags as untested.
+	//
+	// y_paid is written by claimYield and by sweepEmptyEpoch, so this also refuses to
+	// fund an epoch that was already swept as unclaimable. An epoch nobody has claimed
+	// yet is still freely toppable-up: nobody can have been shortchanged.
+	if getBig("y_paid|"+ep).Sign() > 0 {
+		sdk.Abort("epoch already paid out — funding is final once anyone has claimed")
+	}
 	res := sdk.ContractCall(getStr(kFunder), "claimBucket",
 		`{"epoch":"`+ep+`","bucket":"`+getStr(kBucket)+`"}`, nil)
 	got := parseBig(pickField(res, "claimed"))
@@ -900,6 +1171,12 @@ func PullFunding(payload *string) *string {
 	// Track the outstanding pool incrementally: recomputing it would mean summing
 	// every epoch ever funded, which grows without bound.
 	setBig(kYieldOutstanding, new(big.Int).Add(getBig(kYieldOutstanding), got))
+	events.New("yield_funded").
+		Str("epoch", ep).
+		Big("received", got).
+		Big("cumulative", getBig(k)).
+		Big("outstanding", getBig(kYieldOutstanding)).
+		Emit()
 	return str(`{"funded":"` + getBig(k).String() + `"}`)
 }
 
@@ -926,12 +1203,7 @@ func ClaimYield(payload *string) *string {
 	if present("y_swept|" + ep) {
 		sdk.Abort("epoch was swept as unclaimable")
 	}
-	g, el := idx(kGenesis), idx(kEpochLen)
-	if el == 0 {
-		sdk.Abort("no schedule adopted")
-	}
-	hStart := g + pu(ep)*el
-	hEnd := g + (pu(ep)+1)*el - 1
+	hStart, hEnd := epochBounds(pu(ep))
 	if hEnd >= blockHeight() {
 		sdk.Abort("epoch not fully elapsed")
 	}
@@ -957,6 +1229,17 @@ func ClaimYield(payload *string) *string {
 	setBig(pk, new(big.Int).Add(getBig(pk), payout))
 	setBig(kYieldOutstanding, new(big.Int).Sub(getBig(kYieldOutstanding), payout))
 	adapter.Transfer(asset(), c, payout)
+	// stake_used and denominator are both emitted so the payout can be re-derived
+	// off-chain: funded*stake/total is the whole rule, and an indexer that only
+	// stored the amount could never show a claimant WHY they received it.
+	events.New("yield_claim").
+		Str("epoch", ep).
+		Str("acct", c).
+		Big("payout", payout).
+		Big("stake_used", stake).
+		Big("denominator", total).
+		Big("funded", funded).
+		Emit()
 	return str(`{"claimed":"` + payout.String() + `"}`)
 }
 
@@ -972,11 +1255,7 @@ func ClaimYield(payload *string) *string {
 func SweepEmptyEpoch(payload *string) *string {
 	assertInit()
 	ep := mustEpoch(payload)
-	g, el := idx(kGenesis), idx(kEpochLen)
-	if el == 0 {
-		sdk.Abort("no schedule adopted")
-	}
-	if g+(pu(ep)+1)*el-1 >= blockHeight() {
+	if _, end := epochBounds(pu(ep)); end >= blockHeight() {
 		sdk.Abort("epoch not fully elapsed")
 	}
 	if minStakeSumAt(pu(ep)).Sign() != 0 {
@@ -995,6 +1274,12 @@ func SweepEmptyEpoch(payload *string) *string {
 	setBig("y_paid|"+ep, funded)
 	setBig(kYieldOutstanding, new(big.Int).Sub(getBig(kYieldOutstanding), residual))
 	adapter.Transfer(asset(), getStr(kTreasury), residual)
+	events.New("yield_sweep").
+		Str("epoch", ep).
+		Big("residual", residual).
+		Big("funded", funded).
+		Str("to", getStr(kTreasury)).
+		Emit()
 	return str(`{"swept":"` + residual.String() + `"}`)
 }
 
@@ -1089,16 +1374,19 @@ func AirdropBatch(payload *string) *string {
 	for _, e := range splitComma(field(payload, "entries")) {
 		acct, amtStr := split2(e)
 		if acct == "" {
+			emitSkip(batch, e, "no account")
 			continue
 		}
 		validateAddr(acct)
 		// Recipients are credited on the ledger; a bare "alice" would credit a balance
 		// no key can spend. Skipped like any other malformed entry.
 		if !isLedgerAddr(acct) {
+			emitSkip(batch, e, "not a ledger address")
 			continue
 		}
 		amt := parseBig(amtStr)
 		if amt.Sign() <= 0 {
+			emitSkip(batch, e, "amount not positive")
 			continue
 		}
 		list = append(list, entry{acct, amt})
@@ -1115,17 +1403,45 @@ func AirdropBatch(payload *string) *string {
 	}
 	for _, e := range list {
 		if staked {
-			applyCredit(e.acct, e.amt) // float becomes principal; nothing leaves
+			applyCredit(e.acct, e.amt, "airdrop") // float becomes principal; nothing leaves
 		} else {
+			// No per-recipient event here on purpose. The liquid path IS a token
+			// transfer, and the token contract already emits an indexed `transfer` log
+			// for each one, so a second log would cost RC to restate what the indexer
+			// records anyway. The staked path needs no per-recipient event either: it
+			// goes through applyCredit, which emits `stake` with via="airdrop".
 			adapter.Transfer(asset(), e.acct, e.amt)
 		}
 	}
 	setBig(kAirTotal, total)
+	events.New("airdrop").
+		Str("batch_id", batch).
+		Int("recipients", len(list)).
+		Big("sum", sum).
+		Big("cum_total", total).
+		Bool("staked", staked).
+		Emit()
 	out := `{"airdropped_total":"` + total.String() + `"`
 	if staked {
 		out += `,"staked":true`
 	}
 	return str(out + `}`)
+}
+
+// emitSkip records an entry the batch silently dropped.
+//
+// This is the single most valuable log in C1. A skipped entry is a no-op inside a
+// transaction that SUCCEEDS: the batch is marked applied, the totals look right,
+// and the recipient is simply never paid. It leaves no trace in the return value
+// and none in state, so before this it was undetectable on chain. Logs survive
+// only successful transactions, which is exactly the case here.
+func emitSkip(batch, raw, reason string) {
+	events.New("skip").
+		Str("scope", "airdrop").
+		Str("batch_id", batch).
+		Str("raw_entry", raw).
+		Str("reason", reason).
+		Emit()
 }
 
 // sweepUnobligated — owner recovers airdrop float that is left over.
@@ -1168,6 +1484,10 @@ func SweepUnobligated(_ *string) *string {
 			"or the airdrop capacity still to be spent")
 	}
 	adapter.Transfer(asset(), to, amt)
+	events.New("sweep_unobligated").
+		Big("amount", amt).
+		Str("to", to).
+		Emit()
 	return str(`{"swept":"` + amt.String() + `"}`)
 }
 

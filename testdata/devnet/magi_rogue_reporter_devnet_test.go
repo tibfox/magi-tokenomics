@@ -216,10 +216,17 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// lp: ATTEST mode, 2-of-3 — the configuration that exists precisely so no single
 	// reporter machine has to be trusted.
+	//
+	// Attest channels must declare a reporter policy digest. Its value is arbitrary
+	// to the contract, which only compares it for equality; what it buys is that two
+	// reporters cannot silently score the epoch by different rules, which in this
+	// mode deadlocks the epoch rather than paying anyone wrongly. This suite drives
+	// the contract directly rather than through `reporter`, so a stand-in digest is
+	// the honest thing to use — the real one is `reporter policy-digest`.
 	callN(1, c3ID, "addChannel", fmt.Sprintf(
-		`{"channel":"lp","bucket":"lp","window":"%d","reporterMode":"2",`+
+		`{"channel":"lp","bucket":"lp","window":"%d","reporterMode":"2","policy":"%s",`+
 			`"reporterAuth":"hive:%s,hive:%s,hive:%s","reporterThreshold":"2","role":"lp"}`,
-		window, rogue, honestB, honestC), "addChannel lp (attest 2-of-3)")
+		window, devnetTestPolicy, rogue, honestB, honestC), "addChannel lp (attest 2-of-3)")
 	waitKey(c3ID, "ch_bucket|lp", "lp channel registered")
 
 	// ---------------- PHASE 3: fund epoch 0 ----------------
@@ -236,8 +243,13 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	// Nothing prevents the reporter publishing a lie — that is the point of the
 	// role. What must hold is that the lie is *containable*.
 	t.Logf("PHASE A: rogue reporter publishes a fraudulent report on C3")
-	callN(1, c3ID, "submitShares", fmt.Sprintf(
-		`{"channel":"content","epoch":"0","page":"0","entries":"hive:%s:1000000"}`, rogue), "rogue submits 100%% to itself")
+	fraudBook := buildBook(t, map[string]string{"hive:" + rogue: "1000000"})
+	callN(1, c3ID, "submitShares", fraudBook.SubmitPayload("content", "0"), "rogue submits 100%% to itself")
+	// A rogue reporter commits a root for its own lie exactly as an honest one
+	// would — the commitment proves the book was published, not that it is fair.
+	// Containment is the guardian's veto, which is what the rest of this phase
+	// exercises; requiring a root changes nothing about that.
+	callN(1, c3ID, "submitRoot", fraudBook.RootPayload("content", "0"), "rogue commits its fraudulent root")
 	callN(1, c3ID, "finalizeEpoch", `{"channel":"content","epoch":"0"}`, "rogue finalizes its own fraud")
 	waitValue(c3ID, "totalShares|content|0", "1000000", "C3 totalShares (fraudulent)")
 	if st := waitKey(c3ID, "status|content|0", "C3 status"); st != "finalized" {
@@ -253,20 +265,26 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// funding must roll forward, not vanish and not be payable
 	waitValue(c3ID, "funded|content|0", "0", "C3 funded after cancel")
-	waitValue(c3ID, "unallocated", "5000", "C3 unallocated (rolled forward)")
+	waitValue(c3ID, "unalloc|content", "5000", "C3 unallocated (rolled forward)")
 
 	// and the rogue must get nothing, now or after the window
 	time.Sleep(time.Duration(window+5) * 3 * time.Second)
-	callN(1, c3ID, "claim", `{"channel":"content","epoch":"0"}`, "rogue tries to claim its fraudulent share")
+	// with its REAL proof against the root it committed, so the cancellation is
+	// what denies it rather than a missing proof
+	callN(1, c3ID, "claim", fraudBook.ClaimPayload(t, "content", "0", "hive:"+rogue),
+		"rogue tries to claim its fraudulent share")
 	time.Sleep(20 * time.Second)
 	if got := bal(rogue); got.Cmp(rogueBefore) != 0 {
 		t.Fatalf("ROGUE REPORTER GOT PAID: %s -> %s", rogueBefore, got)
 	}
 	t.Logf("  rogue claimed nothing (balance still %s)", rogueBefore)
 
-	// the rolled-forward funding is recoverable by the guardian to the PINNED treasury
-	callN(5, c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1"}`, "guardian sweeps the rolled-forward pool")
-	waitValue(c3ID, "unallocated", "0", "C3 unallocated after sweep")
+	// the rolled-forward funding is recoverable by the guardian to the PINNED treasury.
+	// The amount is DECLARED: guardians attest to a specific figure rather than to
+	// whatever the pool holds when the last vote lands, so a co-signature approving a
+	// sweep of 0 cannot be reused later to move a large balance.
+	callN(5, c3ID, "sweepUnallocated", `{"channel":"content","nonce":"1","amount":"5000"}`, "guardian sweeps the rolled-forward pool")
+	waitValue(c3ID, "unalloc|content", "0", "C3 unallocated after sweep")
 	if got := bal(treasury); got.String() != "5000" {
 		t.Fatalf("treasury should hold the recovered 5000, has %s", got)
 	}
@@ -274,13 +292,23 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// ================= PHASE B: rogue in Attest 2-of-3 =================
 	t.Logf("PHASE B: rogue attests alone on C5 (2-of-3)")
-	fraud := fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:999999"}`, rogue)
-	honest := fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"0","entries":"hive:%s:600,hive:%s:400"}`, honestB, honestC)
+	fraudLP := buildBook(t, map[string]string{"hive:" + rogue: "999999"})
+	honestLP := buildBook(t, map[string]string{"hive:" + honestB: "600", "hive:" + honestC: "400"})
+	fraud := fraudLP.SubmitPayload("lp", "0")
+	honest := honestLP.SubmitPayload("lp", "0")
+
+	// applyEntries writes NO per-account state and accumulates nothing, so
+	// totalShares no longer appears when a page applies — it lands with the root.
+	// The marker for "this page was applied" is ssdone|<ch>|<ep>|<page>, and that
+	// is what the threshold assertions below have to read. Reading totalShares
+	// here would report "nothing applied" even after threshold was reached, and
+	// the test would pass while proving nothing.
+	applied := func() string { return stateOf(c3ID, "ssdone|lp|0|0") }
 
 	callN(1, c3ID, "submitShares", fraud, "rogue attests its fraudulent page")
 	time.Sleep(15 * time.Second)
-	if v := stateOf(c3ID, "totalShares|lp|0"); v != "" && v != "0" {
-		t.Fatalf("a single attestation applied shares (%s) — threshold 2 was not enforced", v)
+	if v := applied(); v != "" && v != "0" {
+		t.Fatalf("a single attestation applied the page (%s) — threshold 2 was not enforced", v)
 	}
 	t.Logf("  one attestation of three: nothing applied")
 
@@ -291,13 +319,17 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	// two honest reporters agree on a DIFFERENT payload and reach threshold
 	callN(2, c3ID, "submitShares", honest, "honest B attests")
 	time.Sleep(12 * time.Second)
-	if v := stateOf(c3ID, "totalShares|lp|0"); v != "" && v != "0" {
-		t.Fatalf("two attestations of different payloads applied shares (%s)", v)
+	if v := applied(); v != "" && v != "0" {
+		t.Fatalf("two attestations of different payloads applied the page (%s)", v)
 	}
 	callN(3, c3ID, "submitShares", honest, "honest C attests -> threshold")
+	waitValue(c3ID, "ssdone|lp|0|0", "1", "C5 honest page applied at threshold")
+	// the commitment is attested too — same threshold, same equivocation rules
+	callN(2, c3ID, "submitRoot", honestLP.RootPayload("lp", "0"), "honest B attests the root")
+	callN(3, c3ID, "submitRoot", honestLP.RootPayload("lp", "0"), "honest C attests the root -> threshold")
 	waitValue(c3ID, "totalShares|lp|0", "1000", "C5 totalShares (honest payload)")
 
-	if v := stateOf(c3ID, "share|lp|0|hive:"+rogue); v != "" && v != "0" {
+	if v := stateOf(c3ID, "claimed|lp|0|hive:"+rogue); v != "" && v != "0" {
 		t.Fatalf("the rogue's fraudulent payload took effect: share=%s", v)
 	}
 	t.Logf("  honest majority committed THEIR payload; the rogue's never applied")
@@ -317,7 +349,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		"token.owner":    stateOf(tokenID, "owner"),
 		"c5.totalShares": stateOf(c3ID, "totalShares|lp|0"),
 		"c5.funded":      stateOf(c3ID, "funded|lp|0"),
-		"c3.unallocated": stateOf(c3ID, "unallocated"),
+		"c3.unallocated": stateOf(c3ID, "unalloc|content"),
 	}
 	for k, v := range before {
 		if v == "" {
@@ -329,7 +361,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		{tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"hive:%s"}`, rogue), "reporter seizes the token"},
 		{c2ID, "claimBucket", `{"epoch":"0"}`, "reporter impersonates a bucket"},
 		{c3ID, "cancelEpoch", `{"channel":"lp","epoch":"0"}`, "reporter vetoes (guardian-only)"},
-		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"7"}`, "reporter sweeps (guardian-only)"},
+		{c3ID, "sweepUnallocated", `{"channel":"lp","nonce":"7","amount":"1"}`, "reporter sweeps (guardian-only)"},
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"content","epoch":"0","page":"1","entries":"hive:%s:5"}`, rogue), "reporter reopens a cancelled epoch"},
 		{c3ID, "submitShares", fmt.Sprintf(`{"channel":"lp","epoch":"0","page":"1","entries":"hive:%s:5"}`, rogue), "reporter adds shares after finalize"},
 	} {
@@ -351,7 +383,7 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 		case "c5.funded":
 			got = stateOf(c3ID, "funded|lp|0")
 		case "c3.unallocated":
-			got = stateOf(c3ID, "unallocated")
+			got = stateOf(c3ID, "unalloc|content")
 		}
 		if got != want {
 			t.Fatalf("REPORTER CHANGED STATE %s: %q -> %q", k, want, got)
@@ -363,8 +395,8 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 
 	// honest claims still work after all of that
 	time.Sleep(time.Duration(window+5) * 3 * time.Second)
-	callN(2, c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "honest B claims")
-	callN(3, c3ID, "claim", `{"channel":"lp","epoch":"0"}`, "honest C claims")
+	callN(2, c3ID, "claim", honestLP.ClaimPayload(t, "lp", "0", "hive:"+honestB), "honest B claims")
+	callN(3, c3ID, "claim", honestLP.ClaimPayload(t, "lp", "0", "hive:"+honestC), "honest C claims")
 	// Wait for EVERY claimant's marker, not just the first. Reading a balance a few
 	// seconds after broadcast is indistinguishable from the claim being rejected —
 	// which is exactly what made this test report "honest C should hold 2000, has 0".

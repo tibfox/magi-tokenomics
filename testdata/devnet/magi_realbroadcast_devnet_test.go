@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -225,7 +226,11 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 	// self-signed transactions does.
 	for _, c := range []struct{ key, want, what string }{
 		{"funded|lp|0", strconv.Itoa(emission), "lp channel funded by the reporter's own poke+pull"},
-		{"totalShares|lp|0", "4000", "shares applied from the reporter's own submitShares"},
+		{"ssdone|lp|0|0", "1", "page applied from the reporter's own submitShares"},
+		// The commitment, broadcast by the reporter itself. totalShares is written
+		// by submitRoot — NOT by submitShares — so this pair proves the reporter
+		// signed and sent both halves, which is the whole point of -broadcast.
+		{"totalShares|lp|0", "4000", "root committed by the reporter's own submitRoot"},
 		{"status|lp|0", "finalized", "epoch finalized by the reporter's own tx"},
 	} {
 		deadline := time.Now().Add(4 * time.Minute)
@@ -243,6 +248,35 @@ func TestDevnetMagiRealBroadcast(t *testing.T) {
 			time.Sleep(6 * time.Second)
 		}
 	}
+
+	// A SECOND run over the same epoch must do nothing at all.
+	//
+	// This is the observable form of the submitRoot progress marker. chainApplied
+	// decides what still needs doing from chain state, and it used to have no case for
+	// submitRoot and never asked for root|<ch>|<ep> — so out["submitRoot/-1"] was never
+	// created, a missing key read as false, and the call stayed in `remaining` forever.
+	// The epoch being finalized did not save it either: the blanket sweep at the end of
+	// chainApplied iterates the keys already in the map, and this one was never put
+	// there.
+	//
+	// So before the fix this second run re-broadcast submitRoot every time: the
+	// contract aborts it on "root already submitted for this epoch", but only after the
+	// RC is spent, and the broadcaster returns an L1 txid with no L2 receipt, so
+	// nothing on either side reported it. Asserting the printed exit is what makes that
+	// visible — the run's exit code is 0 in both worlds.
+	second := run("run", "-epoch", "0", "-broadcast")
+	if !strings.Contains(second, "epoch already fully submitted") {
+		t.Fatalf("a re-run of a fully submitted epoch must have nothing left to do, got:\n%s\n"+
+			"Without a marker for submitRoot the reporter re-broadcasts it on every run, "+
+			"burning the RC for a call the contract is guaranteed to abort, and the "+
+			"\"epoch already fully submitted\" exit is unreachable for any epoch with earners",
+			second)
+	}
+	if strings.Contains(second, "-> submitRoot") {
+		t.Fatalf("the re-run sent submitRoot again — it is immutable and the call can only "+
+			"abort, so this is pure wasted RC:\n%s", second)
+	}
+	t.Logf("RESUME OK: a second run over epoch 0 broadcast nothing")
 
 	t.Logf("REAL BROADCAST DEVNET PASSED — the reporter signed and submitted its own epoch")
 }

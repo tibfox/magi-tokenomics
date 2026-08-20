@@ -17,6 +17,7 @@ package main
 import (
 	"magi_token/adapter"
 	"magi_token/auth"
+	"magi_token/events"
 	"magi_token/sdk"
 	"math/big"
 	"strconv"
@@ -47,6 +48,19 @@ func Init(payload *string) *string {
 	if owner == nil || caller == nil || *owner != *caller {
 		sdk.Abort("only contract owner can init")
 	}
+	// A POSTING key must not configure a deployment.
+	//
+	// The runtime derives msg.caller from RequiredPostingAuths[0] when a transaction
+	// carries no active auth (auth/auth.go:90), so comparing msg.caller to the owner
+	// is satisfied by a posting-only transaction from the owner's account. Posting
+	// authority is the half Hive users delegate to front-ends and think of as safe.
+	// The fund-moving owner entrypoints already demand active auth; configuring the
+	// deployment is not a lesser power, and init pins the emission schedule, the bucket table and both authority sets, once.
+	//
+	// UnlessContract, so a DAO or multisig CONTRACT owner still works: a contract
+	// caller has no key at all and can never appear in required_auths, and exempting
+	// it cannot reintroduce the posting-key risk it is guarding against.
+	auth.RequireActiveUnlessContract(*caller, reqAuths())
 	tok := f(payload, "token")
 	validateAddr(tok)
 	set("cfg_token", tok)
@@ -226,6 +240,24 @@ func Init(payload *string) *string {
 	// NB: do NOT write cfg_lastEpoch here — its ABSENCE is the "no epoch yet"
 	// sentinel so the first poke starts at epoch 0 (H1).
 	set(kInit, "1")
+	// Discovery anchor: this is a deploy-per-project framework, so every tenant is a
+	// new contract id and a static address list in the indexer's mappings would need
+	// editing per deployment. `c2_init` is what the mapping's discoverEvent matches,
+	// the same way the DEX pools are discovered by pool_init.
+	events.New("c2_init").
+		Str("token", tok).
+		Str("source", src).
+		Str("owner", *owner).
+		U64("genesis", gv).
+		U64("epoch_len", el).
+		Big("base_annual", parseBig(getStr("cfg_baseAnnual"))).
+		U64("blocks_per_year", by).
+		Str("dust_bucket", dust).
+		U64("timelock", tl).
+		U64("bucket_count", n).
+		Str("buckets", f(payload, "buckets")).
+		Big("emission_per_epoch", emissionForEpoch(0)).
+		Emit()
 	return ok()
 }
 
@@ -240,7 +272,12 @@ func DistributeEpoch(_ *string) *string {
 	el := getU("cfg_epochLen")
 	h := blockHeight()
 	if h < genesis+el {
-		return str(`{"distributed":0}`) // first epoch not elapsed yet
+		// Quoted, like every other return from this function. These two early-outs used
+		// to emit a bare JSON NUMBER while every other path emitted a string, so one
+		// field had two types depending on which branch produced it —
+		// coverage_c2_test.go still tests for both spellings, which is how a consumer
+		// discovers this: by tripping over it and working around it.
+		return str(`{"distributed":"0"}`) // first epoch not elapsed yet
 	}
 	current := (h - genesis) / el // number of fully-elapsed epochs
 	last, has := lastEpoch()
@@ -251,7 +288,7 @@ func DistributeEpoch(_ *string) *string {
 	// Already caught up — return before touching the token so an idle poke costs
 	// two ContractCalls less. This is the common case once a keeper is running.
 	if next >= current {
-		return str(`{"distributed":0}`)
+		return str(`{"distributed":"0"}`)
 	}
 	// How much the source can actually give us: min(what it approved, what it
 	// holds). Snapshot ONCE and decrement locally — read-your-writes across
@@ -279,38 +316,106 @@ func DistributeEpoch(_ *string) *string {
 	if held.Cmp(available) < 0 {
 		available = held
 	}
-	done := uint64(0)
 	// Fully-elapsed epoch indices are 0..current-1 (H1).
 	maxCatch := getU("cfg_maxCatch")
 	if maxCatch == 0 {
 		maxCatch = defaultMaxCatch
 	}
+
+	// The schedule parameters and the bucket table are immutable after init, so
+	// they are read ONCE here rather than re-read inside the loop. A 50-epoch,
+	// 3-bucket catch-up used to re-read epochLen/baseAnnual/blocksPerYear per epoch
+	// (through emissionForEpoch) plus bucket_n, dustBucket and every bucket|i
+	// definition per epoch — roughly 400 state reads of values that cannot change,
+	// where 8 do.
+	ecfg := loadEmissionCfg()
+
+	// PLAN the catch-up before moving anything. Walk forward accumulating each
+	// epoch's emission while the pool still covers the RUNNING TOTAL, which is the
+	// same all-or-nothing test the per-epoch loop applied, just evaluated ahead of
+	// the transfer:
+	//
+	// All-or-nothing per epoch. A partially funded epoch would still be marked done
+	// and never revisited, so a later top-up could not repair it — and with a pool
+	// refilled in batches that boundary recurs at EVERY batch, not just once at the
+	// end. Waiting instead means every epoch is eventually paid in full. The cost is
+	// that a remainder smaller than one epoch never emits; size the final approve to
+	// land on a whole multiple if that matters.
+	//
+	// Accumulating rather than multiplying keeps this correct if a non-flat schedule
+	// is ever reintroduced: forEpoch still decides each epoch's amount.
+	plan := uint64(0)
+	totalPull := new(big.Int)
 	starved := false
-	for ep := next; ep < current && done < maxCatch; ep++ {
-		emission := emissionForEpoch(ep)
-		// All-or-nothing per epoch. A partially funded epoch would still be marked
-		// done and never revisited, so a later top-up could not repair it — and with
-		// a pool refilled in batches that boundary recurs at EVERY batch, not just
-		// once at the end. Waiting instead means every epoch is eventually paid in
-		// full. The cost is that a remainder smaller than one epoch never emits;
-		// size the final approve to land on a whole multiple if that matters.
-		if available.Cmp(emission) < 0 {
+	for ep := next; ep < current && plan < maxCatch; ep++ {
+		want := new(big.Int).Add(totalPull, ecfg.forEpoch(ep))
+		if want.Cmp(available) > 0 {
 			starved = true
 			break
 		}
-		if emission.Sign() > 0 {
-			// transferFrom(source -> C2). Aborts if the source revoked the allowance
-			// or moved the tokens between our snapshot and now; the whole poke then
-			// reverts and can simply be retried.
-			adapter.PullFrom(asset(), source, emission)
-			available = new(big.Int).Sub(available, emission)
-			recordAllocations(ep, emission)
-		}
-		setU("cfg_lastEpoch_v", ep)
-		set("cfg_lastEpoch", "1")
-		done++
+		totalPull = want
+		plan++
 	}
-	out := `{"distributed":"` + strconv.FormatUint(done, 10) + `"`
+
+	if plan == 0 {
+		out := `{"distributed":"0"`
+		if starved {
+			// A poke that could not fund even ONE epoch still has to say so. Without
+			// this the pool running dry is INVISIBLE downstream: no `emit` rows appear,
+			// and an operator watching the indexer cannot tell "the pool is empty" from
+			// "the keeper died" — the two failures with completely different fixes.
+			//
+			// The idle path above (next >= current, nothing to do) stays silent on
+			// purpose; nothing happened there. This one is an incident.
+			out += `,"starved":true`
+			events.New("poke").
+				U64("from_epoch", next).
+				U64("last_epoch", next).
+				U64("epochs", 0).
+				Big("pulled", new(big.Int)).
+				Bool("starved", true).
+				Emit()
+		}
+		return str(out + `}`)
+	}
+
+	// ONE transferFrom for the whole catch-up instead of one per epoch. Source,
+	// destination and asset are identical on every iteration, so N cross-contract
+	// calls only ever differed by amount — and that call is the dominant cost of a
+	// poke (a 50-epoch catch-up measured 72,122 RC, of which the repeated pulls were
+	// roughly 17,000 by the token's own per-transfer figure).
+	//
+	// Aborts if the source revoked the allowance or moved the tokens between our
+	// snapshot and now; the whole poke then reverts and can simply be retried.
+	if totalPull.Sign() > 0 {
+		adapter.PullFrom(asset(), source, totalPull)
+	}
+
+	buckets, dust := loadBuckets()
+	for i := uint64(0); i < plan; i++ {
+		ep := next + i
+		emission := ecfg.forEpoch(ep)
+		if emission.Sign() > 0 {
+			recordAllocations(ep, emission, buckets, dust)
+		}
+		events.New("emit").
+			U64("epoch", ep).
+			Big("emission", emission).
+			Emit()
+	}
+	last = next + plan - 1
+	setU("cfg_lastEpoch_v", last)
+	set("cfg_lastEpoch", "1")
+
+	events.New("poke").
+		U64("from_epoch", next).
+		U64("last_epoch", last).
+		U64("epochs", plan).
+		Big("pulled", totalPull).
+		Bool("starved", starved).
+		Emit()
+
+	out := `{"distributed":"` + strconv.FormatUint(plan, 10) + `"`
 	if starved {
 		// NOT terminal — a refill resumes from here and pays the backlog.
 		out += `,"starved":true`
@@ -318,24 +423,57 @@ func DistributeEpoch(_ *string) *string {
 	return str(out + `}`)
 }
 
-// recordAllocations splits `minted` across buckets (remainder→dustBucket) and
-// records per-(target,epoch) owed amounts. No external calls (pull model).
-func recordAllocations(epoch uint64, minted *big.Int) {
+// bucketDef is one bucket's immutable share of an epoch, read once per poke.
+type bucketDef struct {
+	name string
+	wbps int
+}
+
+// loadBuckets reads the bucket table and the dust bucket name. Both are fixed at
+// init, so a catch-up reads them once instead of once per epoch.
+func loadBuckets() ([]bucketDef, string) {
 	n := getU("bucket_n")
-	dust := getStr("cfg_dustBucket")
-	distributed := new(big.Int)
+	out := make([]bucketDef, 0, n)
 	for i := uint64(0); i < n; i++ {
 		name, _, w := split3(getStr("bucket|" + strconv.FormatUint(i, 10)))
 		wb, _ := strconv.Atoi(w)
-		slice := new(big.Int).Mul(minted, big.NewInt(int64(wb)))
+		out = append(out, bucketDef{name: name, wbps: wb})
+	}
+	return out, getStr("cfg_dustBucket")
+}
+
+// recordAllocations splits `minted` across buckets (remainder→dustBucket) and
+// records per-(target,epoch) owed amounts. No external calls (pull model).
+// Takes the bucket table rather than reading it, so a catch-up loads it once.
+func recordAllocations(epoch uint64, minted *big.Int, buckets []bucketDef, dust string) {
+	distributed := new(big.Int)
+	for _, b := range buckets {
+		slice := new(big.Int).Mul(minted, big.NewInt(int64(b.wbps)))
 		slice.Div(slice, big.NewInt(10000))
 		distributed.Add(distributed, slice)
-		addOwed(name, epoch, slice)
+		addOwed(b.name, epoch, slice)
+		if slice.Sign() > 0 {
+			events.New("alloc").
+				Str("bucket", b.name).
+				U64("epoch", epoch).
+				Big("amount", slice).
+				Bool("is_dust", false).
+				Emit()
+		}
 	}
 	// remainder → dust bucket (init guarantees it names a configured bucket)
 	rem := new(big.Int).Sub(minted, distributed)
 	if rem.Sign() > 0 {
 		addOwed(dust, epoch, rem)
+		// Emitted separately from the dust bucket's own weighted slice above: they
+		// land in the same owed record, and an indexer summing `alloc` rows per
+		// (bucket, epoch) must see both parts or its total will not match `owed`.
+		events.New("alloc").
+			Str("bucket", dust).
+			U64("epoch", epoch).
+			Big("amount", rem).
+			Bool("is_dust", true).
+			Emit()
 	}
 }
 
@@ -396,6 +534,12 @@ func ClaimBucket(payload *string) *string {
 	// CEI: zero the owed record before the external transfer
 	sdk.StateDeleteObject(k)
 	adapter.Transfer(asset(), c, amt)
+	events.New("bucket_claim").
+		Str("bucket", bucket).
+		U64("epoch", ep).
+		Big("amount", amt).
+		Str("target", c).
+		Emit()
 	return str(`{"claimed":"` + amt.String() + `"}`)
 }
 
@@ -412,12 +556,32 @@ func QueueTokenOp(payload *string) *string {
 		sdk.Abort("op already queued") // HIGH-2: no re-queue to escape a spent veto
 	}
 	committed := auth.Authorize(guardianCfg(), "guardian", opKey, opKey, mustCaller(), reqAuths())
+	ready := uint64(0)
 	if committed {
 		seq := getU("qseq|"+opKey) + 1
 		setU("qseq|"+opKey, seq) // monotonic: distinct veto key even same-block
-		setU("tl|"+opKey, blockHeight()+getU("cfg_timelock"))
+		ready = blockHeight() + getU("cfg_timelock")
+		setU("tl|"+opKey, ready)
 	}
+	// Emitted whether or not it committed: in Attest mode a queue that is still
+	// gathering signatures is exactly the state an operator needs to see, and the
+	// return value alone is not recorded anywhere.
+	emitTokenOp("queue", payload, opKey, ready, committed)
 	return str(`{"queued":` + boolStr(committed) + `}`)
+}
+
+// emitTokenOp logs one phase of the guardian passthrough. `committed` is false
+// while an Attest-mode action is still short of its threshold.
+func emitTokenOp(phase string, payload *string, opKey string, ready uint64, committed bool) {
+	events.New("tokenop").
+		Str("phase", phase).
+		Str("op", f(payload, "op")).
+		Str("nonce", f(payload, "nonce")).
+		Str("op_key", opKey).
+		Str("new_owner", f(payload, "newOwner")).
+		U64("ready_height", ready).
+		Bool("committed", committed).
+		Emit()
 }
 
 // executeTokenOp — after the timelock elapses, perform the op on the token.
@@ -461,6 +625,7 @@ func ExecuteTokenOp(payload *string) *string {
 	default:
 		sdk.Abort("unknown op")
 	}
+	emitTokenOp("execute", payload, opKey, ready, true)
 	return ok()
 }
 
@@ -486,9 +651,11 @@ func CancelTokenOp(payload *string) *string {
 	// VETO authority (not the guardian) — a compromised guardian must not be able
 	// to block its own cancellation (CRIT-1).
 	if !auth.Authorize(vetoCfg(), "veto", ck, ck, mustCaller(), reqAuths()) {
+		emitTokenOp("cancel", payload, opKey, getU("tl|"+opKey), false)
 		return str(`{"cancelled":false}`)
 	}
 	sdk.StateDeleteObject("tl|" + opKey)
+	emitTokenOp("cancel", payload, opKey, 0, true)
 	return ok()
 }
 
@@ -527,21 +694,39 @@ func EmissionForEpochQ(payload *string) *string {
 
 // ---- emission math (R13: single big.Int division) ------------------------
 
-// emissionForEpoch is FLAT: every epoch emits the same amount.
+// emissionCfg is the schedule, read once. Every field is immutable after init.
+type emissionCfg struct {
+	epochLen      uint64
+	baseAnnual    *big.Int
+	blocksPerYear uint64
+}
+
+func loadEmissionCfg() emissionCfg {
+	return emissionCfg{
+		epochLen:      getU("cfg_epochLen"),
+		baseAnnual:    parseBig(getStr("cfg_baseAnnual")),
+		blocksPerYear: getU("cfg_blocksPerYear"),
+	}
+}
+
+// forEpoch is FLAT: every epoch emits the same amount.
 //
 // A decaying (halving) schedule was removed as out of scope. Emission pauses
 // whenever the approved pool cannot cover a whole epoch, and resumes on refill;
 // it has no permanent end state. The epoch index is therefore unused, but is
 // kept in the signature so a future schedule can be reintroduced without
-// touching callers.
-func emissionForEpoch(_ uint64) *big.Int {
-	el := getU("cfg_epochLen")
-	base := parseBig(getStr("cfg_baseAnnual"))
+// touching callers — distributeEpoch accumulates per-epoch amounts rather than
+// multiplying one of them, so a non-flat schedule needs no change there either.
+func (c emissionCfg) forEpoch(_ uint64) *big.Int {
 	// emission = baseAnnual * epochLen / blocksPerYear
-	em := new(big.Int).Mul(base, new(big.Int).SetUint64(el))
-	em.Div(em, new(big.Int).SetUint64(getU("cfg_blocksPerYear")))
+	em := new(big.Int).Mul(c.baseAnnual, new(big.Int).SetUint64(c.epochLen))
+	em.Div(em, new(big.Int).SetUint64(c.blocksPerYear))
 	return em
 }
+
+// emissionForEpoch is the one-shot form, for init's sanity check and the query.
+// The catch-up loop uses loadEmissionCfg directly so it reads state once.
+func emissionForEpoch(ep uint64) *big.Int { return loadEmissionCfg().forEpoch(ep) }
 
 // ---- helpers -------------------------------------------------------------
 
