@@ -200,7 +200,7 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 |---|---|---|---|
 | `magi_full_devnet_test.go` | yes | 1679s | **2026-08-20** |
 | `magi_multiepoch_devnet_test.go` | yes | 2060s | **2026-08-21** |
-| `magi_rogue_reporter_devnet_test.go` | **FAILED 2026-08-21, fix under test** | 1685s | **2026-08-21** |
+| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | **2026-08-21** |
 | `magi_tokenomics_devnet_test.go` | yes | 598s | **2026-08-20** |
 | `magi_stake_lp_airdrop_devnet_test.go` | yes | 992s | **2026-08-21** |
 | `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
@@ -218,11 +218,18 @@ authority** — 2026-08-20: `magi_tokenomics` (597.61s), `magi_realbroadcast` (9
 `magi_multiepoch` (2059.71s). The rows still marked "2026-08-19 sweep" predate that
 change and are inherited from that sweep's record, not measured here.
 
-**`magi_rogue_reporter` is red and says so.** It failed on 2026-08-21 with
+**`magi_rogue_reporter` went red and is green again.** It failed on 2026-08-21 with
 `rogue ended up with 1949999 (started 950000)`: the rogue is also the deployer, so
 once the token stopped being handed to C2 it OWNED the token, and the "reporter mints"
-attack the suite exists to refuse became an authorised call. Fixed by moving ownership
-to the treasury instead; the row goes back to green only when a run says so. The rows marked
+attack the suite exists to refuse became an authorised call — +999,999, exactly the
+attack payload. Fixed by giving the token to the TREASURY at bootstrap: a real account
+that is not a reporter, which keeps `mint` owner-only and out of the rogue's reach
+without handing it to a contract that could never use it. Green at 1508.65s.
+
+If you write a suite where an attacker is also the deployer, say so at the top and
+check every owner-only assertion against it. This one held for months only because a
+handover happened to move the token out of the attacker's hands, and nothing recorded
+that the coverage depended on it. The rows marked
 "2026-08-19 sweep" are from that sweep's record rather than a run timed here — treat
 their runtimes as indicative. `magi_stake_lp_airdrop` had been sitting at "pending
 re-run on the merged layout" since 2026-08-04; it now passes on the merged layout,
