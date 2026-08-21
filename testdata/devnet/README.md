@@ -203,20 +203,24 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 | `magi_rogue_reporter_devnet_test.go` | yes | 1509s | **2026-08-21** |
 | `magi_tokenomics_devnet_test.go` | yes | 598s | **2026-08-20** |
 | `magi_stake_lp_airdrop_devnet_test.go` | yes | 992s | **2026-08-21** |
-| `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s | 2026-08-19 sweep |
+| `magi_refill_devnet_test.go` | yes | 1049s | **2026-08-21** |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1331s | **2026-08-21** |
 | `magi_reporter_devnet_test.go` | yes | 757s | **2026-08-21** |
 | `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
-| `magi_cosigned_devnet_test.go` | yes | 755s | 2026-08-19 sweep |
+| `magi_cosigned_devnet_test.go` | yes | 733s | **2026-08-21** |
 | `magi_scale_devnet_test.go` | yes | 1052s | **2026-08-21** |
 | `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
 
-Nine of the twelve rows are first-hand runs against the build with **no C2 token
-authority** — 2026-08-20: `magi_tokenomics` (597.61s), `magi_realbroadcast` (939.34s),
-`magi_full` (1679.36s); 2026-08-21: `magi_reporter` (757.27s),
-`magi_stake_lp_airdrop` (991.91s), `magi_scale` (1051.52s),
-`magi_multiepoch` (2059.71s). The rows still marked "2026-08-19 sweep" predate that
-change and are inherited from that sweep's record, not measured here.
+**Every runnable suite — all eleven — has been run against the build with no C2 token
+authority, and every runtime in this table was measured on that build.** Nothing here
+is inherited from an earlier sweep any more. 2026-08-20: `magi_tokenomics` (597.61s),
+`magi_realbroadcast` (939.34s), `magi_full` (1679.36s). 2026-08-21:
+`magi_cosigned` (732.70s), `magi_reporter` (757.27s), `magi_stake_lp_airdrop`
+(991.91s), `magi_refill` (1048.50s), `magi_scale` (1051.52s), `magi_lp_multiepoch`
+(1330.68s), `magi_rogue_reporter` (1508.65s), `magi_multiepoch` (2059.71s).
+
+`magi_upgrade` is the only one not covered, and it cannot run here at all — see the
+note above about `feat/contract-update-timelock`.
 
 **`magi_rogue_reporter` went red and is green again.** It failed on 2026-08-21 with
 `rogue ended up with 1949999 (started 950000)`: the rogue is also the deployer, so
