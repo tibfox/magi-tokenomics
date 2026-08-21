@@ -199,22 +199,30 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 | suite | run green on devnet | runtime | last verified |
 |---|---|---|---|
 | `magi_full_devnet_test.go` | yes | 1679s | **2026-08-20** |
-| `magi_multiepoch_devnet_test.go` | yes | 2030s | 2026-08-19 sweep |
-| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | 2026-08-19 sweep |
+| `magi_multiepoch_devnet_test.go` | yes | 2060s | **2026-08-21** |
+| `magi_rogue_reporter_devnet_test.go` | **FAILED 2026-08-21, fix under test** | 1685s | **2026-08-21** |
 | `magi_tokenomics_devnet_test.go` | yes | 598s | **2026-08-20** |
-| `magi_stake_lp_airdrop_devnet_test.go` | yes | 999s | **2026-08-20** |
+| `magi_stake_lp_airdrop_devnet_test.go` | yes | 992s | **2026-08-21** |
 | `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
 | `magi_lp_multiepoch_devnet_test.go` | yes | 1205s | 2026-08-19 sweep |
-| `magi_reporter_devnet_test.go` | yes | 721s | 2026-08-19 sweep |
+| `magi_reporter_devnet_test.go` | yes | 757s | **2026-08-21** |
 | `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
 | `magi_cosigned_devnet_test.go` | yes | 755s | 2026-08-19 sweep |
-| `magi_scale_devnet_test.go` | yes | — | the run behind `docs/rc-costs.md` |
+| `magi_scale_devnet_test.go` | yes | 1052s | **2026-08-21** |
 | `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
 
-Four rows carry a date because they were run on 2026-08-20 and timed directly:
-`magi_tokenomics` (597.61s), `magi_realbroadcast` (939.34s),
-`magi_stake_lp_airdrop` (998.59s) and `magi_full` (1679.36s). The last two of those
-are the first runs against the build with **no C2 token authority**. The rows marked
+Nine of the twelve rows are first-hand runs against the build with **no C2 token
+authority** — 2026-08-20: `magi_tokenomics` (597.61s), `magi_realbroadcast` (939.34s),
+`magi_full` (1679.36s); 2026-08-21: `magi_reporter` (757.27s),
+`magi_stake_lp_airdrop` (991.91s), `magi_scale` (1051.52s),
+`magi_multiepoch` (2059.71s). The rows still marked "2026-08-19 sweep" predate that
+change and are inherited from that sweep's record, not measured here.
+
+**`magi_rogue_reporter` is red and says so.** It failed on 2026-08-21 with
+`rogue ended up with 1949999 (started 950000)`: the rogue is also the deployer, so
+once the token stopped being handed to C2 it OWNED the token, and the "reporter mints"
+attack the suite exists to refuse became an authorised call. Fixed by moving ownership
+to the treasury instead; the row goes back to green only when a run says so. The rows marked
 "2026-08-19 sweep" are from that sweep's record rather than a run timed here — treat
 their runtimes as indicative. `magi_stake_lp_airdrop` had been sitting at "pending
 re-run on the merged layout" since 2026-08-04; it now passes on the merged layout,
