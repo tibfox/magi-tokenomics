@@ -140,7 +140,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
 
 # Deployment
 
-## Order matters — five constraints that are easy to get wrong
+## Order matters — seven constraints that are easy to get wrong
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
@@ -151,7 +151,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
    becomes `contract.owner`, and every `init` aborts unless `msg.caller == owner`.
 3. **Fund C1's airdrop float and stake into C1 BEFORE initialising C2.** Two reasons:
    - the airdrop pays out of C1's *own* balance, so the float must be transferred in
-     while the deployer still owns the token — i.e. before `changeOwner` hands it to C2.
+     before anything else spends the deployer's supply.
    - C2's `genesis` defaults to the block it is initialised at, and yield credits
      `min(stakeAt(epochStart), stakeAt(epochEnd))`, so stake that arrives *after*
      C2's init is zero at both boundaries of epoch 0 — that epoch's yield bucket
@@ -166,6 +166,31 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
    with one exception: `setPolicy`. An **attest-mode channel must declare a
    `policy`** digest (`reporter policy-digest`), because that is the mode where two
    reporters can disagree — see [Reporter policy](#reporter-policy-two-honest-reporters-must-never-disagree).
+6. **If you want staked payouts, C1's `allow` must contain the distributor AT C1's
+   INIT.** `allow` is the `stakeFor` allowlist and it is written in exactly one place —
+   `Init`. Nothing can add to it afterwards. `C3.stakeContract` + `stakedBps` make each
+   claim pay part of its value as stake via `C1.stakeFor`, which aborts with *caller not
+   in stakeFor allowlist* for anyone outside that list. So an empty `allow` does not
+   disable the feature quietly — it makes **every claim on that channel abort at the
+   point of payment**, discovered only when the first earner tries to get paid.
+
+   This inverts the deploy order: C3 must be DEPLOYED (so its id exists) before C1 is
+   INITIALISED, even though C1 is initialised first. Deploy all four contracts up
+   front, then init. If you do not want staked payouts, leave `allow` empty and leave
+   `stakeContract`/`stakedBps` unset — the two must agree.
+
+7. **Choose C3's guardian LAST, and never make it an account you need as a reporter.**
+   The guardian set is fixed at `C3.init`, and `addChannel` refuses a channel whose
+   reporter authorities intersect it — *reporter and guardian authorities must be
+   disjoint*, deliberately, so one coalition cannot both publish fraud and refuse to
+   cancel it. The trap is that this is only discovered at `addChannel`, after the
+   guardian is already immutable: if you have two accounts and make one the guardian,
+   you cannot build a 2-of-2 cosigned channel on that C3 at all. Count the keys you
+   actually hold before picking the guardian.
+
+   > Both of these were hit on the first real testnet deployment, not in review — each
+   > one is an immutable-at-init choice whose consequence only appears several steps
+   > later. See [`docs/testnet-deployment.md`](docs/testnet-deployment.md).
 
 ## Recommended sequence
 
