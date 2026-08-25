@@ -44,9 +44,14 @@ func (f *tagTransport) Call(method string, params any, out any) error {
 	return fmt.Errorf("unexpected method %s", method)
 }
 
-func meta2(tags []string, app string) string {
+// meta2 builds json_metadata in its OBJECT form. Note it assigns straight onto the
+// struct field, which is why these fixtures never caught the decode-level bug: they
+// exercise parseMeta but skip json.Unmarshal of the post, and that is where an object
+// used to be rejected outright. See json_metadata_object_test.go, which goes through
+// the wire format instead.
+func meta2(tags []string, app string) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{"tags": tags, "app": app})
-	return string(b)
+	return json.RawMessage(b)
 }
 
 func upvote(voter string, rshares int64, when string) RawVote {
