@@ -909,6 +909,17 @@ func (a *app) selectWorkableEpoch(epochFlag string) (*computed, submit.Plan, err
 	}
 }
 
+// Hive's per-account custom_op limit is 5 per block. Stay one under it so a
+// retried or duplicated broadcast cannot push a batch over the edge, and wait a
+// little more than a block so a slow head does not fold two batches into one.
+const (
+	customOpsPerBlock = 4
+	hiveBlockInterval = 3500 * time.Millisecond
+)
+
+// pace is a variable so a test can observe the waiting without spending it.
+var pace = time.Sleep
+
 func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	c, pl, err := a.selectWorkableEpoch(epochFlag)
 	if err != nil {
@@ -981,6 +992,19 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	}
 
 	sentThisRun := map[string]bool{}
+	// Hive caps custom_json operations per ACCOUNT per BLOCK, and a real share book
+	// is far more calls than that cap: 1,504 accounts came to 26 pages, and even the
+	// sizing in docs/rc-costs.md (500 earners -> 9 pages) needs 13 calls with the
+	// keeper poke, the pull, the root and the finalize. Broadcasting them back to
+	// back put five in one block and the sixth was rejected by the chain itself:
+	//
+	//   Assert Exception: insert_info.first->second <= HIVE_CUSTOM_OP_BLOCK_LIMIT
+	//
+	// Nothing was lost — the run stops at the first failure and resume picks it up —
+	// but an operator had to notice an opaque consensus assert and re-run by hand,
+	// repeatedly, to land one epoch. Pace instead: stay a call under the cap, then
+	// wait out a block before the next batch.
+	sentInBlock := 0
 	for _, call := range remaining {
 		// FINALIZE IS IRREVERSIBLE. A share page can be broadcast successfully and
 		// still revert on L2 — the broadcaster returns the L1 txid and nothing about
@@ -998,6 +1022,10 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 			}
 		}
 		fmt.Printf("-> %s %s\n", call.Action, call.Payload)
+		if doBroadcast && sentInBlock >= customOpsPerBlock {
+			pace(hiveBlockInterval)
+			sentInBlock = 0
+		}
 		txid, serr := b.Send(call)
 		if serr != nil {
 			// Stop at the first failure rather than pressing on: the calls are
@@ -1009,6 +1037,7 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 			continue // never record progress for a call that was not sent
 		}
 		fmt.Printf("   tx %s\n", txid)
+		sentInBlock++
 		sentThisRun[call.Action+"/"+strconv.Itoa(submit.PageOf(call))] = true
 		if merr := prog.MarkDone(pl.Epoch, call.Action, submit.PageOf(call)); merr != nil {
 			return fmt.Errorf("call %s landed as %s but progress could not be saved: %w",
