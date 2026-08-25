@@ -140,6 +140,39 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
 
 # Deployment
 
+## Check the plan before you spend anything
+
+```sh
+GOTOOLCHAIN=go1.25.3 go build -o setup/bin/magi-setup ./setup/cmd/magi-setup
+setup/bin/magi-setup template > deploy.json      # a starting plan that already passes
+$EDITOR deploy.json                              # your accounts, cadence, splits
+setup/bin/magi-setup check -plan deploy.json     # refuses every mistake it can find
+setup/bin/magi-setup steps -plan deploy.json     # the ordered sequence, with reasons
+```
+
+Read the constraints below — but do not rely on reading them. They are all
+documented and the first real deployment still broke two, then a later one broke a
+third. Each is an immutable-at-init choice whose consequence appears several steps
+later: `check` catches them while the plan is still a file you can edit, instead of
+at the transaction that made them permanent. It reports every problem at once,
+because these are paid for in deploy fees.
+
+```
+3 problem(s) — NOTHING has been deployed, fix these first:
+
+ ✗ c1.allow (constraint 6): staked payouts need "c3" in C1's allow list, and allow is
+   written ONLY at C1.init — nothing can add to it later. Without it every claim on a
+   staked channel aborts at the point of payment, not at configuration time
+ ✗ channels.content.reporter.auth (constraint 7): [hive:tibfox] are also C3 guardians.
+   addChannel refuses this, and the guardian is already immutable by then
+ ✗ channels.content.policy (constraint 5): an attest-mode channel MUST declare a policy
+   digest (`reporter policy-digest -config F`)
+```
+
+Contracts are named symbolically in the plan (`c1`, `c3`) rather than by id, which is
+what lets the whole thing be checked before any of them exist — an id only appears
+after 10 HBD has been spent, and by then the mistake is already permanent.
+
 ## Order matters — seven constraints that are easy to get wrong
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying

@@ -6,3 +6,4 @@ itest/data/
 
 # scratch
 *.log
+setup/bin/
