@@ -28,7 +28,11 @@ fee, so roles that share a balance and a history share a contract.
 | — | `auth/`, `adapter/`, `events/` | shared modules: multi-party authorisation, value-asset abstraction, contract log emission |
 | — | `indexer/` | drop-in mappings so magi-mongo-indexer picks up any deployment ([README](indexer/README.md)) |
 
-**Why C2 and C3 stay separate.** The merge that produced this layout folded six
+**Why C2 and C3 stay separate — DECIDED, not open.** Weighed and settled on
+2026-08-23: they stay separate until `vsc.update_contract` is proven, and the reason
+is the first bullet below. Revisit it then, not before.
+
+The merge that produced this layout folded six
 contracts into three on one rule — roles that share a balance and a history share a
 contract — because every deploy and every update costs a real fee. C2 and C3 share
 neither, and three things break if they are merged:
@@ -53,6 +57,13 @@ The seam costs a cross-contract `pullFunding` — **1,103–1,225 RC**, against 
 that plus one 10 HBD deploy fee. Fee cost is what drove the six-into-three merge, so
 this is the same argument that won last time; it loses here because this is the one
 seam where the separation protects something.
+
+**The condition to revisit is specific.** The first bullet is the whole case, and it
+dissolves once in-place `vsc.update_contract` is trustworthy — a fresh distributor
+deploy is then never needed, so C1 can never be stranded by one. Objections two and
+three are real but would not outweigh the fee saving on their own. So the question is
+not "is merging tempting" but "is the upgrade path proven yet", and today it is not:
+`magi_upgrade` cannot even run against a stock go-vsc-node checkout.
 
 **C2 has no authority over the token, by design.** Emission never needed any: C2
 draws from `cfg_source` with `token.transferFrom` against an allowance and never calls
