@@ -122,6 +122,28 @@ func (p *Plan) Check() []Problem {
 		}
 	}
 
+	// The airdrop float is transferred out of the mint before anything else. Sized
+	// at or above the whole mint it leaves nothing to approve to C2, and the first
+	// poke starves a pool that was never funded — which reads on chain as a working
+	// deployment that simply never pays.
+	mint, mintOK := new(big.Int).SetString(strings.TrimSpace(p.Token.Mint), 10)
+	if strings.TrimSpace(p.Token.Mint) != "" && !mintOK {
+		add(0, "token.mint", "must be a decimal integer, got %q", p.Token.Mint)
+	}
+	if air, ok := new(big.Int).SetString(strings.TrimSpace(p.C1.MaxAirdrop), 10); ok && mintOK {
+		if air.Cmp(mint) >= 0 {
+			add(0, "c1.max_airdrop",
+				"the airdrop float (%s) is not less than the mint (%s) — it is transferred "+
+					"to C1 before the pool is approved, so emission would have nothing to draw",
+				air, mint)
+		}
+	}
+	if maxSup, ok := new(big.Int).SetString(strings.TrimSpace(p.Token.MaxSupply), 10); ok && mintOK {
+		if mint.Cmp(maxSup) > 0 {
+			add(0, "token.mint", "mint (%s) exceeds max_supply (%s)", mint, maxSup)
+		}
+	}
+
 	// ---- buckets and channels ---------------------------------------------
 
 	sum, names := 0, map[string]bool{}

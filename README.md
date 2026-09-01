@@ -148,7 +148,24 @@ setup/bin/magi-setup template > deploy.json      # a starting plan that already 
 $EDITOR deploy.json                              # your accounts, cadence, splits
 setup/bin/magi-setup check -plan deploy.json     # refuses every mistake it can find
 setup/bin/magi-setup steps -plan deploy.json     # the ordered sequence, with reasons
+
+# after deploying the four contracts, record their ids and execute:
+setup/bin/magi-setup run -plan deploy.json -ids ids.json               # dry run
+MAGI_SETUP_WIF=5J... setup/bin/magi-setup run -plan deploy.json \
+  -ids ids.json -net-id vsc-testnet -chain-id <hive chain id> -broadcast
 ```
+
+`run` executes the init sequence — it does not deploy. The four deploys need
+go-vsc-node's `contract-deployer` (they carry a BLS storage proof), so record the ids
+it prints in `ids.json` and `run` takes it from there. It refuses any plan that would
+not pass `check`, stops at the first failure rather than continuing past it, and
+**pauses rather than skipping** when a step needs a signer it does not hold — the
+pool holder's `approve` and each staker's own `stake` are not the deployer's to make,
+and silently skipping one leaves emission with nothing to draw.
+
+It paces at 4 calls per block for the same reason the reporter does: Hive caps
+custom_json at 5 per account per block, and exceeding it is a consensus assert that
+says nothing about rate limits.
 
 Read the constraints below — but do not rely on reading them. They are all
 documented and the first real deployment still broke two, then a later one broke a

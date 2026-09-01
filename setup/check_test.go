@@ -200,3 +200,26 @@ func TestCheck_ReportsEveryProblemAtOnce(t *testing.T) {
 		t.Fatalf("expected at least 4 problems in one pass, got %d: %v", len(probs), probs)
 	}
 }
+
+// The float is transferred out of the mint BEFORE the pool is approved, so a float
+// sized at the whole mint leaves emission nothing to draw. On chain that reads as a
+// working deployment that simply never pays anyone.
+func TestCheck_AirdropFloatMustLeaveSomethingForThePool(t *testing.T) {
+	p := good()
+	p.Token.Mint, p.C1.MaxAirdrop = "1000000", "1000000"
+	if find(p.Check(), "c1.max_airdrop") == nil {
+		t.Fatal("a float equal to the whole mint must be refused")
+	}
+	p.C1.MaxAirdrop = "100000"
+	if find(p.Check(), "c1.max_airdrop") != nil {
+		t.Fatal("a float below the mint must be accepted")
+	}
+}
+
+func TestCheck_MintCannotExceedMaxSupply(t *testing.T) {
+	p := good()
+	p.Token.MaxSupply, p.Token.Mint = "1000", "2000"
+	if find(p.Check(), "token.mint") == nil {
+		t.Fatal("minting past max_supply must be refused")
+	}
+}

@@ -134,7 +134,7 @@ func Template() *Plan {
 	p.C1.Cooldown, p.C1.EpochLen = 201600, 28800 // 7 days cooldown, daily epochs
 	p.C1.Treasury = "hive:yourtreasury"
 	p.C1.Guardian = Auth{Mode: 0, Auth: []string{"hive:yourguardian"}, Threshold: 1}
-	p.C1.MaxAirdrop = "1000000"
+	p.C1.MaxAirdrop = "100000" // 10% of the mint; the rest funds emission
 	p.C1.Allow = []string{"c3"}
 	p.C2.EpochLen, p.C2.BaseAnnual, p.C2.BlocksPerYear = 28800, "3650000", 10512000
 	p.C2.MaxCatch, p.C2.DustBucket, p.C2.Source = 5, "content", "hive:yourpool"
