@@ -1,6 +1,7 @@
 package lpsrc
 
 import (
+	"math/big"
 	"os"
 	"testing"
 )
@@ -74,5 +75,95 @@ func TestLive_SchemaMatchesRealIndexer(t *testing.T) {
 	t.Logf("live schema OK: %d providers, total %s", len(res.Shares), res.Total)
 	for who, amt := range res.Shares {
 		t.Logf("  %s = %s", who, amt)
+	}
+}
+
+// TestLive_ReconstructsRealPositions replays REAL liquidity events and checks the
+// position arithmetic, not just the schema.
+//
+// The sibling test above proves the queries still match the indexer's columns. It
+// does not prove the replay is right: add_liq and rem_liq have to be folded into a
+// per-provider balance, and both epoch boundaries evaluated so a provider earns on
+// min(LP(start), LP(end)) — the anti-flash-liquidity rule. A fake fixture cannot
+// falsify that, because the fixture author decides both the events and the expected
+// answer.
+//
+// The window is derived from the pool's own newest log rather than from a live epoch,
+// because a testnet pool may have no recent activity at all: the freshness gate then
+// refuses (correctly — it cannot tell "nothing happened" from "not indexed yet"), and
+// refusing is the behaviour the OTHER test covers. Here we want the replay itself, so
+// we score a window the indexer demonstrably has, with AllowStale set to say that is
+// deliberate.
+//
+//	LPSRC_LIVE_INDEXER=... LPSRC_LIVE_POOL=... go test ./reporter/lpsrc/ -run TestLive -v
+func TestLive_ReconstructsRealPositions(t *testing.T) {
+	endpoint := os.Getenv("LPSRC_LIVE_INDEXER")
+	pool := os.Getenv("LPSRC_LIVE_POOL")
+	if endpoint == "" || pool == "" {
+		t.Skip("set LPSRC_LIVE_INDEXER and LPSRC_LIVE_POOL to replay real positions")
+	}
+	tr := &HTTPTransport{Endpoint: endpoint, Secret: os.Getenv("LPSRC_LIVE_SECRET")}
+
+	end, any, err := PoolIndexedHeight(tr, pool)
+	if err != nil {
+		t.Fatalf("PoolIndexedHeight: %v", err)
+	}
+	if !any {
+		t.Skipf("pool %s has no indexed logs at all — nothing to replay", pool)
+	}
+
+	// Score a window whose START is already past the pool's activity, not from
+	// genesis. Starting at 0 credits nobody by construction and says nothing about
+	// the replay: the rule is min(LP(start), LP(end)), and at block 0 every position
+	// is zero, so the minimum is zero however well the fold works. Asserting on that
+	// would have looked like a broken replay for a pool that is in fact fully funded
+	// — 430,239 LP minted and not one rem_liq.
+	//
+	// Both boundaries inside the settled range means both see the same positions, so
+	// a zero here really does mean the events were not folded in.
+	res, err := LPShares(tr, Options{Pool: pool, Start: end, End: end, AllowStale: true})
+	if err != nil {
+		t.Fatalf("LPShares over blocks 0..%d: %v", end, err)
+	}
+	t.Logf("replayed to block %d: %d providers, total %s", end, len(res.Shares), res.Total)
+	if len(res.Shares) == 0 {
+		t.Fatalf("pool %s has indexed logs up to %d but the replay produced no "+
+			"providers — either every position was withdrawn, or add_liq is not "+
+			"being folded in at all", pool, end)
+	}
+
+	// The total must be the sum of the parts. A mismatch means the aggregate and the
+	// per-provider book disagree, and the contract divides by that total: every payout
+	// would be scaled wrongly while each individual share still looked plausible.
+	sum := new(big.Int)
+	for who, v := range res.Shares {
+		if v.Sign() < 0 {
+			t.Fatalf("%s has a NEGATIVE position (%s) — a rem_liq was applied that no "+
+				"add_liq paid for", who, v)
+		}
+		sum.Add(sum, v)
+	}
+	if sum.Cmp(res.Total) != 0 {
+		t.Fatalf("total %s does not equal the sum of %d providers (%s) — the "+
+			"denominator the contract divides by disagrees with the book",
+			res.Total, len(res.Shares), sum)
+	}
+
+	for who, v := range res.Shares {
+		t.Logf("  %s = %s", who, v)
+	}
+
+	// The anti-flash rule itself: a window that OPENS at genesis must credit nothing,
+	// because min(LP(0), LP(end)) is zero for everyone no matter how much they hold
+	// now. This is what stops liquidity added just before a snapshot from earning a
+	// whole epoch, and it is the property a fixture is least able to falsify.
+	joined, err := LPShares(tr, Options{Pool: pool, Start: 0, End: end, AllowStale: true})
+	if err != nil {
+		t.Fatalf("LPShares over 0..%d: %v", end, err)
+	}
+	if joined.Total.Sign() != 0 {
+		t.Fatalf("a window opening at block 0 credited %s — min(LP(start), LP(end)) is "+
+			"not being applied, so liquidity added mid-epoch would earn the whole epoch",
+			joined.Total)
 	}
 }
