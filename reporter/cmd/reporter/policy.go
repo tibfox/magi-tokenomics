@@ -16,7 +16,7 @@ import (
 // The split is by whether a setting can change the numbers, not by whether it
 // looks like policy:
 //
-//	Epoch   genesis and len decide which blocks the epoch covers at all. Already
+//	Window  genesis and len decide which blocks the epoch covers at all. Already
 //	        compared field-by-field by verifyChainConfig; included anyway so the
 //	        digest is a complete statement of what was scored rather than a partial
 //	        one that needs a footnote.
@@ -33,8 +33,27 @@ import (
 // the indexer one is a real residual gap for LP quorums) and everything under
 // Submit, which is per-operator (its own account, its own WIF, its own progress
 // file) and cannot change what the epoch pays.
+// EpochWindow is the part of Epoch that decides the numbers: which blocks an epoch
+// covers. Named rather than anonymous so the classification guard can see it.
+type EpochWindow struct {
+	Genesis uint64 `json:"genesis"`
+	Len     uint64 `json:"len"`
+}
+
 func (c *Config) policySections() []any {
-	return []any{c.Epoch, c.Source, c.Shares, c.Page}
+	// Only the WINDOW from Epoch, not the whole block. Lookback lives there too and
+	// it fails this section's own rule: it feeds windowFloor and nothing else, so it
+	// decides which epoch a reporter looks at by DEFAULT and can never move a share.
+	//
+	// Hashing it made the reporter refuse its own recovery advice. After downtime it
+	// prints "Raise epoch.lookback and re-run to work them off"; doing that changed
+	// the digest, so the next run was rejected for a policy mismatch — and setPolicy
+	// is owner-only, so the operator could not clear it alone. In Attest mode the
+	// same change drops that reporter out of the quorum silently.
+	//
+	// Narrowed here rather than tagged for exclusion, so TestDigest_EveryFieldChanges
+	// TheDigest keeps meaning what it says: every field of what IS hashed matters.
+	return []any{EpochWindow{c.Epoch.Genesis, c.Epoch.Len}, c.Source, c.Shares, c.Page}
 }
 
 // PolicyDigest is the value that must match policy|<channel>|<epoch> on chain.

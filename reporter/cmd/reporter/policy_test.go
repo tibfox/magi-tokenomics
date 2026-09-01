@@ -19,6 +19,14 @@ var notPolicy = map[string]string{
 	"Indexer":   "endpoint. NOT as safe — see the policy package doc: two indexer instances can assign an event different heights, so LP quorums must share one. A URL comparison would reject honest mirrors without fixing that",
 	"Contracts": "which contracts to talk to; verifyChainConfig already compares these against the chain directly, and a wrong one is caught there",
 	"Submit":    "per-operator: own account, own WIF, own progress file, own RC limit. Cannot change what the epoch pays",
+	"Epoch":     "represented in the digest by EpochWindow (genesis + len). The remaining field, Lookback, is operational — see notPolicyField",
+}
+
+// notPolicyField excuses individual fields inside an otherwise-hashed section.
+var notPolicyField = map[string]string{
+	"Epoch.Lookback": "how far back the DEFAULT epoch search looks. It feeds windowFloor " +
+		"and nothing else, so it cannot move a share. Hashing it refused a reporter for " +
+		"following the recovery advice the tool itself prints, and setPolicy is owner-only",
 }
 
 // Every top-level section is either in the digest or explicitly excused.
@@ -118,6 +126,9 @@ func TestPolicy_EveryRealFieldChangesTheDigest(t *testing.T) {
 		got, err := cp.PolicyDigest()
 		if err != nil {
 			t.Fatalf("%s: PolicyDigest: %v", name[1:], err)
+		}
+		if _, excused := notPolicyField[name[1:]]; excused {
+			continue
 		}
 		if got == want {
 			t.Errorf("%s does not affect the policy digest: two reporters differing only in "+
