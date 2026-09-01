@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"errors"
 	"strings"
 	"testing"
@@ -19,6 +20,12 @@ func (f *fakeState) StateGet(_ string, keys []string) (map[string]string, error)
 	f.hits++
 	if f.err != nil {
 		return nil, f.err
+	}
+	// The real API refuses more than 100 keys per call (vscapi.StateGet). A fake that
+	// accepts any number is more permissive than the thing it stands in for, which is
+	// how a caller that batches too many keys passes every test and fails on chain.
+	if len(keys) > 100 {
+		return nil, fmt.Errorf("vsc api: getStateByKeys accepts at most 100 keys, got %d", len(keys))
 	}
 	out := map[string]string{}
 	for _, k := range keys {

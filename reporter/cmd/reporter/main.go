@@ -243,7 +243,7 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	}
 	// reader(), not a.vsc: every other chain read in this file goes through it, and
 	// bypassing it here made the epoch selector the one path a test could not stub.
-	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
+	state, err := a.stateInChunks(keys)
 	if err != nil {
 		return 0, err
 	}
@@ -255,6 +255,36 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	// Everything in the window is finalized/cancelled. Return the latest closed
 	// epoch so the caller reports "already fully submitted" rather than an error.
 	return latest, nil
+}
+
+// stateInChunks reads keys in batches the API will accept.
+//
+// The window is configurable precisely so an operator can reach a backlog after
+// downtime, but the read was a single call and getStateByKeys refuses more than 100
+// keys. Raising lookback far enough to matter therefore failed outright with
+// "accepts at most 100 keys, got 4907" — the documented recovery, unusable for any
+// backlog longer than 100 epochs.
+//
+// Chunking here rather than clamping the window: clamping would silently do less
+// than the operator asked for, and the epoch that fell outside would stay stranded
+// with its funding — which is the failure the configurable window exists to prevent.
+func (a *app) stateInChunks(keys []string) (map[string]string, error) {
+	const maxKeys = 100 // vscapi.StateGet refuses more
+	out := make(map[string]string, len(keys))
+	for start := 0; start < len(keys); start += maxKeys {
+		end := start + maxKeys
+		if end > len(keys) {
+			end = len(keys)
+		}
+		part, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range part {
+			out[k] = v
+		}
+	}
+	return out, nil
 }
 
 // nextUnfinalizedAfter returns the first unfinalized epoch strictly after `ep`,
