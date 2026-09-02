@@ -62,9 +62,21 @@ checkout.
 
 **`magi_upgrade_devnet_test.go` needs a go-vsc-node with contract-update support**
 in its devnet harness — `Devnet.UpdateContract`, `ContractUpdateOpts` and
-`Devnet.PendingUpdates`, which are on the `feat/contract-update-timelock` branch, not
-on main. Against a checkout without them the whole `devnet` package fails to compile,
-so move that one file aside if you are running the others.
+`Devnet.PendingUpdates`. They live in `tests/devnet/contract_timelock.go` on the
+branch **`tibfox/feat/contract-timelock`** (not on main). Against a checkout without
+them the whole `devnet` package fails to compile, so move that one file aside if you
+are running the others.
+
+This note used to name `feat/contract-update-timelock`, which does not exist, and the
+suite went unrun for months on the strength of it — the branch had been fetched in the
+working checkout the whole time. Get it with a WORKTREE rather than a checkout, so a
+checkout carrying someone else's work in progress is left alone:
+
+```sh
+git worktree add /path/gvn-timelock tibfox/feat/contract-timelock
+cp testdata/devnet/magi_*_test.go /path/gvn-timelock/tests/devnet/
+cd /path/gvn-timelock && go test -v -run TestDevnetMagiUpgrade -timeout 75m ./tests/devnet/
+```
 
 ## Running them
 
@@ -209,7 +221,7 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 | `magi_realbroadcast_devnet_test.go` | yes | 727s | **2026-08-23** |
 | `magi_cosigned_devnet_test.go` | yes | 733s | **2026-08-21** |
 | `magi_scale_devnet_test.go` | yes | 1296s | **2026-08-23** |
-| `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
+| `magi_upgrade_devnet_test.go` | yes | 456s | **2026-09-02** |
 
 **Every runnable suite — all eleven — has been run against the build with no C2 token
 authority, and every runtime in this table was measured on that build.** Nothing here
@@ -219,8 +231,8 @@ is inherited from an earlier sweep any more. 2026-08-20: `magi_tokenomics` (597.
 (991.91s), `magi_refill` (1048.50s), `magi_scale` (1051.52s), `magi_lp_multiepoch`
 (1330.68s), `magi_rogue_reporter` (1508.65s), `magi_multiepoch` (2059.71s).
 
-`magi_upgrade` is the only one not covered, and it cannot run here at all — see the
-note above about `feat/contract-update-timelock`.
+**All twelve now run.** `magi_upgrade` needs the timelock branch in a worktree (see
+the note above); everything else runs against a stock checkout.
 
 **`magi_rogue_reporter` went red and is green again.** It failed on 2026-08-21 with
 `rogue ended up with 1949999 (started 950000)`: the rogue is also the deployer, so

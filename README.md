@@ -687,6 +687,14 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   address and reported success, `cfg_lastEpoch` would be set. The fixture
   (`testdata/fixtures/c2-preallowance`) reproduces the state shape only; it is not a
   copy of the old contract, and the code installed over it is the real one.
+
+  **First actually run on 2026-09-02** (456s), and worth being precise about why it
+  took so long: this entry claimed the path was "exercised" while the suite had never
+  once been executed here, because the note telling you how pointed at a branch name
+  that does not exist. The branch — `tibfox/feat/contract-timelock` — had been fetched
+  in the working checkout the whole time. A wrong branch name in a prerequisite note
+  is enough to strand a suite indefinitely, and nothing flags it: the suite is simply
+  moved aside every run, so it never fails, it just never runs.
 - **Cosigned mode 1 is proven at the contract layer, not the key layer.** Verified on
   devnet by `TestDevnetMagiCosigned` — one authority applies nothing, two in a single
   transaction apply the page — but the devnet's
@@ -735,7 +743,7 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   rather than assumed.
 - **`TestDevnetMagiUpgrade` cannot be run from a stock go-vsc-node checkout.** It
   needs `Devnet.UpdateContract`, `ContractUpdateOpts` and `Devnet.PendingUpdates`,
-  which live on that repo's `feat/contract-update-timelock` branch, not on main.
+  which live on that repo's `tibfox/feat/contract-timelock` branch, not on main.
   Against a checkout without them the whole `devnet` package fails to compile, so the
   file has to be moved aside to run any of the others. The result above stands — it
   was exercised on a checkout that had them — but it is not reproducible today
