@@ -332,7 +332,6 @@ func TestDevnetMagiReporter(t *testing.T) {
 	mustCall(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
 	waitKey(tokenID, fmt.Sprintf("alw|hive:%s|contract:%s", owner, c2ID), "C2 allowance")
-	mustCall(tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token->C2 ownership")
 
 	// genesis omitted => C2 adopts the CURRENT block height, which is how a real
 	// deployment starts. Read it back to drive both C3 and the reporter config.

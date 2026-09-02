@@ -59,9 +59,6 @@ then check the per-day total against capacity ÷ 5.
 | C1 | `claimYield` | 1,014 | 870 |
 | C2 emission | `init` (3 buckets) | 9,288 | 8,730 |
 | C2 emission | `distributeEpoch` (1 epoch, 3 buckets) | 1,990 | 1,537 |
-| C2 emission | `queueTokenOp` | 311 | 163 |
-| C2 emission | `cancelTokenOp` | 240 | 100 |
-| C2 emission | `executeTokenOp` (calls token.pause) | 482 | 333 |
 | distributor | `init` | 2,623 | 2,330 |
 | distributor | `addChannel` | 832–1,097 | 661–911 |
 | distributor | `pullFunding` (cross-contract) | 1,103–1,225 | 821–923 |

@@ -94,10 +94,10 @@ to your own paths.
 
 | test | covers | ~time |
 |---|---|---|
-| `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 13 outsider attacks | 10 min |
+| `magi_tokenomics_devnet_test.go` | C0 + C2 + C3, then 11 outsider attacks | 10 min |
 | `magi_stake_lp_airdrop_devnet_test.go` | staking + yield + airdrop (C1) and an LP channel, then outsider attacks | 18 min |
 | `magi_reporter_devnet_test.go` | the real `reporter` binary driving C3 against injected Hive data | 12 min |
-| `magi_full_devnet_test.go` | **all 4 contracts + the reporter, then 14 staked-holder + 34 outsider attacks, then the guardian token-op passthrough** | 40 min |
+| `magi_full_devnet_test.go` | **all 4 contracts + the reporter, then 14 staked-holder + 29 outsider attacks** | 40 min |
 | `magi_rogue_reporter_devnet_test.go` | the **trusted** reporter role turning malicious: fraud + guardian veto + Attest quorum | 22 min |
 | `magi_multiepoch_devnet_test.go` | **operation over time**: keeper catch-up, flat emission, per-epoch isolation, stake history, unstake maturity | 30 min |
 | `magi_refill_devnet_test.go` | **batched minting**: pool drained to a standstill, refilled, backlog paid in full | 17 min |
@@ -175,9 +175,14 @@ Proves a drained pool can be REFILLED — the property that makes batched mintin
 viable. Pool is sized to exactly one epoch's emission, so epoch 0 funds and epoch 1
 starves regardless of how many epochs really elapsed when each poke lands; devnet
 wall-clock timing is not controllable, so the dependency is designed out rather than
-raced. Deploys only the token and C2 (the bucket pays a plain hive account), and
-deliberately never hands ownership to C2 — `mint` is owner-only, so the handover
-would make the refill impossible. The test therefore fails if anyone reintroduces it.
+raced. Deploys only the token and C2 (the bucket pays a plain hive account), and never
+hands ownership to C2 — `mint` is owner-only, so the handover would make the refill
+impossible. The test fails if anyone reintroduces it.
+
+That used to make this suite the exception. It no longer is: **no suite hands the
+token to C2**, because C2 has no entrypoint that could use ownership since the guardian
+passthrough was removed, and a handover would strand `mint`/`pause`/`changeOwner`
+permanently. Refill was simply the first to need what is now the rule everywhere.
 
 ## Verification status
 
@@ -193,21 +198,42 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 
 | suite | run green on devnet | runtime | last verified |
 |---|---|---|---|
-| `magi_full_devnet_test.go` | yes | 2433s | 2026-08-19 sweep |
-| `magi_multiepoch_devnet_test.go` | yes | 2030s | 2026-08-19 sweep |
-| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | 2026-08-19 sweep |
-| `magi_tokenomics_devnet_test.go` | yes | 591s | 2026-08-19 sweep |
-| `magi_stake_lp_airdrop_devnet_test.go` | yes | 999s | **2026-08-20** |
-| `magi_refill_devnet_test.go` | yes | 1006s | 2026-08-19 sweep |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1205s | 2026-08-19 sweep |
-| `magi_reporter_devnet_test.go` | yes | 721s | 2026-08-19 sweep |
-| `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
-| `magi_cosigned_devnet_test.go` | yes | 755s | 2026-08-19 sweep |
-| `magi_scale_devnet_test.go` | yes | — | the run behind `docs/rc-costs.md` |
+| `magi_full_devnet_test.go` | yes | 1710s | **2026-08-23** |
+| `magi_multiepoch_devnet_test.go` | yes | 2060s | **2026-08-21** |
+| `magi_rogue_reporter_devnet_test.go` | yes | 1509s | **2026-08-21** |
+| `magi_tokenomics_devnet_test.go` | yes | 598s | **2026-08-20** |
+| `magi_stake_lp_airdrop_devnet_test.go` | yes | 992s | **2026-08-21** |
+| `magi_refill_devnet_test.go` | yes | 1049s | **2026-08-21** |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1269s | **2026-08-23** |
+| `magi_reporter_devnet_test.go` | yes | 788s | **2026-08-23** |
+| `magi_realbroadcast_devnet_test.go` | yes | 727s | **2026-08-23** |
+| `magi_cosigned_devnet_test.go` | yes | 733s | **2026-08-21** |
+| `magi_scale_devnet_test.go` | yes | 1296s | **2026-08-23** |
 | `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
 
-Two rows carry a date because they were run on 2026-08-20 and timed directly:
-`magi_stake_lp_airdrop` (998.59s) and `magi_realbroadcast` (939.34s). The rows marked
+**Every runnable suite — all eleven — has been run against the build with no C2 token
+authority, and every runtime in this table was measured on that build.** Nothing here
+is inherited from an earlier sweep any more. 2026-08-20: `magi_tokenomics` (597.61s),
+`magi_realbroadcast` (939.34s), `magi_full` (1679.36s). 2026-08-21:
+`magi_cosigned` (732.70s), `magi_reporter` (757.27s), `magi_stake_lp_airdrop`
+(991.91s), `magi_refill` (1048.50s), `magi_scale` (1051.52s), `magi_lp_multiepoch`
+(1330.68s), `magi_rogue_reporter` (1508.65s), `magi_multiepoch` (2059.71s).
+
+`magi_upgrade` is the only one not covered, and it cannot run here at all — see the
+note above about `feat/contract-update-timelock`.
+
+**`magi_rogue_reporter` went red and is green again.** It failed on 2026-08-21 with
+`rogue ended up with 1949999 (started 950000)`: the rogue is also the deployer, so
+once the token stopped being handed to C2 it OWNED the token, and the "reporter mints"
+attack the suite exists to refuse became an authorised call — +999,999, exactly the
+attack payload. Fixed by giving the token to the TREASURY at bootstrap: a real account
+that is not a reporter, which keeps `mint` owner-only and out of the rogue's reach
+without handing it to a contract that could never use it. Green at 1508.65s.
+
+If you write a suite where an attacker is also the deployer, say so at the top and
+check every owner-only assertion against it. This one held for months only because a
+handover happened to move the token out of the attacker's hands, and nothing recorded
+that the coverage depended on it. The rows marked
 "2026-08-19 sweep" are from that sweep's record rather than a run timed here — treat
 their runtimes as indicative. `magi_stake_lp_airdrop` had been sitting at "pending
 re-run on the merged layout" since 2026-08-04; it now passes on the merged layout,
@@ -219,6 +245,17 @@ merge: `c5ID` is the `c3-distributor` wasm, and every `c6.*`/`c7.*` call is sent
 `c1ID`, which absorbed the airdrop and the yield. The suite deploys FOUR wasm — token,
 c1-staking, c2-emission, c3-distributor — so it is on the current layout despite
 reading otherwise.
+
+**Re-run 2026-08-23 after the reporter changed.** Five suites drive the reporter
+BINARY, so their greens said nothing once it was rebuilt: `json_metadata` decoding,
+per-block pacing, the policy digest and the chunked backlog scan all landed that day.
+All five were re-run and all five pass — `magi_scale` matters most of them, because
+its 9-page book is roughly the size that first hit Hive's 5-ops-per-block cap, and it
+is the pacing fix's real proof.
+
+A suite that runs a BINARY is only as verified as the binary it ran. The
+`ReporterBinaryIsNewerThanItsSources` guard catches a STALE binary; nothing catches a
+freshly-built one that no suite has exercised yet.
 
 **Do not mark a suite verified by reasoning about its source. Run it.**
 

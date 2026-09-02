@@ -124,10 +124,17 @@ type RawPost struct {
 	// "0.000 HBD". Hive has no boolean for this, so the amount IS the flag.
 	MaxAcceptedPayout string `json:"max_accepted_payout"`
 
-	// JSONMetadata carries the post's tags and the app that published it. It is a
-	// STRING containing JSON, not nested JSON, and it is author-controlled — a
-	// malformed blob is normal and must never fail an epoch.
-	JSONMetadata string `json:"json_metadata"`
+	// JSONMetadata carries the post's tags and the app that published it.
+	//
+	// It is USUALLY a string containing JSON, but real nodes also return it as a
+	// nested OBJECT, and it is author-controlled besides. Declared `string`, one
+	// object-form post failed the whole result array — not that post, every post in
+	// the window — with "cannot unmarshal object into Go struct field
+	// RawPost.json_metadata of type string", taking the epoch with it.
+	//
+	// RawMessage accepts whatever arrives so the decode cannot fail here; parseMeta
+	// makes sense of it and degrades to empty metadata on anything it cannot read.
+	JSONMetadata json.RawMessage `json:"json_metadata"`
 }
 
 // pinned reports whether the community has pinned this post to the top of its feed.
@@ -169,14 +176,29 @@ type meta struct {
 // fail an epoch.
 func (p RawPost) parseMeta() meta {
 	var m meta
-	if p.JSONMetadata == "" {
+	raw := bytes.TrimSpace(p.JSONMetadata)
+	if len(raw) == 0 || string(raw) == "null" {
 		return m
+	}
+	// Two encodings arrive from real nodes. A JSON string holds the metadata as
+	// escaped JSON and has to be unwrapped once before it parses; an object is the
+	// metadata already. Unwrap only the string case, and only one level — a string
+	// that does not itself hold JSON is just malformed author input.
+	if raw[0] == '"' {
+		var inner string
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return m
+		}
+		if strings.TrimSpace(inner) == "" {
+			return m
+		}
+		raw = []byte(inner)
 	}
 	var loose struct {
 		Tags any `json:"tags"`
 		App  any `json:"app"`
 	}
-	if err := json.Unmarshal([]byte(p.JSONMetadata), &loose); err != nil {
+	if err := json.Unmarshal(raw, &loose); err != nil {
 		return m
 	}
 	switch t := loose.Tags.(type) {

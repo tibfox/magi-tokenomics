@@ -265,8 +265,8 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 	mustCall(1, tokenID, "init", `{"name":"MAGI","symbol":"MAGI","decimals":0,"maxSupply":"100000000"}`, "token.init")
 	waitKey(tokenID, "isInit", "token init")
 	mustCall(1, c2ID, "init", fmt.Sprintf(
-		`{"token":"%s","kind":"0","epochLen":"5","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","timelock":"5","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s3","vetoThreshold":"1","buckets":"author:contract:%s:10000"}`,
-		tokenID, owner, d.cfg.WitnessPrefix, c3ID), "c2.init")
+		`{"token":"%s","kind":"0","epochLen":"5","baseAnnual":"1000000","blocksPerYear":"100","dustBucket":"author","buckets":"author:contract:%s:10000"}`,
+		tokenID, c3ID), "c2.init")
 	waitKey(c2ID, "init", "c2 init")
 	mustCall(1, c3ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","funder":"%s","treasury":"hive:%s4","guardianMode":"0","guardianAuth":"hive:%s3","guardianThreshold":"1"}`,
@@ -280,16 +280,15 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		owner), "c3.addChannel author")
 	waitKey(c3ID, "ch_bucket|author", "author channel registered")
 
-	// hand the token to C2 — from here C2 is the only minter
 	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
-	// and approve C2 BEFORE handing the token over — only the owner may mint.
+	// and approve C2. The token is NOT handed to C2: with the guardian passthrough
+	// gone it has no entrypoint that could use ownership, so a handover would strand
+	// mint/pause/changeOwner permanently.
 	mustCall(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	mustCall(1, tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-	mustCall(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token.changeOwner")
 
-	waitKeyValue(tokenID, "owner", c2ID, "token owner handover")
-	t.Logf("token owner is now contract:%s", c2ID)
+	t.Logf("token owner stays with the deployer hive:%s (never handed to C2)", owner)
 
 	// ---------------- PHASE 2: honest operation ----------------
 	// distributeEpoch is permissionless — poke it from the ATTACKER's node to
@@ -351,8 +350,6 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		// never runs.
 		{c3ID, "claim", book.ClaimPayload(t, "author", "0", "hive:"+attacker), "attacker double-claims"},
 		{c3ID, "pullFunding", `{"channel":"author","epoch":"00"}`, "attacker non-canonical epoch"},
-		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker queues token takeover"},
-		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, attacker), "attacker executes token takeover"},
 	}
 	for _, a := range attacks {
 		if _, err := d.CallContract(ctx, 2, a.id, a.action, a.payload); err != nil {
@@ -369,8 +366,10 @@ func TestDevnetMagiTokenomics(t *testing.T) {
 		t.Fatalf("read token state after attacks: %v", err)
 	}
 	t.Logf("token state after attacks: %v", stAfter)
-	if got := fmt.Sprintf("%v", stAfter["owner"]); !strings.Contains(got, c2ID) {
-		t.Fatalf("SECURITY FAILURE: token owner changed to %q", got)
+	// The token is NOT handed to C2 any more, so the owner must still be the DEPLOYER.
+	// The property is unchanged — no attacker seized it — only the expected value is.
+	if got := fmt.Sprintf("%v", stAfter["owner"]); !strings.Contains(got, "hive:"+owner) {
+		t.Fatalf("SECURITY FAILURE: token owner changed to %q, want hive:%s", got, owner)
 	}
 
 	c3after, err := d.GetStateByKeys(ctx, 1, c3ID,

@@ -243,7 +243,7 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	}
 	// reader(), not a.vsc: every other chain read in this file goes through it, and
 	// bypassing it here made the epoch selector the one path a test could not stub.
-	state, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys)
+	state, err := a.stateInChunks(keys)
 	if err != nil {
 		return 0, err
 	}
@@ -255,6 +255,36 @@ func (a *app) oldestUnfinalized(latest uint64) (uint64, error) {
 	// Everything in the window is finalized/cancelled. Return the latest closed
 	// epoch so the caller reports "already fully submitted" rather than an error.
 	return latest, nil
+}
+
+// stateInChunks reads keys in batches the API will accept.
+//
+// The window is configurable precisely so an operator can reach a backlog after
+// downtime, but the read was a single call and getStateByKeys refuses more than 100
+// keys. Raising lookback far enough to matter therefore failed outright with
+// "accepts at most 100 keys, got 4907" — the documented recovery, unusable for any
+// backlog longer than 100 epochs.
+//
+// Chunking here rather than clamping the window: clamping would silently do less
+// than the operator asked for, and the epoch that fell outside would stay stranded
+// with its funding — which is the failure the configurable window exists to prevent.
+func (a *app) stateInChunks(keys []string) (map[string]string, error) {
+	const maxKeys = 100 // vscapi.StateGet refuses more
+	out := make(map[string]string, len(keys))
+	for start := 0; start < len(keys); start += maxKeys {
+		end := start + maxKeys
+		if end > len(keys) {
+			end = len(keys)
+		}
+		part, err := a.reader().StateGet(a.cfg.Contracts.Distributor, keys[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range part {
+			out[k] = v
+		}
+	}
+	return out, nil
 }
 
 // nextUnfinalizedAfter returns the first unfinalized epoch strictly after `ep`,
@@ -909,6 +939,17 @@ func (a *app) selectWorkableEpoch(epochFlag string) (*computed, submit.Plan, err
 	}
 }
 
+// Hive's per-account custom_op limit is 5 per block. Stay one under it so a
+// retried or duplicated broadcast cannot push a batch over the edge, and wait a
+// little more than a block so a slow head does not fold two batches into one.
+const (
+	customOpsPerBlock = 4
+	hiveBlockInterval = 3500 * time.Millisecond
+)
+
+// pace is a variable so a test can observe the waiting without spending it.
+var pace = time.Sleep
+
 func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	c, pl, err := a.selectWorkableEpoch(epochFlag)
 	if err != nil {
@@ -981,6 +1022,19 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 	}
 
 	sentThisRun := map[string]bool{}
+	// Hive caps custom_json operations per ACCOUNT per BLOCK, and a real share book
+	// is far more calls than that cap: 1,504 accounts came to 26 pages, and even the
+	// sizing in docs/rc-costs.md (500 earners -> 9 pages) needs 13 calls with the
+	// keeper poke, the pull, the root and the finalize. Broadcasting them back to
+	// back put five in one block and the sixth was rejected by the chain itself:
+	//
+	//   Assert Exception: insert_info.first->second <= HIVE_CUSTOM_OP_BLOCK_LIMIT
+	//
+	// Nothing was lost — the run stops at the first failure and resume picks it up —
+	// but an operator had to notice an opaque consensus assert and re-run by hand,
+	// repeatedly, to land one epoch. Pace instead: stay a call under the cap, then
+	// wait out a block before the next batch.
+	sentInBlock := 0
 	for _, call := range remaining {
 		// FINALIZE IS IRREVERSIBLE. A share page can be broadcast successfully and
 		// still revert on L2 — the broadcaster returns the L1 txid and nothing about
@@ -998,6 +1052,10 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 			}
 		}
 		fmt.Printf("-> %s %s\n", call.Action, call.Payload)
+		if doBroadcast && sentInBlock >= customOpsPerBlock {
+			pace(hiveBlockInterval)
+			sentInBlock = 0
+		}
 		txid, serr := b.Send(call)
 		if serr != nil {
 			// Stop at the first failure rather than pressing on: the calls are
@@ -1009,6 +1067,7 @@ func (a *app) cmdRun(epochFlag string, doBroadcast bool) error {
 			continue // never record progress for a call that was not sent
 		}
 		fmt.Printf("   tx %s\n", txid)
+		sentInBlock++
 		sentThisRun[call.Action+"/"+strconv.Itoa(submit.PageOf(call))] = true
 		if merr := prog.MarkDone(pl.Epoch, call.Action, submit.PageOf(call)); merr != nil {
 			return fmt.Errorf("call %s landed as %s but progress could not be saved: %w",

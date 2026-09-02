@@ -177,12 +177,13 @@ func TestDevnetMagiMultiEpoch(t *testing.T) {
 	// C2 no longer mints — it PULLS each epoch's emission from an account that has
 	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
 	// only the owner may mint. (C2 no longer needs to own the token at all; the
-	// handover below is kept only so the guardian token-op passthrough stays live.)
+	// token is NOT handed to C2: since the guardian passthrough was removed it has no
+	// entrypoint that could use ownership, so a handover would strand the token's own
+	// mint/pause/changeOwner permanently.)
 	call(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	call(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-	call(tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token -> C2")
-	waitValue(tokenID, "owner", "contract:"+c2ID, "token owner")
+	waitValue(tokenID, "owner", "hive:"+owner, "token owner stays with the deployer")
 
 	call(c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+

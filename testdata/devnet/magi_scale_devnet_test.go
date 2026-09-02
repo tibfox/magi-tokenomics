@@ -445,9 +445,6 @@ func TestDevnetMagiScale(t *testing.T) {
 	callOwner(tokenID, "mint", `{"amount":"100000000"}`, "mint the emission pool")
 	callOwner(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"100000000"}`, c2ID), "approve C2 to draw the pool")
-	callOwner(tokenID, "changeOwner",
-		fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token ownership -> C2")
-
 	// ONE reward pool, so ONE bucket taking the whole emission.
 	initAs(c2ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"%d",`+

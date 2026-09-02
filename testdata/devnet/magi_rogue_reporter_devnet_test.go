@@ -179,21 +179,35 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 	// ---------------- PHASE 2: init ----------------
 	callN(1, tokenID, "init", `{"name":"Rogue","symbol":"ROG","decimals":0,"maxSupply":"100000000"}`, "token init")
 	waitKey(tokenID, "owner", "token owner")
-	// C2 no longer mints — it PULLS each epoch's emission from an account that has
-	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
-	// only the owner may mint. (C2 no longer needs to own the token at all; the
-	// handover below is kept only so the guardian token-op passthrough stays live.)
+	// C2 does not mint — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 first; only the owner may mint.
 	callN(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	callN(1, tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-	callN(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token -> C2")
+
+	// THEN move ownership OFF the rogue — to the treasury, not to C2.
+	//
+	// The rogue is w(1): the malicious reporter AND the deployer, so it starts out
+	// owning the token. PHASE C asserts that the reporter role cannot mint or seize
+	// the token, and both of those are owner-only — so while the rogue owns it, those
+	// two attacks are AUTHORISED and the mint succeeds (measured: the rogue gained
+	// exactly 999,999, its whole attack payload). The suite used to be saved from this
+	// by handing the token to C2, which is no longer done and would strand the token's
+	// owner functions if it were.
+	//
+	// The treasury is the right holder: a real account that is not a reporter, which
+	// is also what a live deployment looks like. It keeps mint owner-only and out of
+	// the rogue's reach without giving it to a contract that could never use it. The
+	// rogue keeps the POOL BALANCE — it is C2's approved `source` — so the emission
+	// path is unchanged.
+	callN(1, tokenID, "changeOwner",
+		fmt.Sprintf(`{"newOwner":"hive:%s"}`, treasury), "token ownership -> treasury (NOT the rogue)")
+	waitValue(tokenID, "owner", "hive:"+treasury, "token owner moved off the rogue")
 	callN(1, c2ID, "init", fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
-			`"blocksPerYear":"1000","dustBucket":"content","timelock":"5",`+
-			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
-			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
+			`"blocksPerYear":"1000","dustBucket":"content",`+
 			`"buckets":"content:contract:%s:5000,lp:contract:%s:5000"}`,
-		tokenID, epochLen, guardian, treasury, c3ID, c3ID), "C2 init")
+		tokenID, epochLen, c3ID, c3ID), "C2 init")
 	genesis, _ := strconv.ParseUint(waitKey(c2ID, "cfg_genesis", "C2 genesis"), 10, 64)
 	t.Logf("genesis=%d epochLen=%d", genesis, epochLen)
 
@@ -389,8 +403,12 @@ func TestDevnetMagiRogueReporter(t *testing.T) {
 			t.Fatalf("REPORTER CHANGED STATE %s: %q -> %q", k, want, got)
 		}
 	}
-	if o := stateOf(tokenID, "owner"); o != "contract:"+c2ID {
-		t.Fatalf("token owner drifted to %q", o)
+	// The token stays with the TREASURY, where the bootstrap put it precisely so the
+	// rogue would not own it. The property is unchanged — nobody seized it — and the
+	// expected holder is whoever the bootstrap left it with, which is not the rogue
+	// and is not C2.
+	if o := stateOf(tokenID, "owner"); o != "hive:"+treasury {
+		t.Fatalf("token owner drifted to %q, want hive:%s", o, treasury)
 	}
 
 	// honest claims still work after all of that

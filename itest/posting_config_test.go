@@ -11,8 +11,8 @@ import (
 // A posting key must not configure a deployment either.
 //
 // TestPriv_PostingKeyCannotUsePrivilegedPaths already covers the FUND-MOVING owner
-// entrypoints — airdropBatch, queueTokenOp — and they are guarded: both call
-// auth.RequireActive after the owner check. The CONFIG entrypoints are not, and they
+// entrypoint — airdropBatch — and it is guarded: it calls auth.RequireActive after
+// the owner check. The CONFIG entrypoints are not, and they
 // were never tested: init, adoptSchedule, addChannel and setPolicy each compare
 // msg.caller to contract.owner and stop there.
 //

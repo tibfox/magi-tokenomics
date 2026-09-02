@@ -33,11 +33,16 @@ import (
 //     (submitShares: entries; submitRoot: root+":"+totalShares; sweepUnallocated:
 //     the DECLARED amount)
 //
-// And one shape that looks unsafe but is not: cancelTokenOp's payload embeds
-// qseq|<opKey>, a chain value — but that same value is also in the ACTION KEY, so a
-// change starts a NEW round rather than splitting an existing one. That is the
-// distinction this guard encodes: a chain read is only dangerous when it can move
-// underneath a single action key.
+// And a third shape that looks unsafe but is not: a chain value that is ALSO in the
+// action key, so a change starts a NEW round rather than splitting an existing one.
+// That is the distinction this guard encodes — a chain read is only dangerous when it
+// can move underneath a single action key.
+//
+// No site instantiates that third shape today. Its example was cancelTokenOp, whose
+// payload embedded qseq|<opKey>, and C2's guardian passthrough was removed along with
+// C2's authority over the token. The shape stays documented because the guard still
+// has to distinguish it: a future entrypoint may need it, and the rule is about what
+// the payload can do, not about which entrypoints happen to exist.
 
 var attestChainRead = regexp.MustCompile(`\b(getBig|getStr|getU|present|StateGetObject)\s*\(`)
 

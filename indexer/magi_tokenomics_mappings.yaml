@@ -250,7 +250,6 @@ contracts:
           base_annual: numeric
           blocks_per_year: numeric
           dust_bucket: string
-          timelock: numeric
           bucket_count: numeric
           buckets: string
           emission_per_epoch: numeric
@@ -264,7 +263,6 @@ contracts:
           base_annual: "$.attributes.base_annual"
           blocks_per_year: "$.attributes.blocks_per_year"
           dust_bucket: "$.attributes.dust_bucket"
-          timelock: "$.attributes.timelock"
           bucket_count: "$.attributes.bucket_count"
           buckets: "$.attributes.buckets"
           emission_per_epoch: "$.attributes.emission_per_epoch"
@@ -331,26 +329,6 @@ contracts:
       # Guardian passthrough. `phase` is queue / cancel / execute; `committed` is
       # false while an Attest-mode action is still short of its threshold, which is
       # the state an operator most needs to see.
-      - log_type: "tokenop"
-        table: "magi_tokenomics_tokenop_events"
-        schema:
-          phase: string
-          op: string
-          nonce: string
-          op_key: string
-          new_owner: string
-          ready_height: numeric
-          committed: bool
-        parse: "json"
-        fields:
-          phase: "$.attributes.phase"
-          op: "$.attributes.op"
-          nonce: "$.attributes.nonce"
-          op_key: "$.attributes.op_key"
-          new_owner: "$.attributes.new_owner"
-          ready_height: "$.attributes.ready_height"
-          committed: "$.attributes.committed"
-
   # =========================================================
   # C3 — channel distributor
   # =========================================================

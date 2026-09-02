@@ -210,12 +210,12 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	waitKey(c1ID, "init", "c6 init")
 
 	// C2 draws each epoch from an approved pool instead of minting, so mint the pool
-	// and approve C2 BEFORE handing the token over — only the owner may mint.
+	// and approve C2. The token is NOT handed to C2: with the guardian passthrough
+	// gone it has no entrypoint that could use ownership, so a handover would strand
+	// mint/pause/changeOwner permanently.
 	send(1, tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	send(1, tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-	send(1, tokenID, "changeOwner", fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token.changeOwner -> C2")
-	waitVal(tokenID, "owner", c2ID, "token ownership handover")
 
 	// ---------------- PHASE 2: honest operation ----------------
 	// C6 airdrop (owner only)
@@ -351,8 +351,10 @@ func TestDevnetMagiStakeLPAirdrop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read token owner: %v", err)
 	}
-	if got := fmt.Sprintf("%v", stTok["owner"]); !strings.Contains(got, c2ID) {
-		t.Fatalf("SECURITY FAILURE: token owner changed to %q", got)
+	// The token stays with the DEPLOYER — it is no longer handed to C2, which has no
+	// entrypoint that could use ownership. The property is unchanged: nobody seized it.
+	if got := fmt.Sprintf("%v", stTok["owner"]); !strings.Contains(got, "hive:"+ownerAcct) {
+		t.Fatalf("SECURITY FAILURE: token owner changed to %q, want hive:%s", got, ownerAcct)
 	}
 
 	t.Log("DEVNET RESULT: C1/C5/C6/C7 honest flow succeeded; every outsider attack rejected on-chain")

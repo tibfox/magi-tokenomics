@@ -22,11 +22,69 @@ fee, so roles that share a balance and a history share a contract.
 |---|---|---|
 | C0 | *(external)* `magi_token-contract` | the token itself. **Unmodified** — the framework drives it through its existing allowance interface, it does not fork it. |
 | C1 | `c1-staking` | **staking + staking yield + the launch airdrop.** Staking keeps height checkpoints so any epoch's stake is provable after the fact; yield pays stakers pro-rata straight from that history, with no reporter; the airdrop imports a launch snapshot and can credit stake directly. |
-| C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Needs **no** authority over the token. |
+| C2 | `c2-emission` | draws each epoch's emission from an approved pool and splits it across named buckets. Holds **no** authority over the token — it is an allowance draw, and it never calls `mint`. |
 | C3 | `c3-distributor` | reward **channels** — content, LP, or anything else a tenant adds. Each channel has its own funding bucket, share book, challenge window and reporter authority, so one deployed contract serves them all. |
 | — | `reporter/` | off-chain service that turns Hive activity (or DEX liquidity history) into share lists ([README](reporter/README.md)) |
 | — | `auth/`, `adapter/`, `events/` | shared modules: multi-party authorisation, value-asset abstraction, contract log emission |
 | — | `indexer/` | drop-in mappings so magi-mongo-indexer picks up any deployment ([README](indexer/README.md)) |
+
+**Why C2 and C3 stay separate — DECIDED, not open.** Weighed and settled on
+2026-08-23: they stay separate until `vsc.update_contract` is proven, and the reason
+is the first bullet below. Revisit it then, not before.
+
+The merge that produced this layout folded six
+contracts into three on one rule — roles that share a balance and a history share a
+contract — because every deploy and every update costs a real fee. C2 and C3 share
+neither, and three things break if they are merged:
+
+- **C2 is a fan-out point and C3 is one consumer of several.** C1 pulls the yield
+  bucket and C3 pulls a channel's bucket, both through `claimBucket`, and a bucket may
+  also pay a plain `hive:` address — which is how treasury and governance grants are
+  paid. Merged, C1's yield funding would depend on the reward-channel contract, so
+  staking would depend on the distributor; and a plain-address bucket would be served
+  by a contract whose entire job is share books.
+- **Blast radius.** C3 is the highest-churn contract here — channels, policies,
+  reporter authority, and the merkle-root change that touched 25 files. C2 is the one
+  that can hold token authority. Merged, every distributor bugfix becomes an update to
+  the contract that can pause the token.
+- **A staking-only deployment is C1 + C2 with no distributor at all**, and is
+  supported: `pullFunding` with no bucket refuses rather than sitting half-wired.
+  Merged, those tenants carry channel code and config they never use and pay the
+  deploy fee for it.
+
+The seam costs a cross-contract `pullFunding` — **1,103–1,225 RC**, against roughly
+70,000 RC for a 500-earner epoch's `submitShares`, so about 1.5%. Merging would save
+that plus one 10 HBD deploy fee. Fee cost is what drove the six-into-three merge, so
+this is the same argument that won last time; it loses here because this is the one
+seam where the separation protects something.
+
+**The condition to revisit is specific.** The first bullet is the whole case, and it
+dissolves once in-place `vsc.update_contract` is trustworthy — a fresh distributor
+deploy is then never needed, so C1 can never be stranded by one. Objections two and
+three are real but would not outweigh the fee saving on their own. So the question is
+not "is merging tempting" but "is the upgrade path proven yet", and today it is not:
+`magi_upgrade` cannot even run against a stock go-vsc-node checkout.
+
+**C2 has no authority over the token, by design.** Emission never needed any: C2
+draws from `cfg_source` with `token.transferFrom` against an allowance and never calls
+`mint`. The token stays with its owner, or goes to a DAO.
+
+C2 used to carry a guardian passthrough — `queueTokenOp`/`executeTokenOp`/
+`cancelTokenOp` for `pause`/`unpause`/`changeOwner`, behind a quorum, a timelock and a
+veto. **It was removed.** Two reasons:
+
+- **A timelocked pause is close to useless for what a pause is for.** The timelock was
+  mandatory (`timelock must be > 0 blocks`) and queueing emitted an event, so the queue
+  was public *and* delayed. Against an exploit already in progress — the case a pause
+  exists for — an attacker watching the queue simply acts first.
+- **It was the only thing making C2 privileged**, and it made every C2 update an
+  update to a contract that could pause the token. Removing it took C2 from 1,037 to
+  834 lines and from ten entrypoints to seven, and deleted the guardian, veto and
+  timelock config along with it.
+
+What replaces it is the ordinary answer: leave the token with its owner, renounce
+ownership for an immutable token, or hand it to a DAO or multisig that acts on its own
+governance timeline. Any of those is a better custodian than an emission contract.
 
 **Why yield and the airdrop live in C1.** Yield never read anything except C1 — stake
 at two heights, and the exact `Σ min(aᵢ,bᵢ)` denominator from its drawdown
@@ -72,7 +130,7 @@ GOTOOLCHAIN=go1.25.3 go build -o reporter/bin/reporter ./reporter/cmd/reporter
 ## Test
 
 ```bash
-GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 195 contract tests, real wasm engine
+GOTOOLCHAIN=go1.25.3 go test ./itest/ -count=1 -p 1     # 189 contract tests, real wasm engine
 GOTOOLCHAIN=go1.25.3 go test ./reporter/... -count=1    # 174 reporter tests, no network
 GOTOOLCHAIN=go1.25.3 go test ./indexer/... -count=1     # 13 indexer/proofsvc tests
 ```
@@ -93,7 +151,57 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
 
 # Deployment
 
-## Order matters — five constraints that are easy to get wrong
+## Check the plan before you spend anything
+
+```sh
+GOTOOLCHAIN=go1.25.3 go build -o setup/bin/magi-setup ./setup/cmd/magi-setup
+setup/bin/magi-setup template > deploy.json      # a starting plan that already passes
+$EDITOR deploy.json                              # your accounts, cadence, splits
+setup/bin/magi-setup check -plan deploy.json     # refuses every mistake it can find
+setup/bin/magi-setup steps -plan deploy.json     # the ordered sequence, with reasons
+
+# after deploying the four contracts, record their ids and execute:
+setup/bin/magi-setup run -plan deploy.json -ids ids.json               # dry run
+MAGI_SETUP_WIF=5J... setup/bin/magi-setup run -plan deploy.json \
+  -ids ids.json -net-id vsc-testnet -chain-id <hive chain id> -broadcast
+```
+
+`run` executes the init sequence — it does not deploy. The four deploys need
+go-vsc-node's `contract-deployer` (they carry a BLS storage proof), so record the ids
+it prints in `ids.json` and `run` takes it from there. It refuses any plan that would
+not pass `check`, stops at the first failure rather than continuing past it, and
+**pauses rather than skipping** when a step needs a signer it does not hold — the
+pool holder's `approve` and each staker's own `stake` are not the deployer's to make,
+and silently skipping one leaves emission with nothing to draw.
+
+It paces at 4 calls per block for the same reason the reporter does: Hive caps
+custom_json at 5 per account per block, and exceeding it is a consensus assert that
+says nothing about rate limits.
+
+Read the constraints below — but do not rely on reading them. They are all
+documented and the first real deployment still broke two, then a later one broke a
+third. Each is an immutable-at-init choice whose consequence appears several steps
+later: `check` catches them while the plan is still a file you can edit, instead of
+at the transaction that made them permanent. It reports every problem at once,
+because these are paid for in deploy fees.
+
+```
+3 problem(s) — NOTHING has been deployed, fix these first:
+
+ ✗ c1.allow (constraint 6): staked payouts need "c3" in C1's allow list, and allow is
+   written ONLY at C1.init — nothing can add to it later. Without it every claim on a
+   staked channel aborts at the point of payment, not at configuration time
+ ✗ channels.content.reporter.auth (constraint 7): [hive:tibfox] are also C3 guardians.
+   addChannel refuses this, and the guardian is already immutable by then
+ ✗ channels.content.policy (constraint 5): an attest-mode channel MUST declare a policy
+   digest (`reporter policy-digest -config F`)
+```
+
+Contracts are named symbolically in the plan (`c1`, `c3`) rather than by id, which is
+what lets the whole thing be checked before any of them exist — an id only appears
+after 10 HBD has been spent, and by then the mistake is already permanent.
+
+## Order matters — seven constraints that are easy to get wrong
 
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
@@ -104,7 +212,7 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
    becomes `contract.owner`, and every `init` aborts unless `msg.caller == owner`.
 3. **Fund C1's airdrop float and stake into C1 BEFORE initialising C2.** Two reasons:
    - the airdrop pays out of C1's *own* balance, so the float must be transferred in
-     while the deployer still owns the token — i.e. before `changeOwner` hands it to C2.
+     before anything else spends the deployer's supply.
    - C2's `genesis` defaults to the block it is initialised at, and yield credits
      `min(stakeAt(epochStart), stakeAt(epochEnd))`, so stake that arrives *after*
      C2's init is zero at both boundaries of epoch 0 — that epoch's yield bucket
@@ -119,6 +227,31 @@ go test -v -run TestDevnetMagiFull -timeout 60m ./tests/devnet/   # whole system
    with one exception: `setPolicy`. An **attest-mode channel must declare a
    `policy`** digest (`reporter policy-digest`), because that is the mode where two
    reporters can disagree — see [Reporter policy](#reporter-policy-two-honest-reporters-must-never-disagree).
+6. **If you want staked payouts, C1's `allow` must contain the distributor AT C1's
+   INIT.** `allow` is the `stakeFor` allowlist and it is written in exactly one place —
+   `Init`. Nothing can add to it afterwards. `C3.stakeContract` + `stakedBps` make each
+   claim pay part of its value as stake via `C1.stakeFor`, which aborts with *caller not
+   in stakeFor allowlist* for anyone outside that list. So an empty `allow` does not
+   disable the feature quietly — it makes **every claim on that channel abort at the
+   point of payment**, discovered only when the first earner tries to get paid.
+
+   This inverts the deploy order: C3 must be DEPLOYED (so its id exists) before C1 is
+   INITIALISED, even though C1 is initialised first. Deploy all four contracts up
+   front, then init. If you do not want staked payouts, leave `allow` empty and leave
+   `stakeContract`/`stakedBps` unset — the two must agree.
+
+7. **Choose C3's guardian LAST, and never make it an account you need as a reporter.**
+   The guardian set is fixed at `C3.init`, and `addChannel` refuses a channel whose
+   reporter authorities intersect it — *reporter and guardian authorities must be
+   disjoint*, deliberately, so one coalition cannot both publish fraud and refuse to
+   cancel it. The trap is that this is only discovered at `addChannel`, after the
+   guardian is already immutable: if you have two accounts and make one the guardian,
+   you cannot build a 2-of-2 cosigned channel on that C3 at all. Count the keys you
+   actually hold before picking the guardian.
+
+   > Both of these were hit on the first real testnet deployment, not in review — each
+   > one is an immutable-at-init choice whose consequence only appears several steps
+   > later. See [`docs/testnet-deployment.md`](docs/testnet-deployment.md).
 
 ## Recommended sequence
 
@@ -140,9 +273,8 @@ C3.addChannel {"channel":"content","policy":"<reporter policy-digest>", ...}
 C3.addChannel {"channel":"lp","policy":"<reporter policy-digest>", ...}
   # policy is REQUIRED for reporterMode 2 (attest), optional elsewhere
 
-# token ownership is now OPTIONAL: C2 does not need it. Hand it over only if you
-# want C2's timelocked guardian pause/changeOwner passthrough; otherwise renounce
-# it or give it to a DAO.
+# Do NOT hand token ownership to C2 — it has no entrypoint that would use it.
+# Leave it with the owner, renounce it, or give it to a DAO.
 ```
 
 After this, each epoch runs: `C2.distributeEpoch` → `C3.pullFunding` →
@@ -523,10 +655,10 @@ labelled accordingly rather than claiming more than it shows.
 
 ## Status
 
-All three contracts + reporter are complete, audited, and green: **195 contract tests,
+All three contracts + reporter are complete, audited, and green: **189 contract tests,
 174 reporter tests, 13 indexer tests, and twelve devnet suites** — the full-system run, the
 adversarial suites, multi-epoch operation, batched refills, LP rewards, the guardian
-token-op passthrough, full-scale distribution, and the in-place upgrade path.
+full-scale distribution, and the in-place upgrade path.
 
 Every state transition is emitted as a contract log in the format
 `magi-mongo-indexer` ingests, so a deployment is queryable over GraphQL without
@@ -620,8 +752,10 @@ succeeded, which is the only loss the chain cannot otherwise show you.
   `shares.app_tax.beneficiary`. Both guards are mutation-tested, and the consumers are
   pinned in their own packages so the validator cannot outlive the rule it enforces.
 - **Three of those seven were refuted, not fixed.** Re-reading the audit journal (see
-  below) turned up verdicts that already disposed of them. `executeTokenOp`'s
-  single-veto execution is real but is not the veto's problem: the same bare membership
+  below) turned up verdicts that already disposed of them. (The `executeTokenOp` one is
+  now moot regardless — the guardian passthrough was removed, so the entrypoint no
+  longer exists; the verdict is kept because the reasoning is the record.)
+  `executeTokenOp`'s single-veto execution is real but is not the veto's problem: the same bare membership
   check already lets any one of N guardians fire a matured op, execution moves nothing
   in the ledger, and `cancelTokenOp` has no height gate, so the coalition's block stays
   live until the instant of execution and can never hold an `unpause`. Bucket-name

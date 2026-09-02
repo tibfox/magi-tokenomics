@@ -114,15 +114,6 @@ func Init(payload *string) *string {
 		sdk.Abort("emission rounds to zero: baseAnnual*epochLen must be >= blocksPerYear")
 	}
 	set("cfg_dustBucket", f(payload, "dustBucket"))
-	// guardian auth config
-	set("cfg_gMode", f(payload, "guardianMode"))
-	set("cfg_gAuth", f(payload, "guardianAuth"))
-	set("cfg_gThr", f(payload, "guardianThreshold"))
-	tl := pu(f(payload, "timelock"))
-	if tl == 0 {
-		sdk.Abort("timelock must be > 0 blocks")
-	}
-	setU("cfg_timelock", tl)
 	// maxCatch: epochs distributed per poke. Measured cost ~995 RC/epoch (1 bucket)
 	// and ~1437 RC/epoch (3 buckets) plus ~280 base, so size it against the rc_limit
 	// the keeper will actually use (e.g. 50 epochs x 3 buckets ~ 72k RC). Pokes are
@@ -133,20 +124,6 @@ func Init(payload *string) *string {
 			sdk.Abort("maxCatch must be 1..1000")
 		}
 		setU("cfg_maxCatch", mcv)
-	}
-	auth.Validate(guardianCfg()) // reject bad guardian policy up front
-	// Separate VETO authority for cancelTokenOp — must be able to abort a queued
-	// op even if the guardian set is compromised, so it must be DISJOINT (CRIT-1).
-	set("cfg_vMode", f(payload, "vetoMode"))
-	set("cfg_vAuth", f(payload, "vetoAuth"))
-	set("cfg_vThr", f(payload, "vetoThreshold"))
-	auth.Validate(vetoCfg())
-	for _, g := range splitComma(f(payload, "guardianAuth")) {
-		for _, v := range splitComma(f(payload, "vetoAuth")) {
-			if g != "" && g == v {
-				sdk.Abort("guardian and veto authorities must be disjoint")
-			}
-		}
 	}
 
 	// buckets
@@ -253,7 +230,6 @@ func Init(payload *string) *string {
 		Big("base_annual", parseBig(getStr("cfg_baseAnnual"))).
 		U64("blocks_per_year", by).
 		Str("dust_bucket", dust).
-		U64("timelock", tl).
 		U64("bucket_count", n).
 		Str("buckets", f(payload, "buckets")).
 		Big("emission_per_epoch", emissionForEpoch(0)).
@@ -543,122 +519,6 @@ func ClaimBucket(payload *string) *string {
 	return str(`{"claimed":"` + amt.String() + `"}`)
 }
 
-// ---- guardian passthrough (auth + timelock, R6/D6) -----------------------
-
-// queueTokenOp — guardian queues a token op behind the timelock.
-// {"op":"pause"|"unpause"|"changeOwner","newOwner":"..."}
-//
-//go:wasmexport queueTokenOp
-func QueueTokenOp(payload *string) *string {
-	assertInit()
-	opKey := opKeyOf(payload)
-	if present("tl|" + opKey) {
-		sdk.Abort("op already queued") // HIGH-2: no re-queue to escape a spent veto
-	}
-	committed := auth.Authorize(guardianCfg(), "guardian", opKey, opKey, mustCaller(), reqAuths())
-	ready := uint64(0)
-	if committed {
-		seq := getU("qseq|"+opKey) + 1
-		setU("qseq|"+opKey, seq) // monotonic: distinct veto key even same-block
-		ready = blockHeight() + getU("cfg_timelock")
-		setU("tl|"+opKey, ready)
-	}
-	// Emitted whether or not it committed: in Attest mode a queue that is still
-	// gathering signatures is exactly the state an operator needs to see, and the
-	// return value alone is not recorded anywhere.
-	emitTokenOp("queue", payload, opKey, ready, committed)
-	return str(`{"queued":` + boolStr(committed) + `}`)
-}
-
-// emitTokenOp logs one phase of the guardian passthrough. `committed` is false
-// while an Attest-mode action is still short of its threshold.
-func emitTokenOp(phase string, payload *string, opKey string, ready uint64, committed bool) {
-	events.New("tokenop").
-		Str("phase", phase).
-		Str("op", f(payload, "op")).
-		Str("nonce", f(payload, "nonce")).
-		Str("op_key", opKey).
-		Str("new_owner", f(payload, "newOwner")).
-		U64("ready_height", ready).
-		Bool("committed", committed).
-		Emit()
-}
-
-// executeTokenOp — after the timelock elapses, perform the op on the token.
-//
-//go:wasmexport executeTokenOp
-func ExecuteTokenOp(payload *string) *string {
-	assertInit()
-	opKey := opKeyOf(payload)
-	if !present("tl|" + opKey) {
-		sdk.Abort("op not queued")
-	}
-	// HIGH-2: not permissionless — a matured op must be executed by the guardian
-	// (or the veto), so "let it expire" is a real option for honest parties.
-	c := mustCaller()
-	ra := reqAuths()
-	if !isAuthority(guardianCfg(), c) && !isAuthority(vetoCfg(), c) {
-		sdk.Abort("only guardian or veto may execute")
-	}
-	auth.RequireActive(c, ra)
-	ready := getU("tl|" + opKey)
-	if blockHeight() < ready {
-		sdk.Abort("timelock not elapsed")
-	}
-	// HIGH-2: queued ops expire, so a stale approval cannot be fired years later.
-	if blockHeight() > ready+getU("cfg_timelock") {
-		sdk.StateDeleteObject("tl|" + opKey)
-		sdk.Abort("queued op expired")
-	}
-	sdk.StateDeleteObject("tl|" + opKey)
-	op := f(payload, "op")
-	tok := getStr("cfg_token")
-	switch op {
-	case "pause":
-		sdk.ContractCall(tok, "pause", "", nil)
-	case "unpause":
-		sdk.ContractCall(tok, "unpause", "", nil)
-	case "changeOwner":
-		no := f(payload, "newOwner")
-		validateAddr(no)
-		sdk.ContractCall(tok, "changeOwner", `{"newOwner":"`+no+`"}`, nil)
-	default:
-		sdk.Abort("unknown op")
-	}
-	emitTokenOp("execute", payload, opKey, ready, true)
-	return ok()
-}
-
-// cancelTokenOp — guardian aborts a queued token op during its timelock window,
-// making the delay actually usable against a maliciously-queued changeOwner (H1).
-// Same {"op","nonce","newOwner"} identifying the queued op.
-//
-//go:wasmexport cancelTokenOp
-func CancelTokenOp(payload *string) *string {
-	assertInit()
-	opKey := opKeyOf(payload)
-	if !present("tl|" + opKey) {
-		sdk.Abort("op not queued")
-	}
-	// HIGH-3: `unpause` restores liveness — a paused token freezes every claim AND
-	// stakers' own withdrawals. The veto must not be able to hold funds hostage.
-	if f(payload, "op") == "unpause" {
-		sdk.Abort("unpause cannot be vetoed")
-	}
-	// Bind the veto to THIS queue instance (its maturity height), so a re-queued
-	// op cannot inherit an already-committed cancellation (HIGH-2).
-	ck := "cancelop:" + opKey + ":" + getStr("qseq|"+opKey)
-	// VETO authority (not the guardian) — a compromised guardian must not be able
-	// to block its own cancellation (CRIT-1).
-	if !auth.Authorize(vetoCfg(), "veto", ck, ck, mustCaller(), reqAuths()) {
-		emitTokenOp("cancel", payload, opKey, getU("tl|"+opKey), false)
-		return str(`{"cancelled":false}`)
-	}
-	sdk.StateDeleteObject("tl|" + opKey)
-	emitTokenOp("cancel", payload, opKey, 0, true)
-	return ok()
-}
-
 // ---- queries -------------------------------------------------------------
 
 //go:wasmexport scheduleInfo
@@ -742,69 +602,6 @@ func asset() adapter.Asset {
 		k = adapter.EditionedNFT
 	}
 	return adapter.Asset{Kind: k, Contract: getStr("cfg_token"), TokenId: getStr("cfg_tokenId")}
-}
-
-// isAuthority reports whether acct is in a policy's authority set.
-func isAuthority(cfg auth.Config, acct string) bool {
-	for _, a := range cfg.Authorities {
-		if a == acct {
-			return true
-		}
-	}
-	return false
-}
-
-func vetoCfg() auth.Config { return authCfgFrom("cfg_vMode", "cfg_vAuth", "cfg_vThr") }
-
-func guardianCfg() auth.Config { return authCfgFrom("cfg_gMode", "cfg_gAuth", "cfg_gThr") }
-
-func authCfgFrom(mk, ak, tk string) auth.Config {
-	var mode auth.Mode
-	switch getStr(mk) {
-	case "0":
-		mode = auth.ModeSingle
-	case "1":
-		mode = auth.ModeCosigned
-	case "2":
-		mode = auth.ModeAttest
-	default:
-		sdk.Abort("auth: unknown mode") // MED-1: no silent downgrade to Single
-	}
-	thr, terr := strconv.Atoi(getStr(tk))
-	if terr != nil || thr < 1 {
-		sdk.Abort("auth threshold must be a positive integer")
-	}
-	return auth.Config{Mode: mode, Authorities: splitComma(getStr(ak)), Threshold: thr}
-}
-
-// opKeyOf builds a unique-per-invocation key. A caller-supplied numeric `nonce`
-// makes repeatable ops (pause/unpause) work in Attest mode — without it the
-// attest doneKey would permanently disable the op after first use (H-B). All
-// M guardians must share the same nonce to tally.
-func opKeyOf(payload *string) string {
-	op := f(payload, "op")
-	if op != "pause" && op != "unpause" && op != "changeOwner" {
-		sdk.Abort("unknown op") // LOW-2: reject junk ops at queue time
-	}
-	nonce := f(payload, "nonce")
-	if nonce == "" {
-		sdk.Abort("nonce required")
-	}
-	for i := 0; i < len(nonce); i++ {
-		if nonce[i] < '0' || nonce[i] > '9' {
-			sdk.Abort("nonce must be numeric")
-		}
-	}
-	if len(nonce) > 1 && nonce[0] == '0' {
-		sdk.Abort("nonce must be canonical")
-	}
-	key := op + ":" + nonce
-	if op == "changeOwner" {
-		no := f(payload, "newOwner")
-		validateAddr(no) // reject '|'/'"'/'\\' at queue time (LOW)
-		key = key + ":" + no
-	}
-	return key
 }
 
 func reqAuths() []string {
@@ -906,12 +703,6 @@ func hasPrefix(s, p string) bool {
 	return true
 }
 
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
 func ok() *string          { return str(`{"success":true}`) }
 func str(s string) *string { return &s }
 

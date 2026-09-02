@@ -142,8 +142,8 @@ func TestDevnetMagiFull(t *testing.T) {
 			t.Fatalf("node %d could not deposit anything — it would run on the 10k free tier alone", node)
 		}
 	}
-	// Node 5 is the C2 guardian and drives the token-op passthrough in PHASE 9. An
-	// unfunded guardian would abort on RC rather than on policy, which proves nothing.
+	// Node 5 carries the C1/C3 guardian roles. An unfunded guardian would abort on RC
+	// rather than on policy, which proves nothing.
 	for _, node := range []int{1, 2, 3, 5} {
 		fundNode(node)
 	}
@@ -291,16 +291,16 @@ func TestDevnetMagiFull(t *testing.T) {
 
 	callOwner(c1ID, "airdropBatch", fmt.Sprintf(
 		`{"batchId":"1","entries":"hive:%s:600,hive:%s:400"}`, holderA, holderB), "C1 airdrop")
-	// C2 no longer mints — it PULLS each epoch's emission from an account that has
-	// approved it. Mint the pool and approve C2 BEFORE handing the token over, since
-	// only the owner may mint. (C2 no longer needs to own the token at all; the
-	// handover below is kept only so the guardian token-op passthrough stays live.)
+	// C2 does not mint — it PULLS each epoch's emission from an account that has
+	// approved it. Mint the pool and approve C2 first; only the owner may mint.
+	//
+	// The token is NOT handed to C2. It has no entrypoint that could use ownership
+	// since the guardian passthrough was removed, so handing it over would strand
+	// mint/pause/changeOwner permanently — an unrecoverable deployment, and one the
+	// README explicitly warns against. The owner keeps it.
 	callOwner(tokenID, "mint", `{"amount":"1000000"}`, "mint the emission pool")
 	callOwner(tokenID, "approve",
 		fmt.Sprintf(`{"spender":"contract:%s","amount":"1000000"}`, c2ID), "approve C2 to draw the pool")
-
-	callOwner(tokenID, "changeOwner",
-		fmt.Sprintf(`{"newOwner":"contract:%s"}`, c2ID), "token ownership -> C2")
 
 	// ---------------- PHASE 3: stake (BEFORE C2 init) ----------------
 	//
@@ -319,11 +319,9 @@ func TestDevnetMagiFull(t *testing.T) {
 	// One emission, split three ways: content 50%, LP 30%, yield 20%.
 	initAs(c2ID, fmt.Sprintf(
 		`{"token":"%s","kind":"0","epochLen":"%d","maxCatch":"5","baseAnnual":"1000000",`+
-			`"blocksPerYear":"1000","dustBucket":"content","timelock":"60",`+
-			`"guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1",`+
-			`"vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1",`+
+			`"blocksPerYear":"1000","dustBucket":"content",`+
 			`"buckets":"content:contract:%s:5000,lp:contract:%s:3000,yield:contract:%s:2000"}`,
-		tokenID, epochLen, guardian, treasury, c3ID, c3ID, c1ID), "cfg_genesis", "C2 init")
+		tokenID, epochLen, c3ID, c3ID, c1ID), "cfg_genesis", "C2 init")
 	genesis := bigOf(waitKey(c2ID, "cfg_genesis", "C2 genesis")).Uint64()
 	t.Logf("C2 genesis=%d epochLen=%d -> epoch 0 = blocks %d..%d",
 		genesis, epochLen, genesis, genesis+epochLen-1)
@@ -609,9 +607,11 @@ func TestDevnetMagiFull(t *testing.T) {
 		}
 	}
 
-	// token ownership must still sit with C2 after all of that
-	if o := stateOf(tokenID, "owner"); o != "contract:"+c2ID {
-		t.Fatalf("token owner drifted to %q, want contract:%s", o, c2ID)
+	// Token ownership must still sit with the DEPLOYER after all of that. It is no
+	// longer handed to C2 — C2 has no entrypoint that could use it — so the property
+	// under test is that nobody SEIZED it, which is what it always really was.
+	if o := stateOf(tokenID, "owner"); o != "hive:"+owner {
+		t.Fatalf("token owner drifted to %q, want hive:%s", o, owner)
 	}
 
 	// ---------------- PHASE 7b: a malicious STAKED HOLDER ----------------
@@ -775,15 +775,9 @@ func TestDevnetMagiFull(t *testing.T) {
 		{c1ID, "claimYield", `{"epoch":"0"}`, "C1 claim yield with no stake"},
 
 		// --- C2 emission: the mint authority ---
-		{c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","epochLen":"1","baseAnnual":"9999999","blocksPerYear":"1","dustBucket":"x","timelock":"1","guardianMode":"0","guardianAuth":"hive:%s","guardianThreshold":"1","vetoMode":"0","vetoAuth":"hive:%s","vetoThreshold":"1","buckets":"x:hive:%s:10000"}`, tokenID, outsider, treasury, outsider), "C2 re-init (would redirect every bucket)"},
+		{c2ID, "init", fmt.Sprintf(`{"token":"%s","kind":"0","epochLen":"1","baseAnnual":"9999999","blocksPerYear":"1","dustBucket":"x","buckets":"x:hive:%s:10000"}`, tokenID, outsider), "C2 re-init (would redirect every bucket)"},
 		{c2ID, "claimBucket", `{"epoch":"0"}`, "C2 claimBucket impersonating a bucket target"},
 		{c2ID, "claimBucket", `{"epoch":"00"}`, "C2 claimBucket with a non-canonical epoch alias"},
-		{c2ID, "queueTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 queue a token takeover"},
-		// NB: this aborts on the "not queued" guard, BEFORE the authority check, so it
-		// proves only that an unqueued op cannot execute. PHASE 9 covers the real
-		// authority and timelock path with an op that genuinely exists.
-		{c2ID, "executeTokenOp", fmt.Sprintf(`{"op":"changeOwner","nonce":"1","newOwner":"hive:%s"}`, outsider), "C2 execute a never-queued takeover (aborts early — see PHASE 9)"},
-		{c2ID, "cancelTokenOp", `{"op":"pause","nonce":"1"}`, "C2 cancel a token op"},
 
 		// --- C3 content distributor ---
 		{c3ID, "init", distInitPayload, "C3 re-init (would repoint reporter+treasury)"},
@@ -863,82 +857,7 @@ func TestDevnetMagiFull(t *testing.T) {
 	if v := stateOf(c1ID, "stake|hive:"+outsider); v != "" && v != "0" {
 		t.Fatalf("outsider acquired stake: %s", v)
 	}
-	// The queued-op table must be empty. The key is tl|<op>:<nonce>[:<newOwner>]
-	// (opKeyOf), NOT tl|<op>|<nonce> — a wrong key here would read empty and pass
-	// vacuously, which is worse than no assertion at all.
-	tlKey := fmt.Sprintf("tl|changeOwner:1:hive:%s", outsider)
-	if v := stateOf(c2ID, tlKey); v != "" {
-		t.Fatalf("outsider queued a token op (%s = %s)", tlKey, v)
-	}
 	t.Logf("adversarial sweep clean: no state moved, outsider holds nothing")
-
-	// ---------------- PHASE 9: the guardian token-op passthrough ----------
-	//
-	// Until now this path had NEVER been exercised successfully anywhere. Both devnet
-	// suites only ever attempted executeTokenOp for an op that was never queued, so
-	// they aborted on the "not queued" guard — an earlier check — and proved nothing
-	// about the timelock or the authority. C2 holds the token here, so the passthrough
-	// is the only route to pause/changeOwner, and it is the framework's single largest
-	// retained power. Drive it end to end.
-	//
-	// The timelock is 60 blocks (~180s), and that is a TEST REQUIREMENT rather than a
-	// policy preference. It has to satisfy BOTH ends of a narrow target:
-	//
-	//   too short and "execute early" is not early. Each devnet call sleeps 9s and
-	//     broadcast adds more, so against a 5-block (15s) timelock the early call
-	//     landed 19s after the queue, already matured — the guardian legitimately
-	//     executed it and the assertion reported a bypass that never happened.
-	//   too long a WAIT and the op expires. executeTokenOp accepts only
-	//     [ready, ready+timelock] (c2 HIGH-2: a stale approval must not fire years
-	//     later), so a 40-block timelock gave a 120s window that ~222s of test
-	//     sequence overshot.
-	//
-	// 60 blocks puts maturity at ~180s and expiry at ~360s, so a ~210-265s execute
-	// sits mid-window with margin at both ends.
-	// NB: every read here goes through waitKey/waitValue. A bare read straight after
-	// callN's 9s sleep is not enough for the state to be visible, and reading too
-	// early is the single most common way to write a devnet assertion that reports a
-	// contract bug that does not exist.
-	const pauseOp = `{"op":"pause","nonce":"9"}`
-	callN(5, c2ID, "queueTokenOp", pauseOp, "guardian queues pause")
-	t.Logf("queued: tl|pause:9 = %s", waitKey(c2ID, "tl|pause:9", "queued pause op"))
-
-	// EARLY execution must be refused. This is the assertion the old negative could
-	// not make: the op genuinely exists, so reaching the timelock check is guaranteed.
-	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes BEFORE the timelock")
-
-	// and a non-guardian must not be able to execute a legitimately queued op
-	if _, err := d.CallContract(ctx, 3, c2ID, "executeTokenOp", pauseOp); err == nil {
-		time.Sleep(9 * time.Second)
-	}
-
-	// Give both of those ample time to land before concluding they did nothing —
-	// asserting an absence that merely outran block production proves nothing.
-	notPausedUntil := time.Now().Add(45 * time.Second)
-	for time.Now().Before(notPausedUntil) {
-		if v := stateOf(tokenID, "paused"); v == "1" {
-			t.Fatal("TIMELOCK BYPASSED: the token paused before the delay elapsed, " +
-				"or an outsider executed the guardian's queued op")
-		}
-		time.Sleep(6 * time.Second)
-	}
-	t.Logf("early execute and outsider execute both correctly left the token unpaused")
-
-	// Wait past maturity (~180s at timelock 60) while staying well inside expiry
-	// (~360s). The window is [ready, ready+timelock] and ONE parameter sets both ends.
-	time.Sleep(200 * time.Second)
-	callN(5, c2ID, "executeTokenOp", pauseOp, "guardian executes AFTER the timelock")
-	waitValue(tokenID, "paused", "1", "token paused via the C2 passthrough")
-	t.Logf("PASSTHROUGH OK: guardian paused the token through C2 after the timelock")
-
-	// Restore, proving the round trip both ways rather than leaving the token wedged.
-	const unpauseOp = `{"op":"unpause","nonce":"10"}`
-	callN(5, c2ID, "queueTokenOp", unpauseOp, "guardian queues unpause")
-	waitKey(c2ID, "tl|unpause:10", "queued unpause op")
-	time.Sleep(200 * time.Second)
-	callN(5, c2ID, "executeTokenOp", unpauseOp, "guardian executes unpause")
-	waitValue(tokenID, "paused", "0", "token unpaused via the C2 passthrough")
-	t.Logf("PASSTHROUGH OK: and unpaused again — the retained power works in both directions")
 
 	t.Logf("FULL SYSTEM DEVNET PASSED — the token + all three contracts + reporter, one emission split 3 ways")
 	t.Logf("hive fixture calls: %v", fixture.hits)
