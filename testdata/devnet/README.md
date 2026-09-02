@@ -198,17 +198,17 @@ the table said so. A reader saw ten green rows for a layout none of them had run
 
 | suite | run green on devnet | runtime | last verified |
 |---|---|---|---|
-| `magi_full_devnet_test.go` | yes | 1679s | **2026-08-20** |
+| `magi_full_devnet_test.go` | yes | 1710s | **2026-08-23** |
 | `magi_multiepoch_devnet_test.go` | yes | 2060s | **2026-08-21** |
 | `magi_rogue_reporter_devnet_test.go` | yes | 1509s | **2026-08-21** |
 | `magi_tokenomics_devnet_test.go` | yes | 598s | **2026-08-20** |
 | `magi_stake_lp_airdrop_devnet_test.go` | yes | 992s | **2026-08-21** |
 | `magi_refill_devnet_test.go` | yes | 1049s | **2026-08-21** |
-| `magi_lp_multiepoch_devnet_test.go` | yes | 1331s | **2026-08-21** |
-| `magi_reporter_devnet_test.go` | yes | 757s | **2026-08-21** |
-| `magi_realbroadcast_devnet_test.go` | yes | 939s | **2026-08-20** |
+| `magi_lp_multiepoch_devnet_test.go` | yes | 1269s | **2026-08-23** |
+| `magi_reporter_devnet_test.go` | yes | 788s | **2026-08-23** |
+| `magi_realbroadcast_devnet_test.go` | yes | 727s | **2026-08-23** |
 | `magi_cosigned_devnet_test.go` | yes | 733s | **2026-08-21** |
-| `magi_scale_devnet_test.go` | yes | 1052s | **2026-08-21** |
+| `magi_scale_devnet_test.go` | yes | 1296s | **2026-08-23** |
 | `magi_upgrade_devnet_test.go` | **cannot run here** | — | needs go-vsc-node `feat/contract-update-timelock` |
 
 **Every runnable suite — all eleven — has been run against the build with no C2 token
@@ -245,6 +245,17 @@ merge: `c5ID` is the `c3-distributor` wasm, and every `c6.*`/`c7.*` call is sent
 `c1ID`, which absorbed the airdrop and the yield. The suite deploys FOUR wasm — token,
 c1-staking, c2-emission, c3-distributor — so it is on the current layout despite
 reading otherwise.
+
+**Re-run 2026-08-23 after the reporter changed.** Five suites drive the reporter
+BINARY, so their greens said nothing once it was rebuilt: `json_metadata` decoding,
+per-block pacing, the policy digest and the chunked backlog scan all landed that day.
+All five were re-run and all five pass — `magi_scale` matters most of them, because
+its 9-page book is roughly the size that first hit Hive's 5-ops-per-block cap, and it
+is the pacing fix's real proof.
+
+A suite that runs a BINARY is only as verified as the binary it ran. The
+`ReporterBinaryIsNewerThanItsSources` guard catches a STALE binary; nothing catches a
+freshly-built one that no suite has exercised yet.
 
 **Do not mark a suite verified by reasoning about its source. Run it.**
 
