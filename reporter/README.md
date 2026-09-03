@@ -1,5 +1,36 @@
 # reporter — off-chain share reporter
 
+> **TL;DR** — The contracts cannot read Hive, so this service does: it scores posts
+> (or LP positions), builds a share book, and commits it as a merkle root. **One
+> reporter per channel.** It never holds funds — it publishes a claim and the contract
+> pays the earner. Run `reporter epoch` first: it refuses to submit unless your config
+> matches what the channel was configured with, which is what stops two reporters
+> scoring the same epoch by different rules.
+>
+> Three auth modes, and the difference matters operationally:
+
+```mermaid
+flowchart TB
+    subgraph M0["mode 0 — Single"]
+        A0["one reporter signs"] --> B0["applies immediately"]
+    end
+    subgraph M1["mode 1 — Cosigned"]
+        A1["N authorities in ONE transaction"] --> B1["applies, or aborts if any is missing"]
+    end
+    subgraph M2["mode 2 — Attest"]
+        A2["each authority sends its OWN transaction"] --> B2{"threshold<br/>reached?"}
+        B2 -- "no" --> C2["applied:false —<br/>the vote is recorded, nothing commits"]
+        B2 -- "yes" --> D2["applied:true — commits once"]
+        A2 -. "a second, different payload<br/>from the same authority" .-> E2["REFUSED —<br/>one vote per authority per action"]
+    end
+    style M2 fill:#fef7e0,stroke:#fbbc04
+```
+
+> In Cosigned a lone signer **aborts**; in Attest a lone attestation **succeeds and
+> records a vote**. Both are correct, and confusing them makes a healthy quorum look
+> broken. Note also that every attested action needs its own quorum — `submitShares`,
+> `submitRoot` and `finalizeEpoch` are each voted separately.
+
 The contracts in this repo cannot read Hive. The distributor only knows how to accept
 a list of `account:shares` pairs and pay claims against it. This service is the piece
 that watches Hive (or the DEX indexer), computes those shares, and pushes them on

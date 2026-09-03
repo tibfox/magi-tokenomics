@@ -9,9 +9,14 @@
 // external calls to bucket targets) so a hostile/paused target cannot freeze emission
 // (H-1). Each target PULLS its slice via claimBucket. Exhaustion PAUSES rather than
 // ends the schedule: a poke that cannot fund the next epoch writes no state, and a
-// refill resumes and pays the backlog. The guardian passthrough (pauseToken/
-// changeTokenOwner) is auth-gated (all modes) + timelocked (R6/D6) and applies only
-// if the token was in fact handed to C2.
+// refill resumes and pays the backlog.
+//
+// C2 holds NO token authority. It once carried a guardian passthrough
+// (queueTokenOp/executeTokenOp/cancelTokenOp for pause/unpause/changeOwner, behind a
+// quorum and a timelock); that was removed deliberately, because a timelocked pause is
+// close to useless for what a pause is for, and because the alternative — leaving the
+// token's own owner key to act directly — is both faster and a smaller attack surface.
+// See the README, "C2 has no authority over the token, by design".
 package main
 
 import (
@@ -33,9 +38,9 @@ const (
 // ---- init ----------------------------------------------------------------
 
 // Init config (all economic params immutable after init, D2):
-// {"token","kind","tokenId","genesis","epochLen","baseAnnual","blocksPerYear","dustBucket",
+// {"token","kind","tokenId","source","genesis","epochLen","baseAnnual","blocksPerYear",
 //
-//	"guardianMode","guardianAuth","guardianThreshold","timelock",
+//	"dustBucket","maxCatch",
 //	"buckets":"name:target:weightBps,name:target:weightBps,..."}
 //
 //go:wasmexport init

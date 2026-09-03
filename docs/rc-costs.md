@@ -1,5 +1,15 @@
 # RC cost per function
 
+> **TL;DR** — RC capacity is **your VSC-ledger HBD in millis, plus a 10,000 free
+> tier**, and a spend thaws back over ~5 days. So daily epochs need roughly 3x one
+> epoch's cost held as balance; weekly needs 1x. Rough sizing: **500 earners on daily
+> epochs ≈ 54 HBD** on the reporter account. An idle keeper poke costs the 100 RC
+> floor, so a keeper's bill tracks epoch cadence, not how often it polls. Every number
+> below is measured against the real wasm engine, not estimated.
+>
+> If a call fails with no useful message, check RC before suspecting the contract —
+> an exhausted account's calls return `ok=false` and look exactly like a rejection.
+
 Measured, not estimated. These are the **real metered costs** the chain applies —
 `RcUsed = ceil(gas / CYCLE_GAS_PER_RC)`, floor 100 — captured by running every
 callable function against the real wasm engine.

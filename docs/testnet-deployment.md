@@ -1,5 +1,23 @@
 # The first real deployment
 
+> **TL;DR** — Three deployments on vsc-testnet, all owner `hive:tester0`, covering
+> single / cosigned / attest modes. Everything before this was devnet-only. Read this
+> before your own first deployment, because **the traps are all immutable-at-init
+> choices whose consequence only appears several steps later**:
+>
+> 1. **Deploy all four contracts before initialising any of them.** C1's `allow` list
+>    is written once at init and is the `stakeFor` allowlist — if C3's id is not in it,
+>    every staked payout aborts at payment time.
+> 2. **Pick the guardian last.** C3's guardian is fixed at init, and `addChannel`
+>    requires reporter and guardian to be *disjoint*; guardian = your only spare key
+>    makes a cosigned channel impossible on that C3.
+> 3. **An attest channel must carry a policy digest** or `addChannel` aborts with no
+>    useful signal.
+>
+> Two things that look like contract faults and are not: **RC exhaustion** (a spent
+> account's calls return `ok=false`, indistinguishable from a rejection — check
+> `getAccountRC` first), and a **failed deploy costs nothing**, so just retry it.
+
 vsc-testnet, 2026-08-21, from the build with no C2 token authority (11 of 11 runnable
 devnet suites green). Everything before this was devnet-only. Written down because the
 things that went wrong were all **immutable-at-init choices whose consequence appears

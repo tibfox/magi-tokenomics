@@ -1,3 +1,11 @@
+> **TL;DR** — Copy `magi_tokenomics_mappings.yaml` into magi-mongo-indexer's
+> `internal/config/events/` and restart. Nothing needs editing per deployment: each
+> contract announces itself with an init event and is adopted automatically. The
+> chain no longer stores per-account shares — the distributor commits a merkle root
+> and logs the leaves — so **this indexer is the only thing that can answer "what did
+> this account earn?"**, and `proofsvc` is what answers it. It refuses to serve a
+> proof it cannot reconcile against the committed root.
+
 # Indexing this framework
 
 The three contracts emit a log for every state transition, in the format

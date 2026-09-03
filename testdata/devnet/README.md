@@ -1,5 +1,19 @@
 # Devnet tests (docker multi-node)
 
+> **TL;DR** — Real docker devnet: HAF + Mongo + multiple magi nodes, real Hive block
+> production. They live under `testdata/` because the Go tool ignores that directory —
+> which is what lets them be `package devnet` (they need go-vsc-node's unexported
+> internals) without breaking `go build ./...`. The cost of that trick: **nothing
+> compiles or vets these files**, so a broken format string here is found only by
+> running it.
+>
+> Three rules, each of which has already cost a real outage or a wasted run:
+> **runs are namespaced** — keep it that way, or a cleanup wipes a production DB;
+> **never select containers by name substring** (`--filter name=` once removed the
+> production deployers — use the compose project label); and **rebuild wasm before a
+> sweep, never during one**, or half the suites run against a different binary than
+> the other half.
+
 These are the end-to-end tests that run the framework against a **real** VSC devnet:
 HAF + Mongo + multiple magi nodes in docker, with real Hive block production.
 

@@ -1,5 +1,18 @@
 # Hive-Engine reward-pool settings, and how this framework supports each
 
+> **TL;DR** — Every SCOT reward-pool field is accounted for below, with BBHO's value
+> and where it lives here. The split to remember: **three settings are on-chain
+> because they cannot work anywhere else** (emission amount, the bucket percentages,
+> and the staking/unstaking terms) — anything that decides *how tokens move* has to be
+> enforced where the tokens are. Everything else — tags, vote weighting, curation
+> curves, payout windows — is **reporter config**, changeable by editing a file and
+> restarting, with no contract update.
+>
+> Where we differ from SCOT it is stated, not smoothed over. The differences that
+> matter in practice: **claims are pull, not push** (nobody is airdropped their reward,
+> they come and take it), and **the reporter's rules are pinned per epoch** by a policy
+> digest, so a mid-epoch config change cannot silently rescore history.
+
 Every field from the SCOT admin panel, the value BBHO had it set to, and exactly what
 carries it here. Where our answer differs from SCOT's, the difference is stated rather
 than smoothed over.

@@ -1,14 +1,22 @@
-> **Note (2026-07-29):** this archive predates the allowance/pool model. The code
-> below still mints per epoch and latches `terminal` on exhaustion; C2 now pulls
-> from an approved pool and exhaustion only *pauses* emission. Restoring a decaying
-> schedule means changing `emissionForEpoch` only — ignore the `terminal`-latching
-> parts of the checklist below, which no longer describe how C2 behaves.
-
 # Halving (decaying emission) schedule — REMOVED, preserved for possible reuse
 
+> **TL;DR** — Decaying emission was **removed from C2 on 2026-07-26** as out of scope;
+> emission is flat today. This file is a restore kit, not live documentation: the exact
+> deleted code, its config schema and validation, the audit resolutions that governed
+> it, its tests, and a step-by-step checklist — all verified by actually replaying the
+> restore into a scratch repo, not merely written down.
+>
+> **Two things have drifted since**, and both matter if you restore it. The archive
+> predates the allowance/pool model: it mints per epoch and latches `terminal` on
+> exhaustion, whereas C2 now *pulls from an approved pool* and exhaustion only
+> **pauses** emission. So restoring a decaying schedule means changing
+> `emissionForEpoch` **only** — ignore every `terminal`-latching step in the checklist,
+> which no longer describes how C2 behaves.
+
 **Status:** removed from C2 on 2026-07-26 as out of scope. Emission is now flat.
-**This file is the only record.** The repo is not under version control, so the code
-below is not recoverable from git history — do not delete this document.
+**This file is the only record.** The code was removed on 2026-07-26, the day *before*
+this repo's initial commit (`208edd4`, 2026-07-27), so it is not recoverable from git
+history either — do not delete this document.
 
 Everything needed to reintroduce the feature is here: the exact code that was
 deleted, its config schema and validation rules, the audit resolutions that

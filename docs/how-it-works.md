@@ -1,7 +1,43 @@
 # How this system works
 
+> **TL;DR** — You have a token. Every epoch the system releases a fixed amount from a
+> pool, splits it between groups you choose (writers, liquidity providers, stakers, a
+> treasury), and each person comes and **collects their own share**. Nothing is pushed
+> to anyone. Who earned what in a content or LP pool is decided **off-chain** by a
+> reporter and committed on-chain as a merkle root; staking yield needs no reporter at
+> all, because the contract already knows who staked.
+
 Plain-language guide. No code. If you want the exact `init` parameters, see the
 [README](../README.md).
+
+## One epoch, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as keeper<br/>(anyone)
+    participant C2 as C2 emission
+    participant C3 as C3 distributor
+    participant R as reporter<br/>(off-chain)
+    participant E as earner
+
+    K->>C2: distributeEpoch (permissionless poke)
+    Note over C2: draws the epoch's emission from the approved<br/>pool and records what each bucket is owed.<br/>Nothing is sent yet.
+    C3->>C2: pullFunding(epoch)
+    C2-->>C3: the channel bucket's amount
+    R->>R: read Hive posts / LP events,<br/>score them, build the book
+    R->>C3: submitShares (one page at a time)
+    R->>C3: submitRoot (merkle root + totalShares)
+    R->>C3: finalizeEpoch — opens the challenge window
+    Note over C3: a guardian may cancel inside the window —<br/>the funding rolls forward, nobody is paid
+    E->>C3: claim(share, merkle proof)
+    C3-->>E: their share, computed on chain
+```
+
+Two things that picture is meant to make obvious. **The money moves in pulls, never
+pushes** — C2 records what a bucket is owed and the bucket comes and gets it, so one
+broken destination cannot block the others. And **the reporter never holds funds**: it
+publishes a claim, and the contract does the arithmetic when the earner turns up.
 
 ## The one-sentence version
 
@@ -165,16 +201,17 @@ Two rules are enforced by the contracts, not by convention:
 Staked funds sit in the staking contract and **no role can touch them** — not the
 owner, not the guardian.
 
-**Executing a matured operation is not an authorisation step.** Once the guardian
-threshold has queued an operation and its timelock has run, any single member of the
-guardian *or* veto set can fire it. That sounds like more power than it is: the
-executor cannot choose the operation, its nonce or its target — all three are bound
-into the queued key and re-checked on the way through — and execution moves nothing in
-the framework's own ledger. What it means in practice is that letting an operation
-lapse takes *unanimous* inaction across both sets rather than one party sitting out.
-The veto's actual power is unaffected: its cancel has no time gate, so the coalition
-can still block at its threshold right up to the instant of execution, and it can
-never block `unpause`, so a freeze cannot be held.
+**Nothing in this framework can pause or take over your token.** The emission
+contract spends from an allowance you granted it; it is not the token's owner and has
+no way to become one. Pausing the token, or changing who owns it, is done with the
+token's own owner key, outside this framework entirely.
+
+That was a deliberate removal, not an oversight. The emission contract used to carry a
+guardian-operated passthrough that could pause the token behind a quorum and a delay,
+and the delay is what killed it: the queue was public, so against an exploit already
+underway — the one case a pause exists for — whoever was watching the queue simply
+acted first. Removing it also meant every future update to the emission contract stopped
+being an update to something that could pause your token.
 
 ## What you configure
 

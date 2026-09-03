@@ -1,5 +1,45 @@
 # MAGI Tokenomics Framework
 
+> **TL;DR** — Four contracts give a community its own token economy on MAGI/VSC.
+> **C2** draws a fixed emission from an approved pool each epoch and splits it across
+> named buckets. **C1** holds staking and pays stakers pro-rata with no reporter
+> involved. **C3** pays reward *channels* — content, LP, anything — against a merkle
+> root an off-chain **reporter** commits. Every payout is **claimed**, never pushed.
+> All economics come from `init`; nothing is hardcoded.
+>
+> Deploying? The order has traps that are permanent once made — run
+> `magi-setup check` first (below), and read the seven constraints.
+> New to the system? [`docs/how-it-works.md`](docs/how-it-works.md) is the plain-language guide.
+
+```mermaid
+flowchart LR
+    POOL["pool holder<br/>(approves C2)"]
+    TOK["C0 token<br/>external, unmodified"]
+    C2["C2 emission<br/>splits into buckets<br/>no token authority"]
+    C1["C1 staking + yield + airdrop<br/>holds staked principal"]
+    C3["C3 distributor<br/>reward channels"]
+    REP["reporter (off-chain)<br/>scores Hive posts or LP"]
+    EARN["earners<br/>claim their own share"]
+
+    POOL -- "allowance" --> C2
+    C2 -- "transferFrom each epoch" --> TOK
+    C2 -- "owed: yield bucket" --> C1
+    C2 -- "owed: channel bucket" --> C3
+    C2 -. "a bucket may also pay<br/>a plain hive: account" .-> TREAS["treasury / grants"]
+    REP -- "submitShares + merkle root" --> C3
+    C1 -- "pro-rata, no reporter" --> EARN
+    C3 -- "claim with merkle proof" --> EARN
+
+    style C2 fill:#e8f0fe,stroke:#4285f4
+    style C1 fill:#e6f4ea,stroke:#34a853
+    style C3 fill:#fef7e0,stroke:#fbbc04
+```
+
+**Why C2 is its own contract** is visible in that picture: it is a fan-out point with
+several consumers, and C3 is only one of them. It also holds the pool allowance, which
+is why it stays separate from the contract that ingests untrusted reporter data — see
+[Why C2 and C3 stay separate](#why-c2-and-c3-stay-separate--decided-not-open).
+
 Reusable, deploy-per-project contract framework for community token economics on
 MAGI/VSC: scheduled emission split across reward pools, with content, LP and staking
 payouts that each holder claims for themselves. Any project deploys its own instances
@@ -28,9 +68,10 @@ fee, so roles that share a balance and a history share a contract.
 | — | `auth/`, `adapter/`, `events/` | shared modules: multi-party authorisation, value-asset abstraction, contract log emission |
 | — | `indexer/` | drop-in mappings so magi-mongo-indexer picks up any deployment ([README](indexer/README.md)) |
 
-**Why C2 and C3 stay separate — DECIDED, not open.** Weighed and settled on
-2026-08-23: they stay separate until `vsc.update_contract` is proven, and the reason
-is the first bullet below. Revisit it then, not before.
+### Why C2 and C3 stay separate — DECIDED, not open
+
+Weighed and settled on 2026-08-23 and confirmed final on 2026-09-03: **they stay
+separate, on security grounds.** This is not a deferral pending better tooling.
 
 The merge that produced this layout folded six
 contracts into three on one rule — roles that share a balance and a history share a
@@ -43,10 +84,14 @@ neither, and three things break if they are merged:
   paid. Merged, C1's yield funding would depend on the reward-channel contract, so
   staking would depend on the distributor; and a plain-address bucket would be served
   by a contract whose entire job is share books.
-- **Blast radius.** C3 is the highest-churn contract here — channels, policies,
-  reporter authority, and the merkle-root change that touched 25 files. C2 is the one
-  that can hold token authority. Merged, every distributor bugfix becomes an update to
-  the contract that can pause the token.
+- **Blast radius — and this is the security argument.** C3 is the highest-churn
+  contract here (channels, policies, reporter authority, and the merkle-root change
+  that touched 25 files) *and* the one that ingests untrusted, reporter-submitted data.
+  C2 is the one holding the pool allowance — the approval that lets it draw real tokens
+  out of the treasury. Merging puts the contract that **can draw the pool** into the
+  same updatable unit as the contract that **takes untrusted input**, and makes every
+  routine distributor bugfix an update to it. Those two properties should not live
+  behind one address.
 - **A staking-only deployment is C1 + C2 with no distributor at all**, and is
   supported: `pullFunding` with no bucket refuses rather than sitting half-wired.
   Merged, those tenants carry channel code and config they never use and pay the
@@ -58,12 +103,14 @@ that plus one 10 HBD deploy fee. Fee cost is what drove the six-into-three merge
 this is the same argument that won last time; it loses here because this is the one
 seam where the separation protects something.
 
-**The condition to revisit is specific.** The first bullet is the whole case, and it
-dissolves once in-place `vsc.update_contract` is trustworthy — a fresh distributor
-deploy is then never needed, so C1 can never be stranded by one. Objections two and
-three are real but would not outweigh the fee saving on their own. So the question is
-not "is merging tempting" but "is the upgrade path proven yet", and today it is not:
-`magi_upgrade` cannot even run against a stock go-vsc-node checkout.
+**A proven upgrade path would not change this.** An earlier reading had the first
+bullet as the whole case, which made the decision look conditional: once in-place
+`vsc.update_contract` is trustworthy, a fresh distributor deploy is never needed and C1
+can never be stranded by one. That is true, and it is not enough. The second bullet does
+not dissolve with better tooling — a *working* update mechanism makes the merged case
+worse, not better, because it means the contract holding the pool allowance is now the
+one being updated often, in response to reporter-facing bugs. The seam is what keeps a
+distributor compromise away from the allowance, so it stays regardless.
 
 **C2 has no authority over the token, by design.** Emission never needed any: C2
 draws from `cfg_source` with `token.transferFrom` against an allowance and never calls
@@ -203,6 +250,36 @@ after 10 HBD has been spent, and by then the mistake is already permanent.
 
 ## Order matters — seven constraints that are easy to get wrong
 
+Most of these are ordering traps, and the two that cost the most are *inversions* — a
+later step's requirement reaching back into an earlier one that is already immutable.
+They are the dotted arrows here:
+
+```mermaid
+flowchart TD
+    D["deploy ALL FOUR contracts<br/>token, C1, C2, C3 — 10 HBD each"]
+    DEP["deposit HBD for RC capacity"]
+    I0["token.init + mint"]
+    I1["C1.init"]
+    F["fund C1 airdrop float<br/>+ stake into C1"]
+    I2["C2.init — genesis latches HERE"]
+    AS["C1.adoptSchedule"]
+    I3["C3.init — guardian set is FIXED"]
+    AC["C3.addChannel per reward stream"]
+
+    D --> DEP --> I0 --> I1 --> F --> I2 --> AS --> I3 --> AC
+    AC -. "reporter and guardian must be DISJOINT,<br/>discovered only here" .-> I3
+    I1 -. "C1.allow must already contain C3's id,<br/>or every staked claim aborts at payment" .-> D
+    I2 -. "stake arriving after this is zero at both<br/>epoch-0 boundaries — funded, unclaimable" .-> F
+
+    style D fill:#e8f0fe,stroke:#4285f4
+    style I1 fill:#fce8e6,stroke:#ea4335
+    style I2 fill:#fce8e6,stroke:#ea4335
+    style I3 fill:#fce8e6,stroke:#ea4335
+```
+
+The red boxes are the points of no return: `init` is once-only, so anything those
+arrows demand has to be true *before* you make the call, not after you discover it.
+
 1. **Deploy first, deposit second.** Each deploy costs 10 HBD of the deploying
    account's L1 balance. Depositing to the VSC ledger first leaves nothing to pay
    the deploy fee (`get_hbd_balance() >= -delta` assert). RC capacity comes from that
@@ -298,6 +375,34 @@ only `pullFunding`, then stakers claim.
 > derive from on-chain transactions, and Hasura is publicly queryable — so anyone can
 > recompute independently and a guardian can still veto in the challenge window.
 > Details in [`reporter/README.md`](reporter/README.md).
+
+### C2 — the emission controller
+
+```json
+{"token":"vsc1...", "kind":"0", "tokenId":"",
+ "source":"hive:pool", "genesis":"", "epochLen":"28800",
+ "baseAnnual":"1000000000", "blocksPerYear":"10512000",
+ "dustBucket":"yield", "maxCatch":"50",
+ "buckets":"yield:contract:vsc1C1:4000,content:contract:vsc1C3:4000,treasury:hive:treasury:2000"}
+```
+
+| field | meaning |
+|---|---|
+| `source` | the account holding the emission pool. It must `token.approve` C2 for the amount it is willing to release. Defaults to the deploying owner. **Cannot be C2 itself** — the token refuses to approve self, so every poke would report an empty pool with no way to tell it from a real one. |
+| `genesis` | the block epoch 0 starts at. Omit to start now. **This latches the clock**, which is why constraint 3 matters: stake arriving after it is zero at both boundaries of epoch 0. |
+| `epochLen` | blocks per epoch. 28800 ≈ 24h at 3s. |
+| `baseAnnual` / `blocksPerYear` | per-epoch emission is `baseAnnual * epochLen / blocksPerYear`, **integer division**. All three can be individually sane and still truncate to zero — init rejects that rather than shipping a schedule that pays nobody while every poke reports success. |
+| `buckets` | `name:target:weightBps` triples, comma-separated. Weights must sum to **exactly 10000**. Targets must be domain-prefixed (`hive:` / `contract:` / `did:`) and cannot be C2 itself. |
+| `dustBucket` | which bucket absorbs the integer-division remainder. Must name one of the buckets above. |
+| `maxCatch` | epochs distributed per poke, 1..1000, default 50. Pokes are permissionless and repeatable, so a low value just means more pokes — size it against the keeper's `rc_limit` (~1000–1440 RC per epoch per the [RC costs](docs/rc-costs.md)). |
+
+**Bucket names, not targets, identify an allocation.** Two buckets may point at the
+same contract — that is how one distributor instance serves several reward channels —
+but two buckets may never share a *name*, and init refuses it, because allocations are
+recorded per name and the duplicate would silently merge into one owed record with the
+second never separately claimable.
+
+Everything here is immutable after init.
 
 ### C3 — the distributor
 
