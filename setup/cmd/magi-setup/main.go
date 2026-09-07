@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -122,10 +123,28 @@ func load(path string) (*setup.Plan, error) {
 		return nil, err
 	}
 	var p setup.Plan
-	if err := json.Unmarshal(b, &p); err != nil {
+	if err := strictDecode(b, &p); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &p, nil
+}
+
+// strictDecode REFUSES a plan carrying a key the schema does not define.
+//
+// The whole promise of `check` is that it catches a mistake before it costs
+// anything, and a plain Unmarshal quietly drops what it does not recognise — so a
+// misspelled key passed with "no problems found" and the deployment went out
+// configured differently than the file said. This is not hypothetical: a plan
+// written with a top-level "genesis" was accepted and ignored, and "staked_bps"
+// misspelt would silently disable staked payouts, which then fail at the point of
+// payment rather than at configuration time (constraint 6's whole failure mode).
+//
+// Unknown-field errors read as `json: unknown field "genesis"`, which names the
+// offending key — enough for an operator to fix it without reading the source.
+func strictDecode(b []byte, v any) error {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	return d.Decode(v)
 }
 
 // execute runs the ordered calls, pausing where the deployer is not the signer.
@@ -185,7 +204,7 @@ func loadIDs(path string) (setup.Contracts, error) {
 		return nil, err
 	}
 	var c setup.Contracts
-	if err := json.Unmarshal(b, &c); err != nil {
+	if err := strictDecode(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
